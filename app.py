@@ -1,4 +1,4 @@
-"""Public-market research worker; paper mode only. No wallet or order submission."""
+"Public-market research worker with persistent paper simulation only."""
 from __future__ import annotations
 
 import json
@@ -11,12 +11,14 @@ from pathlib import Path
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
+from paper_trading import PaperTrader
+
 GAMMA_URL = "https://gamma-api.polymarket.com/markets?active=true&closed=false&limit=100"
 POLL_SECONDS = max(15, int(os.getenv("POLL_SECONDS", "60")))
 DATA_DIR = Path(os.getenv("DATA_DIR", "data"))
 SNAPSHOTS = DATA_DIR / "market_snapshots.jsonl"
 SIGNALS = DATA_DIR / "candidate_signals.jsonl"
-_lock = threading.Lock()
+_lock = threading.RLock()
 _state = {
     "started_at": datetime.now(timezone.utc).isoformat(),
     "last_poll_at": None,
@@ -27,8 +29,11 @@ _state = {
     "signals_total": 0,
     "mode": "paper_only",
     "worker_running": False,
+    "paper_trading": None,
 }
 _previous: dict[str, float] = {}
+_paper_trader: PaperTrader | None = None
+_paper_state_path: Path | None = None
 
 
 def utc_now() -> str:
@@ -48,7 +53,7 @@ def _list_field(value):
 
 
 def fetch_markets() -> list[dict]:
-    request = Request(GAMMA_URL, headers={"User-Agent": "PolymarketPaperResearchBot/0.8"})
+    request = Request(GAMMA_URL, headers={"User-Agent": "PolymarketPaperResearchBot/0.9"})
     with urlopen(request, timeout=15) as response:
         if response.status != 200:
             raise RuntimeError(f"Gamma API returned HTTP {response.status}")
@@ -86,9 +91,18 @@ def parse_outcomes(markets: list[dict]) -> list[dict]:
 
 
 def append_jsonl(path: Path, record: dict) -> None:
-    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("a", encoding="utf-8") as handle:
         handle.write(json.dumps(record, ensure_ascii=False, allow_nan=False) + "\n")
+
+
+def get_paper_trader() -> PaperTrader:
+    global _paper_trader, _paper_state_path
+    expected_path = (DATA_DIR / "paper_state.json").resolve()
+    if _paper_trader is None or _paper_state_path != expected_path:
+        _paper_trader = PaperTrader(expected_path)
+        _paper_state_path = expected_path
+    return _paper_trader
 
 
 def poll_once() -> dict:
@@ -96,13 +110,13 @@ def poll_once() -> dict:
         _state["last_poll_at"] = utc_now()
     markets = fetch_markets()
     rows = parse_outcomes(markets)
+    paper_result = get_paper_trader().process_snapshot(rows)
     found = []
     for row in rows:
         key = row["token_id"] or f'{row["market_id"]}:{row["outcome"]}'
         old_price = _previous.get(key)
         _previous[key] = row["observed_price"]
         append_jsonl(SNAPSHOTS, row)
-        # This is only an experimental momentum candidate, not a recommendation.
         if old_price is not None:
             delta = row["observed_price"] - old_price
             if abs(delta) >= 0.03:
@@ -116,6 +130,7 @@ def poll_once() -> dict:
                 }
                 append_jsonl(SIGNALS, candidate)
                 found.append(candidate)
+    paper_status = get_paper_trader().snapshot()
     with _lock:
         _state.update({
             "last_success_at": utc_now(),
@@ -123,8 +138,15 @@ def poll_once() -> dict:
             "markets_seen": len(markets),
             "outcomes_seen": len(rows),
             "signals_total": _state["signals_total"] + len(found),
+            "paper_trading": paper_status,
         })
-    return {"markets": len(markets), "outcomes": len(rows), "candidates": len(found)}
+    return {
+        "markets": len(markets),
+        "outcomes": len(rows),
+        "candidates": len(found),
+        "paper": paper_result,
+        "paper_metrics": paper_status["metrics"],
+    }
 
 
 def worker_loop() -> None:
@@ -144,27 +166,29 @@ def worker_loop() -> None:
 
 class Handler(BaseHTTPRequestHandler):
     def _send(self, status: int, payload: dict) -> None:
-        body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+        body = json.dumps(payload, ensure_ascii=False, allow_nan=False).encode("utf-8")
         self.send_response(status)
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", str(len(body)))
         self.send_header("Cache-Control", "no-store")
+        self.send_header("X-Content-Type-Options", "nosniff")
         self.end_headers()
         self.wfile.write(body)
 
     def do_GET(self):
-        if self.path in ("/", "/status", "/health"):
+        if self.path in ("/", "/status", "/health", "/paper"):
             with _lock:
                 snapshot = dict(_state)
             if self.path == "/health":
                 self._send(200, {"ok": True, "mode": "paper_only", "worker_running": snapshot["worker_running"]})
+            elif self.path == "/paper":
+                self._send(200, get_paper_trader().snapshot())
             else:
                 self._send(200, {"service": "Polymarket Paper Research Bot", **snapshot})
         else:
             self._send(404, {"error": "not_found"})
 
     def log_message(self, fmt, *args):
-        # Keep routine HTTP requests quiet; state is available from /status.
         return
 
 

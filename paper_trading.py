@@ -201,7 +201,7 @@ class PaperTrader:
             self._state["daily_date_utc"] = today
             self._state["daily_realized_pnl"] = 0.0
 
-    def process_snapshot(self, rows: list[dict[str, Any]], now: datetime | None = None) -> dict[str, list[dict[str, Any]]]:
+    def process_snapshot(self, rows: list[dict[str, Any]], now: datetime | None = None, *, persist_state: bool = True) -> dict[str, list[dict[str, Any]]]:
         """Update marks, simulate exits, and consider entries from one observed snapshot."""
         current_time = now or utc_now()
         if current_time.tzinfo is None:
@@ -259,11 +259,14 @@ class PaperTrader:
                         events.append(candidate)
                 self._state["last_prices"][key] = round(price, 8)
 
-            # Persist once after processing the full snapshot.
+            # Production polling persists each complete snapshot. Historical backtests
+            # may opt out of repeated disk writes while keeping the identical in-memory
+            # state transitions; they use a fresh disposable portfolio for each segment.
             self._state["recent_events"] = (self._state.get("recent_events", []) + events)[-100:]
-            self._save()
-            for event in events:
-                self._write_event(event)
+            if persist_state:
+                self._save()
+                for event in events:
+                    self._write_event(event)
         return result
 
     def _try_open(self, key: str, row: dict[str, Any], observed_price: float, now: datetime, delta: float) -> tuple[dict[str, Any] | None, str]:

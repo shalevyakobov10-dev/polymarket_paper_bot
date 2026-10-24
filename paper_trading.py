@@ -36,6 +36,22 @@ def finite_float(value: Any) -> float | None:
     return parsed if math.isfinite(parsed) else None
 
 
+def rotate_jsonl_file(path: Path, max_bytes: int, backups: int) -> None:
+    """Rotate an append-only JSONL file before the next record would grow it further."""
+    if max_bytes <= 0 or not path.exists() or path.stat().st_size < max_bytes:
+        return
+    if backups <= 0:
+        path.unlink(missing_ok=True)
+        return
+    oldest = path.with_name(f"{path.name}.{backups}")
+    oldest.unlink(missing_ok=True)
+    for index in range(backups - 1, 0, -1):
+        source = path.with_name(f"{path.name}.{index}")
+        if source.exists():
+            source.replace(path.with_name(f"{path.name}.{index + 1}"))
+    path.replace(path.with_name(f"{path.name}.1"))
+
+
 @dataclass(frozen=True)
 class PaperConfig:
     starting_cash: float = 100.0
@@ -164,6 +180,9 @@ class PaperTrader:
 
     def _write_event(self, event: dict[str, Any]) -> None:
         self.events_path.parent.mkdir(parents=True, exist_ok=True)
+        max_mb = max(1, int(os.getenv("PAPER_EVENTS_MAX_MB", "5")))
+        backups = max(0, int(os.getenv("PAPER_EVENTS_BACKUPS", "3")))
+        rotate_jsonl_file(self.events_path, max_mb * 1024 * 1024, backups)
         with self.events_path.open("a", encoding="utf-8") as handle:
             handle.write(json.dumps(event, ensure_ascii=False, allow_nan=False) + "\n")
 

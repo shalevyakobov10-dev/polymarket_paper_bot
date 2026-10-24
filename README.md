@@ -73,7 +73,7 @@ Automated tests should be run before deployment. The repository is not considere
 
 ## Deployment
 
-See [the Hebrew Railway deployment guide](DEPLOY_RAILWAY_HE.md). Deployment has not yet been performed or verified.
+Railway IaC is defined in `.railway/railway.ts`; the current config pins one worker service and a 1GB volume in `europe-west4`. See [the Hebrew Railway deployment guide](DEPLOY_RAILWAY_HE.md) for the authenticated `railway config plan` / `railway config apply` process and cost check. The config is type-checked in CI, but it has **not** been applied to a Railway account and there is no running cloud service yet. See [the latest backtest research summary](research/2026-10-24-backtest-summary-he.md) before changing any thresholds.
 
 ## Continuous integration
 

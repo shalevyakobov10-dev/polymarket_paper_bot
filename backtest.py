@@ -1,0 +1,326 @@
+"""Historical, read-only backtest for the paper strategy.
+
+This script uses public market history only. It does not place orders and does
+not claim profitability. Time-series splits are chronological.
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import math
+import os
+import tempfile
+import time
+from collections import defaultdict
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+from typing import Any
+from urllib.error import HTTPError, URLError
+from urllib.parse import urlencode
+from urllib.request import Request, urlopen
+
+from paper_trading import PaperConfig, PaperTrader
+
+GAMMA_BASE = "https://gamma-api.polymarket.com"
+CLOB_BASE = "https://clob.polymarket.com"
+USER_AGENT = "PolymarketPaperBacktest/1.0"
+
+
+def get_json(url: str, timeout: int = 20) -> Any:
+    request = Request(url, headers={"User-Agent": USER_AGENT, "Accept": "application/json"})
+    with urlopen(request, timeout=timeout) as response:
+        if response.status != 200:
+            raise RuntimeError(f"HTTP {response.status} returned by {url.split('?')[0]}")
+        return json.loads(response.read().decode("utf-8"))
+
+
+def list_field(value: Any) -> list:
+    if isinstance(value, list):
+        return value
+    if isinstance(value, str):
+        try:
+            decoded = json.loads(value)
+        except (TypeError, ValueError):
+            return []
+        return decoded if isinstance(decoded, list) else []
+    return []
+
+
+def number(value: Any) -> float | None:
+    try:
+        parsed = float(value)
+    except (ValueError, TypeError, OverflowError):
+        return None
+    return parsed if math.isfinite(parsed) else None
+
+
+def discover_tokens(markets_limit: int) -> list[dict[str, str]]:
+    query = urlencode({"active": "true", "closed": "false", "limit": max(20, min(500, markets_limit * 20)), "offset": 0})
+    payload = get_json(f"{GAMMA_BASE}/markets?{query}")
+    if not isinstance(payload, list):
+        raise ValueError("Gamma API did not return a market list")
+    candidates = []
+    for market in payload:
+        if not isinstance(market, dict):
+            continue
+        token_ids = list_field(market.get("clobTokenIds"))
+        outcomes = list_field(market.get("outcomes"))
+        prices = list_field(market.get("outcomePrices"))
+        volume = number(market.get("volume24hr")) or 0.0
+        for i, token in enumerate(token_ids):
+            token_id = str(token).strip()
+            if not token_id:
+                continue
+            candidates.append({
+                "token_id": token_id,
+                "market_id": str(market.get("conditionId") or market.get("id") or ""),
+                "question": str(market.get("question") or "Unknown market")[:500],
+                "outcome": str(outcomes[i]) if i < len(outcomes) else f"Outcome {i + 1}",
+                "volume_24h": str(volume),
+            })
+    # Sort markets by volume, deduplicate token IDs, and then cap token count.
+    candidates.sort(key=lambda item: float(item["volume_24h"]), reverse=True)
+    distinct, seen = [], set()
+    for item in candidates:
+        if item["token_id"] in seen:
+            continue
+        seen.add(item["token_id"])
+        distinct.append(item)
+        if len(distinct) >= markets_limit * 2:
+            break
+    if not distinct:
+        raise RuntimeError("No token IDs were found in active Gamma markets")
+    return distinct
+
+
+def fetch_price_history(token: dict[str, str], start_ts: int, end_ts: int, fidelity_minutes: int) -> list[dict[str, Any]]:
+    params = urlencode({
+        "market": token["token_id"],
+        "startTs": start_ts,
+        "endTs": end_ts,
+        "fidelity": fidelity_minutes,
+    })
+    payload = get_json(f"{CLOB_BASE}/prices-history?{params}")
+    if not isinstance(payload, dict):
+        raise ValueError("CLOB price history response was not an object")
+    history = payload.get("history")
+    if not isinstance(history, list):
+        raise ValueError("CLOB price history response did not contain a history list")
+    parsed = []
+    for point in history:
+        if not isinstance(point, dict):
+            continue
+        try:
+            stamp = int(point["t"])
+        except (KeyError, ValueError, TypeError, OverflowError):
+            continue
+        price = number(point.get("p"))
+        if price is None or not 0.0 < price < 1.0:
+            continue
+        parsed.append({
+            "timestamp": stamp,
+            "token_id": token["token_id"],
+            "market_id": token["market_id"],
+            "question": token["question"],
+            "outcome": token["outcome"],
+            "observed_price": price,
+        })
+    parsed.sort(key=lambda row: row["timestamp"])
+    return parsed
+
+
+def utc_from_timestamp(stamp: int) -> datetime:
+    return datetime.fromtimestamp(stamp, tz=timezone.utc)
+
+
+def group_by_timestamp(rows: list[dict[str, Any]]) -> dict[int, list[dict[str, Any]]]:
+    result: dict[int, list[dict[str, Any]]] = defaultdict(list)
+    for row in rows:
+        result[int(row["timestamp"])].append(row)
+    return dict(sorted(result.items()))
+
+
+def run_segment(
+    rows: list[dict[str, Any]],
+    config: PaperConfig,
+    state_path: Path,
+    prime_prices: list[dict[str, Any]] | None = None,
+    prime_timestamp: datetime | None = None,
+) -> dict[str, Any]:
+    trader = PaperTrader(state_path, config)
+    if prime_prices:
+        # Seed only the last observed price before the test window. This prevents
+        # the first test candle from creating a false "first observation" gap.
+        trader.process_snapshot(prime_prices, prime_timestamp)
+    events = group_by_timestamp(rows)
+    candidates = opened = closed = 0
+    for stamp, snapshot_rows in events.items():
+        result = trader.process_snapshot(snapshot_rows, utc_from_timestamp(stamp))
+        candidates += len(result["candidates"])
+        opened += len(result["opened"])
+        closed += len(result["closed"])
+    status = trader.snapshot()
+    return {
+        "window_start_utc": utc_from_timestamp(min(events)).isoformat() if events else None,
+        "window_end_utc": utc_from_timestamp(max(events)).isoformat() if events else None,
+        "snapshots": len(events),
+        "observations": len(rows),
+        "candidate_signals": candidates,
+        "positions_opened": opened,
+        "positions_closed": closed,
+        "metrics": status["metrics"],
+        "open_positions_at_end": len(status["positions_list"]),
+    }
+
+
+def run_backtest(
+    histories: list[dict[str, Any]],
+    config: PaperConfig,
+    train_ratio: float = 0.7,
+) -> dict[str, Any]:
+    if not 0.5 <= train_ratio < 0.9:
+        raise ValueError("train_ratio must be between 0.5 and 0.9")
+    cleaned = [row for row in histories if isinstance(row, dict) and number(row.get("observed_price")) is not None]
+    cleaned = [row for row in cleaned if 0 < float(row["observed_price"]) < 1]
+    stamps = sorted({int(row["timestamp"]) for row in cleaned})
+    if len(stamps) < 8:
+        raise ValueError(f"Need at least 8 unique time points; got {len(stamps)}")
+    split_idx = int(len(stamps) * train_ratio)
+    split_idx = min(max(2, split_idx), len(stamps) - 2)
+    split_ts = stamps[split_idx]
+    train_rows = [row for row in cleaned if int(row["timestamp"]) < split_ts]
+    test_rows = [row for row in cleaned if int(row["timestamp"]) >= split_ts]
+    if not train_rows or not test_rows:
+        raise ValueError("Chronological split produced an empty segment")
+    # Use separate fresh portfolios for both segments to prevent train P&L or
+    # positions from leaking into the held-out test results.
+    with tempfile.TemporaryDirectory(prefix="polymarket-paper-backtest-") as temp_dir:
+        root = Path(temp_dir)
+        train = run_segment(train_rows, config, root / "train_state.json")
+        pre_split_by_token = {}
+        for row in train_rows:
+            key = str(row.get("token_id") or "")
+            if not key:
+                continue
+            if key not in pre_split_by_token or int(row["timestamp"]) > int(pre_split_by_token[key]["timestamp"]):
+                pre_split_by_token[key] = row
+        prime = [{
+            **row,
+            "observed_price": float(row["observed_price"]),
+        } for row in pre_split_by_token.values()]
+        test = run_segment(
+            test_rows,
+            config,
+            root / "test_state.json",
+            prime_prices=prime,
+            prime_timestamp=utc_from_timestamp(split_ts) - timedelta(microseconds=1),
+        )
+    return {
+        "mode": "HISTORICAL_PAPER_BACKTEST",
+        "strategy": {
+            "entry_rule": f"observed price increase >= {config.signal_delta:.4f} probability points between history observations",
+            "exit_rule": f"simulated stop loss {config.stop_loss_pct:.1%}, take profit {config.take_profit_pct:.1%}, or max hold {config.max_hold_hours:g} hours",
+            "starting_cash_usd_each_segment": config.starting_cash,
+            "max_position_usd": config.max_position_usd,
+            "max_open_exposure_usd": config.max_open_exposure_usd,
+            "max_open_positions": config.max_open_positions,
+            "slippage_rate_each_side": config.simulated_slippage,
+            "fee_rate_assumption": config.fee_rate,
+        },
+        "data": {
+            "unique_timestamps": len(stamps),
+            "price_observations": len(cleaned),
+            "unique_tokens": len({str(row.get("token_id") or "") for row in cleaned}),
+            "train_ratio": train_ratio,
+            "split_time_utc": utc_from_timestamp(split_ts).isoformat(),
+            "split_method": "chronological",
+        },
+        "in_sample": train,
+        "out_of_sample": test,
+        "limitations": [
+            "Historical prices are observed candles; they do not reproduce historical order-book depth or executable fills.",
+            "The strategy is an experimental price-change rule, not a validated predictive model.",
+            "Open positions at each segment end are marked, not settled on the eventual market resolution.",
+            "The default fee is zero unless the user supplies a conservative fee assumption.",
+            "A good backtest does not guarantee future performance; evaluate across many markets and time periods.",
+        ],
+    }
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description="Read-only historical Polymarket paper backtest")
+    parser.add_argument("--tokens", nargs="+", help="Explicit CLOB token IDs; if omitted, discover liquid active markets")
+    parser.add_argument("--markets", type=int, default=5, help="Number of markets to discover (default: 5; up to two outcomes each)")
+    parser.add_argument("--days", type=int, default=30, help="History lookback in days (default: 30)")
+    parser.add_argument("--fidelity", type=int, default=60, help="History sampling resolution in minutes (default: 60)")
+    parser.add_argument("--train-ratio", type=float, default=0.7, help="Chronological in-sample share (default: 0.7)")
+    parser.add_argument("--output", default="backtest_report.json", help="Output JSON file path")
+    parser.add_argument("--signal-delta", type=float, default=0.03)
+    parser.add_argument("--starting-cash", type=float, default=100.0)
+    parser.add_argument("--position-size", type=float, default=2.0)
+    parser.add_argument("--max-exposure", type=float, default=10.0)
+    parser.add_argument("--max-positions", type=int, default=5)
+    parser.add_argument("--slippage", type=float, default=0.005)
+    parser.add_argument("--fee-rate", type=float, default=0.0)
+    args = parser.parse_args()
+
+    if args.days < 1 or args.days > 365:
+        parser.error("--days must be between 1 and 365")
+    if args.fidelity < 1 or args.fidelity > 1440:
+        parser.error("--fidelity must be between 1 and 1440 minutes")
+    if args.markets < 1 or args.markets > 100:
+        parser.error("--markets must be between 1 and 100")
+    if args.max_positions < 1:
+        parser.error("--max-positions must be at least 1")
+
+    now_ts = int(datetime.now(timezone.utc).timestamp())
+    start_ts = now_ts - args.days * 86400
+    if args.tokens:
+        tokens = [{"token_id": token, "market_id": "", "question": "Explicit token", "outcome": "Unknown"} for token in args.tokens]
+    else:
+        tokens = discover_tokens(args.markets)
+
+    histories = []
+    errors = []
+    for idx, token in enumerate(tokens):
+        try:
+            history = fetch_price_history(token, start_ts, now_ts, args.fidelity)
+            histories.extend(history)
+        except (HTTPError, URLError, TimeoutError, ValueError, RuntimeError, OSError) as exc:
+            errors.append({"token_id": token["token_id"], "error": f"{type(exc).__name__}: {str(exc)[:300]}"})
+        # Be polite with public APIs and avoid bursts of token-history requests.
+        if idx + 1 < len(tokens):
+            time.sleep(0.12)
+
+    if not histories:
+        raise SystemExit(f"No usable historical price points were fetched. Errors: {json.dumps(errors)}")
+
+    config = PaperConfig(
+        starting_cash=args.starting_cash,
+        max_position_usd=args.position_size,
+        max_open_exposure_usd=args.max_exposure,
+        max_open_positions=args.max_positions,
+        signal_delta=args.signal_delta,
+        simulated_slippage=args.slippage,
+        fee_rate=args.fee_rate,
+    )
+    report = run_backtest(histories, config, args.train_ratio)
+    report["source"] = "public Gamma market discovery and public CLOB /prices-history endpoint"
+    report["fetched_tokens"] = len(tokens)
+    report["token_fetch_errors"] = errors
+    output = Path(args.output)
+    output.parent.mkdir(parents=True, exist_ok=True)
+    output.write_text(json.dumps(report, ensure_ascii=False, indent=2, allow_nan=False) + "\n", encoding="utf-8")
+    print(json.dumps({
+        "report_path": str(output),
+        "data": report["data"],
+        "in_sample_metrics": report["in_sample"]["metrics"],
+        "out_of_sample_metrics": report["out_of_sample"]["metrics"],
+        "token_fetch_errors": len(errors),
+        "note": "Paper simulation only; results do not guarantee future performance.",
+    }, ensure_ascii=False, indent=2))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

@@ -47,3 +47,12 @@ python -m unittest discover -s tests -v
 ```
 
 Automated tests should be run before deployment. The repository is not considered production-verified until tests, public API connectivity, and deployment health have all been checked.
+
+
+## Deployment
+
+See [the Hebrew Railway deployment guide](DEPLOY_RAILWAY_HE.md). Deployment has not yet been performed or verified.
+
+## Continuous integration
+
+GitHub Actions is configured in `.github/workflows/tests.yml` to compile the application and run the unit tests on pushes and pull requests.

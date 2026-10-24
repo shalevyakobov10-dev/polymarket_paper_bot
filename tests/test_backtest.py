@@ -2,7 +2,7 @@ import unittest
 from unittest.mock import patch
 from urllib.parse import parse_qs, urlparse
 
-from backtest import fetch_price_history, list_field, run_backtest
+from backtest import diagnose_price_changes, fetch_price_history, list_field, run_backtest
 from paper_trading import PaperConfig
 
 
@@ -56,6 +56,20 @@ class BacktestTests(unittest.TestCase):
         self.assertEqual(query["fidelity"], ["60"])
         self.assertNotIn("startTs", query)
         self.assertNotIn("endTs", query)
+
+    def test_price_change_diagnostics_count_threshold_crossings(self):
+        history = [
+            {"timestamp": 1, "token_id": "a", "observed_price": 0.50},
+            {"timestamp": 2, "token_id": "a", "observed_price": 0.51},
+            {"timestamp": 3, "token_id": "a", "observed_price": 0.55},
+            {"timestamp": 4, "token_id": "a", "observed_price": 0.53},
+        ]
+        result = diagnose_price_changes(history)
+        self.assertEqual(result["consecutive_price_pairs"], 3)
+        self.assertEqual(result["positive_moves_by_minimum_delta"]["0.0050"], 2)
+        self.assertEqual(result["positive_moves_by_minimum_delta"]["0.0300"], 1)
+        self.assertAlmostEqual(result["largest_positive_delta"], 0.04)
+        self.assertAlmostEqual(result["largest_negative_delta_abs"], 0.02)
 
     def test_backtest_rejects_too_few_points(self):
         history = [

@@ -35,3 +35,15 @@
 
 ## בדיקת API ציבורי מתוך GitHub Actions
 במאגר נוסף workflow בשם `Public API smoke check` שמבצע בדיקת קריאה בלבד מול Gamma API ללא התחברות או מפתחות, ומתוזמן מדי יום. כדי להפעילו ידנית: פתח GitHub → Actions → Public API smoke check → Run workflow. ה-workflow עבר בהצלחה בריצה [Public API smoke check #1](https://github.com/shalevyakobov10-dev/polymarket_paper_bot/actions/runs/40110178400): GitHub Actions קיבל 5 שווקים ציבוריים ובדק שדות בסיסיים. זו בדיקת Gamma נקודתית בלבד, לא הוכחה שה-worker בענן פועל לאורך זמן או ש-Docker נבנה בהצלחה.
+
+
+## ריצת backtest היסטורית
+כלי `backtest.py` מאפשר להריץ בדיקה היסטורית מול endpoint ציבורי של CLOB:
+```bash
+python backtest.py --markets 5 --days 30 --fidelity 60 --train-ratio 0.7 --output backtest_report.json
+```
+הדוח מפריד כרונולוגית בין in-sample ל-out-of-sample, מריץ תיק מדומה נפרד לכל חלון, ומציג P&L, שיעור הצלחה, מספר אותות ומספר פוזיציות. אין להתייחס לזה כהוכחת רווחיות: המודל אינו משחזר עומק ספר פקודות או מחיר ביצוע מובטח.
+
+
+## ניהול נפח הנתונים
+קובצי snapshots/signals/events מוגבלים באמצעות רוטציה אוטומטית. ברירות מחדל: snapshots ‏25MB ו-4 גיבויים; signals/events ‏5MB ו-3 גיבויים. ניתן לשנות דרך משתני `SNAPSHOT_MAX_MB`, `SNAPSHOT_BACKUPS`, `SIGNAL_LOG_MAX_MB`, `SIGNAL_LOG_BACKUPS`, `PAPER_EVENTS_MAX_MB`, `PAPER_EVENTS_BACKUPS`. יש עדיין לנטר את גודל ה-Volume.

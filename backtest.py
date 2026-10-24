@@ -145,6 +145,41 @@ def utc_from_timestamp(stamp: int) -> datetime:
     return datetime.fromtimestamp(stamp, tz=timezone.utc)
 
 
+def diagnose_price_changes(rows: list[dict[str, Any]], thresholds: tuple[float, ...] = (0.005, 0.01, 0.02, 0.03)) -> dict[str, Any]:
+    """Describe observed moves without trading or selecting a winning threshold."""
+    by_token: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for row in rows:
+        token_id = str(row.get("token_id") or "")
+        price = number(row.get("observed_price"))
+        if token_id and price is not None and 0 < price < 1:
+            by_token[token_id].append(row)
+    counts = {f"{threshold:.4f}": 0 for threshold in thresholds}
+    up_moves, down_moves = [], []
+    for token_rows in by_token.values():
+        token_rows.sort(key=lambda row: int(row["timestamp"]))
+        previous = None
+        for row in token_rows:
+            price = float(row["observed_price"])
+            if previous is not None:
+                delta = price - previous
+                if delta > 0:
+                    up_moves.append(delta)
+                    for threshold in thresholds:
+                        if delta >= threshold:
+                            counts[f"{threshold:.4f}"] += 1
+                elif delta < 0:
+                    down_moves.append(abs(delta))
+            previous = price
+    total = len(up_moves) + len(down_moves)
+    return {
+        "consecutive_price_pairs": total,
+        "positive_moves_by_minimum_delta": counts,
+        "largest_positive_delta": round(max(up_moves), 8) if up_moves else 0.0,
+        "largest_negative_delta_abs": round(max(down_moves), 8) if down_moves else 0.0,
+        "interpretation": "Raw observed price changes only; counts are not trade counts or profit estimates.",
+    }
+
+
 def group_by_timestamp(rows: list[dict[str, Any]]) -> dict[int, list[dict[str, Any]]]:
     result: dict[int, list[dict[str, Any]]] = defaultdict(list)
     for row in rows:
@@ -227,6 +262,12 @@ def run_backtest(
             prime_prices=prime,
             prime_timestamp=utc_from_timestamp(split_ts) - timedelta(microseconds=1),
         )
+    warnings = []
+    if train["positions_opened"] == 0:
+        warnings.append("No simulated positions opened in the in-sample segment for this threshold.")
+    if test["positions_opened"] == 0:
+        warnings.append("No simulated positions opened in the out-of-sample segment for this threshold.")
+    change_diagnostics = diagnose_price_changes(cleaned)
     return {
         "mode": "HISTORICAL_PAPER_BACKTEST",
         "strategy": {
@@ -249,6 +290,8 @@ def run_backtest(
         },
         "in_sample": train,
         "out_of_sample": test,
+        "price_change_diagnostics": change_diagnostics,
+        "warnings": warnings,
         "limitations": [
             "Historical prices are observed candles; they do not reproduce historical order-book depth or executable fills.",
             "The strategy is an experimental price-change rule, not a validated predictive model.",

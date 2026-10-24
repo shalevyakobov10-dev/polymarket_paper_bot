@@ -16,6 +16,6 @@ jobs:
         with:
           python-version: "3.12"
       - name: Compile
-        run: python -m py_compile app.py
+        run: python -m py_compile app.py paper_trading.py
       - name: Unit tests
         run: python -m unittest discover -s tests -v

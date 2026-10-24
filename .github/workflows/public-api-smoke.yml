@@ -1,5 +1,11 @@
 name: Public API smoke check
 on:
+  push:
+    branches: [main]
+    paths:
+      - "app.py"
+      - "paper_trading.py"
+      - ".github/workflows/public-api-smoke.yml"
   workflow_dispatch:
   schedule:
     - cron: "17 7 * * *"

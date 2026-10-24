@@ -1,13 +1,40 @@
 import json
+import os
 import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
+from urllib.parse import parse_qs, urlparse
 
 import app
 
 
 class ParserTests(unittest.TestCase):
+    def test_fetch_markets_sorts_by_volume_and_limits_tracked_markets(self):
+        payload = [
+            {"id": "low", "volume24hr": "2"},
+            {"id": "high", "volume24hr": "200"},
+            {"id": "mid", "volume24hr": "50"},
+        ]
+
+        class FakeResponse:
+            status = 200
+            def __enter__(self):
+                return self
+            def __exit__(self, *args):
+                return False
+            def read(self):
+                return json.dumps(payload).encode("utf-8")
+
+        with patch.dict(os.environ, {"GAMMA_DISCOVERY_LIMIT": "100", "MARKETS_TO_TRACK": "2"}):
+            with patch.object(app, "urlopen", return_value=FakeResponse()) as mocked:
+                markets = app.fetch_markets()
+        self.assertEqual([market["id"] for market in markets], ["high", "mid"])
+        query = parse_qs(urlparse(mocked.call_args.args[0].full_url).query)
+        self.assertEqual(query["limit"], ["100"])
+        self.assertEqual(query["active"], ["true"])
+        self.assertEqual(query["closed"], ["false"])
+
     def test_parses_gamma_outcome_prices(self):
         markets = [{
             "id": "123",

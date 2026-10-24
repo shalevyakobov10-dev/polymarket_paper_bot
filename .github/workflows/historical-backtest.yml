@@ -26,7 +26,7 @@ jobs:
       - name: Run public historical backtest
         run: |
           mkdir -p reports
-          python backtest.py --markets 20 --days 30 --fidelity 5 --train-ratio 0.7 --output reports/backtest_report.json
+          python backtest.py --markets 20 --days 30 --fidelity 5 --train-ratio 0.7 --sensitivity --output reports/backtest_report.json
       - name: Upload backtest report
         if: success()
         uses: actions/upload-artifact@v4

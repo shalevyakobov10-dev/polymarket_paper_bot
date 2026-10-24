@@ -9,11 +9,12 @@ from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.error import HTTPError, URLError
+from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
 from paper_trading import PaperTrader, rotate_jsonl_file
 
-GAMMA_URL = "https://gamma-api.polymarket.com/markets?active=true&closed=false&limit=100"
+GAMMA_URL = "https://gamma-api.polymarket.com/markets"
 POLL_SECONDS = max(15, int(os.getenv("POLL_SECONDS", "60")))
 DATA_DIR = Path(os.getenv("DATA_DIR", "data"))
 SNAPSHOTS = DATA_DIR / "market_snapshots.jsonl"
@@ -25,6 +26,7 @@ _state = {
     "last_success_at": None,
     "last_error": None,
     "markets_seen": 0,
+    "markets_discovered": 0,
     "outcomes_seen": 0,
     "signals_total": 0,
     "mode": "paper_only",
@@ -52,15 +54,38 @@ def _list_field(value):
     return []
 
 
+def _bounded_int_env(name: str, default: int, minimum: int, maximum: int) -> int:
+    try:
+        value = int(os.getenv(name, str(default)))
+    except (ValueError, TypeError):
+        value = default
+    return min(maximum, max(minimum, value))
+
+
+def _volume_value(market: dict) -> float:
+    try:
+        value = float(market.get("volume24hr") or 0.0)
+    except (ValueError, TypeError, OverflowError):
+        return 0.0
+    return value if value >= 0 and value < float("inf") else 0.0
+
+
 def fetch_markets() -> list[dict]:
-    request = Request(GAMMA_URL, headers={"User-Agent": "PolymarketPaperResearchBot/0.9"})
+    discovery_limit = _bounded_int_env("GAMMA_DISCOVERY_LIMIT", 400, 20, 500)
+    markets_to_track = _bounded_int_env("MARKETS_TO_TRACK", 20, 1, 100)
+    query = urlencode({"active": "true", "closed": "false", "limit": discovery_limit, "offset": 0})
+    request = Request(f"{GAMMA_URL}?{query}", headers={"User-Agent": "PolymarketPaperResearchBot/1.0"})
     with urlopen(request, timeout=15) as response:
         if response.status != 200:
             raise RuntimeError(f"Gamma API returned HTTP {response.status}")
         payload = json.loads(response.read().decode("utf-8"))
     if not isinstance(payload, list):
         raise ValueError("Gamma response was not a list")
-    return [item for item in payload if isinstance(item, dict)]
+    markets = [item for item in payload if isinstance(item, dict)]
+    markets.sort(key=_volume_value, reverse=True)
+    with _lock:
+        _state["markets_discovered"] = len(markets)
+    return markets[:markets_to_track]
 
 
 def parse_outcomes(markets: list[dict]) -> list[dict]:
@@ -121,7 +146,9 @@ def poll_once() -> dict:
         _state["last_poll_at"] = utc_now()
     markets = fetch_markets()
     rows = parse_outcomes(markets)
-    paper_result = get_paper_trader().process_snapshot(rows)
+    trader = get_paper_trader()
+    paper_result = trader.process_snapshot(rows)
+    signal_delta = trader.config.signal_delta
     found = []
     for row in rows:
         key = row["token_id"] or f'{row["market_id"]}:{row["outcome"]}'
@@ -130,7 +157,7 @@ def poll_once() -> dict:
         append_jsonl(SNAPSHOTS, row)
         if old_price is not None:
             delta = row["observed_price"] - old_price
-            if abs(delta) >= 0.03:
+            if abs(delta) >= signal_delta:
                 candidate = {
                     **row,
                     "previous_observed_price": old_price,
@@ -147,6 +174,7 @@ def poll_once() -> dict:
             "last_success_at": utc_now(),
             "last_error": None,
             "markets_seen": len(markets),
+            "markets_discovered": _state["markets_discovered"],
             "outcomes_seen": len(rows),
             "signals_total": _state["signals_total"] + len(found),
             "paper_trading": paper_status,

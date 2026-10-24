@@ -8,19 +8,19 @@
 - החלקה מדומה 0.5% בכל צד; העמלה ברירת מחדל 0 כי שיעור העמלה בשוק הרלוונטי לא אומת.
 - שמירת מצב ב-`paper_state.json` ולוג אירועים ב-`paper_events.jsonl`.
 - נקודות HTTP: `/`, `/status`, `/health`, `/paper`.
-- Dockerfile, בדיקות CI ו-workflow נפרד לבדיקת API ציבורי.
+- Dockerfile, GitHub Actions לבדיקות ול-build, ו-workflow נפרד לבדיקת API ציבורי.
 
 ## בדיקות מאומתות
 - `python -m py_compile app.py paper_trading.py`: עבר.
-- `python -m pytest -q` בסביבת העבודה: 15 בדיקות עברו (5 לבוט הקיים ו-10 לסימולציה).
-- GitHub Actions: הריצה האחרונה של workflow הבדיקות הסתיימה בהצלחה: [run #17](https://github.com/shalevyakobov10-dev/polymarket_paper_bot/actions/runs/40110099273).
-- בדיקות כוללות פתיחה/סגירה מדומה, stop-loss/take-profit, תקרת פוזיציות, עמלה כהנחה, guard להפסד יומי וטעינה מחדש ממצב שמור.
+- `python -m pytest -q` בסביבת העבודה: 15 בדיקות עברו.
+- GitHub Actions: 15 בדיקות עברו בריצה [Tests #20](https://github.com/shalevyakobov10-dev/polymarket_paper_bot/actions/runs/40110178415).
+- Gamma API ציבורי: ריצה [Public API smoke check #1](https://github.com/shalevyakobov10-dev/polymarket_paper_bot/actions/runs/40110178400) קיבלה 5 שווקים ובדקה שדות בסיסיים. מדובר בבדיקת קריאה קצרה מתוך GitHub-hosted runner.
+- CI עודכן כך שיבנה גם Docker image; תוצאת ה-build החדש עדיין ממתינה לאימות.
 
 ## עדיין לא אומת
-- API smoke check נפרד: ה-workflow נוצר, אבל צריך להפעיל אותו ידנית או להמתין לתזמון ולוודא ריצה מוצלחת.
-- Docker build מקומי: לא בוצע, כי Docker/Podman אינם זמינים בסביבת העבודה.
+- Docker build בריצה הכוללת את שלב הבנייה החדש.
 - פריסה ב-Railway ופעולה 24/7: טרם בוצעו. נדרשת יצירת שירות ו-Volume בחשבון Railway והבדיקה של URL חי ונתוני `/status`.
 - רווחיות: אין עדיין תוצאות בדיקה היסטורית או forward-test מספקות כדי לטעון שיש יתרון אסטרטגי.
 
 ## גבולות
-Paper/research בלבד. אין ארנק, הזמנות מסחר אמיתיות, התחברות לחשבון, הפקדות או משיכות. אל תפרש תוצאות מדומות כהבטחה לרווח. מצב המאגר וההגדרות אינו הוכחה שה-worker פרוס או רץ בענן.
+Paper/research בלבד. אין ארנק, הזמנות מסחר אמיתיות, התחברות לחשבון, הפקדות או משיכות. אל תפרש תוצאות מדומות כהבטחה לרווח. מצב המאגר והגדרותיו אינם הוכחה שה-worker פרוס או רץ בענן.

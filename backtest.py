@@ -309,7 +309,7 @@ def run_backtest(
 def main() -> int:
     parser = argparse.ArgumentParser(description="Read-only historical Polymarket paper backtest")
     parser.add_argument("--tokens", nargs="+", help="Explicit CLOB token IDs; if omitted, discover liquid active markets")
-    parser.add_argument("--markets", type=int, default=5, help="Number of markets to discover (default: 5; up to two outcomes each)")
+    parser.add_argument("--markets", type=int, default=20, help="Number of markets to discover (default: 20; up to two outcomes each)")
     parser.add_argument("--days", type=int, default=30, help="History lookback in days (default: 30)")
     parser.add_argument("--fidelity", type=int, default=5, help="History sampling resolution in minutes (default: 5; closer to the live polling cadence)")
     parser.add_argument("--train-ratio", type=float, default=0.7, help="Chronological in-sample share (default: 0.7)")

@@ -1,26 +1,25 @@
 # מצב הפרויקט — 24 באוקטובר 2026
 
 ## מה נמצא במאגר
-- שירות Python שמושך שווקים ציבוריים דרך Gamma API.
-- סימולציית תיק מתמשכת עם יתרת פתיחה $100, פוזיציה עד $2, חשיפה פתוחה עד $10, ועד 5 פוזיציות.
-- מועמד לכניסה נוצר כאשר המחיר הנצפה עולה ב-0.03 לפחות בין תצפיות; זהו כלל ניסיוני ולא מודל חיזוי מוכח.
-- יציאה מדומה לפי take-profit/stop-loss של 10% או מגבלת החזקה של 24 שעות.
-- החלקה מדומה 0.5% בכל צד; העמלה ברירת מחדל 0 כי שיעור העמלה בשוק הרלוונטי לא אומת.
-- שמירת מצב ב-`paper_state.json` ולוג אירועים ב-`paper_events.jsonl`.
+- שירות Python שקורא שווקים ציבוריים דרך Gamma API.
+- סימולציית תיק מתמשכת בלבד: יתרת פתיחה $100, פוזיציה עד $2, חשיפה פתוחה עד $10, עד 5 פוזיציות.
+- כלל כניסה ניסיוני: מחיר נצפה עולה ב-0.03 לפחות בין תצפיות; יציאה מדומה לפי stop-loss/take-profit של 10% או זמן החזקה מרבי של 24 שעות.
+- החלקה מדומה 0.5% בכל צד; עמלה ברירת מחדל 0 עד שתוגדר הנחת עמלה מתאימה.
+- שמירת מצב ב-`paper_state.json`, לוג אירועים ב-`paper_events.jsonl`, ורוטציה מוגבלת של קובצי JSONL.
 - נקודות HTTP: `/`, `/status`, `/health`, `/paper`.
-- Dockerfile, GitHub Actions לבדיקות ול-build, ו-workflow נפרד לבדיקת API ציבורי.
+- כלי `backtest.py` למשיכת היסטוריית מחירים ציבורית, פיצול כרונולוגי in-sample/out-of-sample והרצת תיקים נפרדים.
+- Dockerfile, GitHub Actions לבדיקות + Docker build, ו-workflow לבדיקת Gamma API ציבורי.
 
 ## בדיקות מאומתות
-- `python -m py_compile app.py paper_trading.py`: עבר.
-- `python -m pytest -q` בסביבת העבודה: 15 בדיקות עברו.
-- GitHub Actions: 15 בדיקות עברו בריצה [Tests #20](https://github.com/shalevyakobov10-dev/polymarket_paper_bot/actions/runs/40110178415).
-- Gamma API ציבורי: ריצה [Public API smoke check #1](https://github.com/shalevyakobov10-dev/polymarket_paper_bot/actions/runs/40110178400) קיבלה 5 שווקים ובדקה שדות בסיסיים. מדובר בבדיקת קריאה קצרה מתוך GitHub-hosted runner.
-- Docker build עבר ב-GitHub Actions בריצה [Tests #21](https://github.com/shalevyakobov10-dev/polymarket_paper_bot/actions/runs/40110219596), כולל שלב `docker build -t polymarket-paper-bot:ci .`.
+- GitHub Actions [Tests #31](https://github.com/shalevyakobov10-dev/polymarket_paper_bot/actions/runs/40110574373): קומפילציה, **22 בדיקות** ו-Docker image build — כולם עברו.
+- Gamma API: [Public API smoke check #4](https://github.com/shalevyakobov10-dev/polymarket_paper_bot/actions/runs/40110477617) עבר וקיבל מדגם של 5 שווקים ציבוריים.
+- בדיקות כוללות: parser, ניהול יתרה ופוזיציות, TP/SL, מגבלת זמן, תקרת פוזיציות, הנחת עמלה, מגבלת הפסד יומי, שמירת מצב, רוטציה וקלט היסטורי סינתטי.
+- ריצת CI חדשה כוללת גם בדיקת קומפילציה של `backtest.py`; יש לבדוק את תוצאת הריצה העדכנית כאן: [GitHub Actions](https://github.com/shalevyakobov10-dev/polymarket_paper_bot/actions).
 
-## עדיין לא אומת
-
-- פריסה ב-Railway ופעולה 24/7: טרם בוצעו. נדרשת יצירת שירות ו-Volume בחשבון Railway והבדיקה של URL חי ונתוני `/status`.
-- רווחיות: אין עדיין תוצאות בדיקה היסטורית או forward-test מספקות כדי לטעון שיש יתרון אסטרטגי.
+## עדיין לא הושלם / לא אומת
+- Backtest מול טווח היסטורי אמיתי: הכלי קיים והבדיקות הסינתטיות עוברות, אבל עוד לא הופק דוח היסטורי אמיתי ונבדקו מגבלות זמינות הנתונים של מספר שווקים.
+- פריסה ב-Railway ופעולה 24/7: טרם בוצעו. נדרש לחבר את Railway, ליצור שירות ו-Volume ב-`/app/data`, ואז לבדוק URL חי ונתוני `/status`.
+- רווחיות: אין כרגע ראיות ליתרון אסטרטגי. תוצאות בדיקה היסטורית או paper trading אינן מבטיחות תוצאות עתידיות.
 
 ## גבולות
-Paper/research בלבד. אין ארנק, הזמנות מסחר אמיתיות, התחברות לחשבון, הפקדות או משיכות. אל תפרש תוצאות מדומות כהבטחה לרווח. מצב המאגר והגדרותיו אינם הוכחה שה-worker פרוס או רץ בענן.
+Paper/research בלבד. אין ארנק, הזמנות מסחר אמיתיות, התחברות לחשבון, הפקדות או משיכות. אף תוצאת CI אינה מוכיחה שה-worker פעיל בענן; יש לאמת זאת לאחר הפריסה.

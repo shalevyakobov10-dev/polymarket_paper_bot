@@ -1,0 +1,37 @@
+name: Historical paper backtest
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - "backtest.py"
+      - "paper_trading.py"
+      - ".github/workflows/historical-backtest.yml"
+  schedule:
+    - cron: "41 8 * * 1"
+permissions:
+  contents: read
+  actions: write
+jobs:
+  run-backtest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Compile backtest code
+        run: python -m py_compile backtest.py paper_trading.py
+      - name: Run public historical backtest
+        run: |
+          mkdir -p reports
+          python backtest.py --markets 5 --days 30 --fidelity 60 --train-ratio 0.7 --output reports/backtest_report.json
+      - name: Upload backtest report
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: polymarket-paper-backtest
+          path: reports/backtest_report.json
+          if-no-files-found: error
+          retention-days: 14

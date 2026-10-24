@@ -11,7 +11,7 @@ from pathlib import Path
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
-from paper_trading import PaperTrader
+from paper_trading import PaperTrader, rotate_jsonl_file
 
 GAMMA_URL = "https://gamma-api.polymarket.com/markets?active=true&closed=false&limit=100"
 POLL_SECONDS = max(15, int(os.getenv("POLL_SECONDS", "60")))
@@ -92,6 +92,16 @@ def parse_outcomes(markets: list[dict]) -> list[dict]:
 
 def append_jsonl(path: Path, record: dict) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
+    if path == SNAPSHOTS:
+        max_mb = max(1, int(os.getenv("SNAPSHOT_MAX_MB", "25")))
+        backups = max(0, int(os.getenv("SNAPSHOT_BACKUPS", "4")))
+    elif path == SIGNALS:
+        max_mb = max(1, int(os.getenv("SIGNAL_LOG_MAX_MB", "5")))
+        backups = max(0, int(os.getenv("SIGNAL_LOG_BACKUPS", "3")))
+    else:
+        max_mb = max(1, int(os.getenv("JSONL_LOG_MAX_MB", "5")))
+        backups = max(0, int(os.getenv("JSONL_LOG_BACKUPS", "3")))
+    rotate_jsonl_file(path, max_mb * 1024 * 1024, backups)
     with path.open("a", encoding="utf-8") as handle:
         handle.write(json.dumps(record, ensure_ascii=False, allow_nan=False) + "\n")
 

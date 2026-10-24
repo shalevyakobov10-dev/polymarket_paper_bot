@@ -45,7 +45,7 @@ The initial worker compares the latest observed price with the previous observat
 `backtest.py` downloads public CLOB price history and runs the same paper-only price-change rule in separate chronological in-sample and out-of-sample windows. It does not submit orders and uses temporary state files only.
 
 ```bash
-python backtest.py --markets 5 --days 30 --fidelity 60 --train-ratio 0.7 --output backtest_report.json
+python backtest.py --markets 5 --days 30 --fidelity 5 --train-ratio 0.7 --output backtest_report.json
 ```
 
 Or pass specific public CLOB token IDs:

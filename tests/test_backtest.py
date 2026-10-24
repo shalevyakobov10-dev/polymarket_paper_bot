@@ -2,7 +2,7 @@ import unittest
 from unittest.mock import patch
 from urllib.parse import parse_qs, urlparse
 
-from backtest import diagnose_price_changes, fetch_price_history, list_field, run_backtest
+from backtest import diagnose_price_changes, fetch_price_history, list_field, run_backtest, run_threshold_sensitivity
 from paper_trading import PaperConfig
 
 
@@ -70,6 +70,18 @@ class BacktestTests(unittest.TestCase):
         self.assertEqual(result["positive_moves_by_minimum_delta"]["0.0300"], 1)
         self.assertAlmostEqual(result["largest_positive_delta"], 0.04)
         self.assertAlmostEqual(result["largest_negative_delta_abs"], 0.02)
+
+    def test_threshold_sensitivity_reuses_same_history_for_each_preset(self):
+        prices = [0.40, 0.41, 0.45, 0.43, 0.48, 0.46, 0.50, 0.47, 0.52, 0.50, 0.54, 0.51]
+        history = [
+            {"timestamp": 1_800_000_000 + i * 3600, "token_id": "token-a",
+             "observed_price": price}
+            for i, price in enumerate(prices)
+        ]
+        results = run_threshold_sensitivity(history, PaperConfig(), train_ratio=0.7, thresholds=(0.005, 0.03))
+        self.assertEqual([row["signal_delta"] for row in results], [0.005, 0.03])
+        self.assertIn("return_pct", results[0]["in_sample"])
+        self.assertIn("return_pct", results[1]["out_of_sample"])
 
     def test_backtest_rejects_too_few_points(self):
         history = [

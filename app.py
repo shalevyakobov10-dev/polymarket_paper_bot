@@ -1,4 +1,4 @@
-"Public-market research worker with persistent paper simulation only."""
+"""Public-market research worker with persistent paper simulation only."""
 from __future__ import annotations
 
 import json

@@ -220,6 +220,39 @@ def run_segment(
     }
 
 
+def run_threshold_sensitivity(
+    histories: list[dict[str, Any]],
+    base_config: PaperConfig,
+    train_ratio: float,
+    thresholds: tuple[float, ...] = (0.005, 0.01, 0.02, 0.03),
+) -> list[dict[str, Any]]:
+    """Compare predeclared signal thresholds on the exact same history window."""
+    results = []
+    for threshold in thresholds:
+        trial_config = PaperConfig(**{**base_config.__dict__, "signal_delta": threshold})
+        trial = run_backtest(histories, trial_config, train_ratio)
+        results.append({
+            "signal_delta": threshold,
+            "in_sample": {
+                "candidate_signals": trial["in_sample"]["candidate_signals"],
+                "positions_opened": trial["in_sample"]["positions_opened"],
+                "positions_closed": trial["in_sample"]["positions_closed"],
+                "return_pct": trial["in_sample"]["metrics"]["return_pct"],
+                "closed_trades": trial["in_sample"]["metrics"]["closed_trades"],
+                "win_rate_pct": trial["in_sample"]["metrics"]["win_rate_pct"],
+            },
+            "out_of_sample": {
+                "candidate_signals": trial["out_of_sample"]["candidate_signals"],
+                "positions_opened": trial["out_of_sample"]["positions_opened"],
+                "positions_closed": trial["out_of_sample"]["positions_closed"],
+                "return_pct": trial["out_of_sample"]["metrics"]["return_pct"],
+                "closed_trades": trial["out_of_sample"]["metrics"]["closed_trades"],
+                "win_rate_pct": trial["out_of_sample"]["metrics"]["win_rate_pct"],
+            },
+        })
+    return results
+
+
 def run_backtest(
     histories: list[dict[str, Any]],
     config: PaperConfig,
@@ -321,6 +354,7 @@ def main() -> int:
     parser.add_argument("--max-positions", type=int, default=5)
     parser.add_argument("--slippage", type=float, default=0.005)
     parser.add_argument("--fee-rate", type=float, default=0.0)
+    parser.add_argument("--sensitivity", action="store_true", help="Compare predeclared signal thresholds on the same history window")
     args = parser.parse_args()
 
     if args.days < 1 or args.days > 365:
@@ -368,6 +402,10 @@ def main() -> int:
     report["fetched_tokens"] = len(tokens)
     report["data"]["history_fidelity_minutes"] = args.fidelity
     report["data"]["lookback_days"] = args.days
+    if args.sensitivity:
+        thresholds = tuple(sorted({0.005, 0.01, 0.02, 0.03, args.signal_delta}))
+        report["threshold_sensitivity"] = run_threshold_sensitivity(histories, config, args.train_ratio, thresholds)
+        report["sensitivity_note"] = "Exploratory threshold comparison on one sample; do not choose a threshold from holdout results and treat that same holdout as untouched. Validate selected settings on a later forward paper period."
     report["token_fetch_errors"] = errors
     output = Path(args.output)
     output.parent.mkdir(parents=True, exist_ok=True)
@@ -379,6 +417,7 @@ def main() -> int:
         "out_of_sample_metrics": report["out_of_sample"]["metrics"],
         "price_change_diagnostics": report["price_change_diagnostics"],
         "warnings": report["warnings"],
+        "threshold_sensitivity": report.get("threshold_sensitivity"),
         "token_fetch_errors": len(errors),
         "note": "Paper simulation only; results do not guarantee future performance.",
     }, ensure_ascii=False, indent=2))

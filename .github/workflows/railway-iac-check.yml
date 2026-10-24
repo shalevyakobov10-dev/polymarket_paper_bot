@@ -1,0 +1,33 @@
+name: Railway IaC validation
+on:
+  push:
+    branches: [main]
+    paths:
+      - ".railway/**"
+      - "package.json"
+      - "tsconfig.json"
+      - ".github/workflows/railway-iac-check.yml"
+  pull_request:
+    branches: [main]
+    paths:
+      - ".railway/**"
+      - "package.json"
+      - "tsconfig.json"
+      - ".github/workflows/railway-iac-check.yml"
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  validate-iac:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: "npm"
+      - name: Install pinned IaC dependencies
+        run: npm install --ignore-scripts --no-audit --no-fund
+      - name: Type-check Railway IaC
+        run: npx tsc --noEmit

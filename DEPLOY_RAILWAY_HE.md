@@ -34,4 +34,4 @@
 
 
 ## בדיקת API ציבורי מתוך GitHub Actions
-במאגר נוסף workflow בשם `Public API smoke check` שמבצע בדיקת קריאה בלבד מול Gamma API ללא התחברות או מפתחות, ומתוזמן מדי יום. כדי להפעילו ידנית: פתח GitHub → Actions → Public API smoke check → Run workflow. ה-workflow הוגדר, אך אין להתייחס לקישוריות API כמאומתת עד שתופיע ריצה מוצלחת שלו.
+במאגר נוסף workflow בשם `Public API smoke check` שמבצע בדיקת קריאה בלבד מול Gamma API ללא התחברות או מפתחות, ומתוזמן מדי יום. כדי להפעילו ידנית: פתח GitHub → Actions → Public API smoke check → Run workflow. ה-workflow עבר בהצלחה בריצה [Public API smoke check #1](https://github.com/shalevyakobov10-dev/polymarket_paper_bot/actions/runs/40110178400): GitHub Actions קיבל 5 שווקים ציבוריים ובדק שדות בסיסיים. זו בדיקת Gamma נקודתית בלבד, לא הוכחה שה-worker בענן פועל לאורך זמן או ש-Docker נבנה בהצלחה.

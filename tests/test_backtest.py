@@ -2,7 +2,7 @@ import unittest
 from unittest.mock import patch
 from urllib.parse import parse_qs, urlparse
 
-from backtest import diagnose_price_changes, fetch_price_history, list_field, run_backtest, run_threshold_sensitivity
+from backtest import diagnose_price_changes, evaluate_forward_returns, fetch_price_history, list_field, run_backtest, run_threshold_sensitivity
 from paper_trading import PaperConfig
 
 
@@ -82,6 +82,33 @@ class BacktestTests(unittest.TestCase):
         self.assertEqual([row["signal_delta"] for row in results], [0.005, 0.03])
         self.assertIn("return_pct", results[0]["in_sample"])
         self.assertIn("return_pct", results[1]["out_of_sample"])
+
+    def test_forward_returns_compares_signals_with_same_window_baseline(self):
+        # Signal: price increases from 0.50 to 0.56; one-hour later it falls.
+        prices = [0.50, 0.56, 0.50, 0.52, 0.53, 0.54, 0.55]
+        history = [
+            {"timestamp": 1_800_000_000 + i * 3600,
+             "token_id": "token-a", "observed_price": price}
+            for i, price in enumerate(prices)
+        ]
+        result = evaluate_forward_returns(history, threshold=0.03, horizons_hours=(1,))
+        stats = result["horizons"]["1h"]
+        self.assertEqual(stats["signals_detected"], 1)
+        self.assertEqual(stats["signal_forward_returns"]["n"], 1)
+        self.assertLess(stats["signal_forward_returns"]["mean_return_pct"], 0)
+        self.assertGreater(stats["all_observation_baseline"]["n"], 0)
+        self.assertIsNotNone(stats["signal_minus_baseline_mean_return_pct"])
+
+    def test_forward_returns_uses_prior_price_for_first_holdout_observation(self):
+        history = [
+            {"timestamp": 1_800_000_000, "token_id": "token-a", "observed_price": 0.56},
+            {"timestamp": 1_800_003_600, "token_id": "token-a", "observed_price": 0.50},
+        ]
+        result = evaluate_forward_returns(
+            history, threshold=0.03, horizons_hours=(1,), prior_prices={"token-a": 0.50}
+        )
+        self.assertEqual(result["horizons"]["1h"]["signals_detected"], 1)
+        self.assertEqual(result["horizons"]["1h"]["signal_forward_returns"]["n"], 1)
 
     def test_backtest_rejects_too_few_points(self):
         history = [

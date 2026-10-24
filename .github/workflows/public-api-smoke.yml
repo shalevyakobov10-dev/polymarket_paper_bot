@@ -1,0 +1,36 @@
+name: Public API smoke check
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "17 7 * * *"
+permissions:
+  contents: read
+jobs:
+  gamma-read:
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - name: Read a small sample from the public Gamma API
+        run: |
+          python - <<'PY'
+          import json
+          from urllib.request import Request, urlopen
+
+          url = "https://gamma-api.polymarket.com/markets?active=true&closed=false&limit=5"
+          request = Request(url, headers={"User-Agent": "PolymarketPaperBot-PublicApiSmoke/1.0"})
+          with urlopen(request, timeout=20) as response:
+              if response.status != 200:
+                  raise SystemExit(f"Gamma API returned HTTP {response.status}")
+              payload = json.loads(response.read().decode("utf-8"))
+
+          if not isinstance(payload, list):
+              raise SystemExit("Gamma API returned a non-list payload")
+          if not payload:
+              raise SystemExit("Gamma API returned no active markets in the smoke-check sample")
+
+          first = payload[0]
+          if not isinstance(first, dict) or not (first.get("question") or first.get("id")):
+              raise SystemExit("Gamma API response is missing expected market fields")
+          print(f"OK: public Gamma API returned {len(payload)} markets; sample fields validated.")
+          print("No credentials or account data were used.")
+          PY

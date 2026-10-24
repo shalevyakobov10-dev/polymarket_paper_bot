@@ -56,3 +56,37 @@ See [the Hebrew Railway deployment guide](DEPLOY_RAILWAY_HE.md). Deployment has 
 ## Continuous integration
 
 GitHub Actions is configured in `.github/workflows/tests.yml` to compile the application and run the unit tests on pushes and pull requests.
+
+
+## Paper portfolio simulation
+
+The polling service now maintains a persistent **simulated-only** portfolio through `paper_trading.py`. Defaults are:
+- Starting cash: $100
+- Maximum simulated position: $2
+- Maximum aggregate open exposure: $10
+- Maximum open positions: 5
+- Candidate rule: observed outcome price rises by at least 0.03 between polling observations
+- Simulated take-profit / stop-loss: +10% / -10% from the simulated entry price
+- Maximum holding time: 24 hours
+- Simulated slippage: 0.5% each side
+- Fee assumption: 0 by default because applicable fees have not been verified; set `PAPER_FEE_RATE` to model a fee scenario
+- Daily realized-loss guard: $5
+
+These values are risk controls and research assumptions, not evidence of profitability. The signal uses a change between observations, not a validated predictive model. The service does not short outcomes, submit orders, or connect to an account.
+
+Paper state is persisted in `data/paper_state.json`; audit events are appended to `data/paper_events.jsonl`. The status API exposes the simulated account at `/paper` and embeds summary metrics in `/status`. If the saved state file is malformed, the worker refuses to silently reset it.
+
+Optional environment variables:
+- `PAPER_STARTING_CASH`
+- `PAPER_MAX_POSITION_USD`
+- `PAPER_MAX_OPEN_EXPOSURE_USD`
+- `PAPER_MAX_OPEN_POSITIONS`
+- `PAPER_SIGNAL_DELTA`
+- `PAPER_TAKE_PROFIT_PCT`
+- `PAPER_STOP_LOSS_PCT`
+- `PAPER_MAX_HOLD_HOURS`
+- `PAPER_SLIPPAGE_RATE`
+- `PAPER_FEE_RATE`
+- `PAPER_DAILY_LOSS_LIMIT_USD`
+
+Run tests with `python -m unittest discover -s tests -v` (or `python -m pytest -q` when pytest is installed). The CI workflow checks compilation and the unit tests. A passing test suite does not verify live public API connectivity or cloud deployment.

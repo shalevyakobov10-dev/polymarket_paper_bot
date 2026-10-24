@@ -47,3 +47,7 @@ python backtest.py --markets 5 --days 30 --fidelity 60 --train-ratio 0.7 --outpu
 
 ## ניהול נפח הנתונים
 קובצי snapshots/signals/events מוגבלים באמצעות רוטציה אוטומטית. ברירות מחדל: snapshots ‏25MB ו-4 גיבויים; signals/events ‏5MB ו-3 גיבויים. ניתן לשנות דרך משתני `SNAPSHOT_MAX_MB`, `SNAPSHOT_BACKUPS`, `SIGNAL_LOG_MAX_MB`, `SIGNAL_LOG_BACKUPS`, `PAPER_EVENTS_MAX_MB`, `PAPER_EVENTS_BACKUPS`. יש עדיין לנטר את גודל ה-Volume.
+
+
+## בחירת שווקים
+ברירת המחדל היא למשוך עד 400 שווקים פעילים מ-Gamma, לדרג לפי נפח מדווח ב-24 שעות ולנטר את 20 הראשונים. אפשר לשנות עם `GAMMA_DISCOVERY_LIMIT` (20–500) ו-`MARKETS_TO_TRACK` (1–100). ה-backtest משתמש באותה גישת בחירה, אך דירוגי נפח יכולים להשתנות בין ריצות.

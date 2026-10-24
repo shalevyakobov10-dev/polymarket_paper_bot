@@ -22,6 +22,12 @@ The service listens on port 8080 by default. Routes:
 - `/` and `/status`: current worker status
 - `/health`: lightweight container health response
 
+Environment variables for market selection:
+- `GAMMA_DISCOVERY_LIMIT` (default `400`, bounded to 20–500 active markets fetched for ranking)
+- `MARKETS_TO_TRACK` (default `20`, bounded to 1–100 markets monitored each poll)
+
+The live worker and backtest both rank the discovered Gamma sample by reported 24-hour volume before selecting markets. Gamma's sample is not the entire market universe and volume rankings can change between runs.
+
 Environment variables:
 - `PORT` (default `8080`)
 - `POLL_SECONDS` (default `60`, minimum `15`)

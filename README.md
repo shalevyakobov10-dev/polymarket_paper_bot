@@ -45,7 +45,7 @@ The initial worker compares the latest observed price with the previous observat
 `backtest.py` downloads public CLOB price history and runs the same paper-only price-change rule in separate chronological in-sample and out-of-sample windows. It does not submit orders and uses temporary state files only.
 
 ```bash
-python backtest.py --markets 5 --days 30 --fidelity 5 --train-ratio 0.7 --output backtest_report.json
+python backtest.py --markets 20 --days 30 --fidelity 5 --train-ratio 0.7 --output backtest_report.json
 ```
 
 Or pass specific public CLOB token IDs:
@@ -54,7 +54,7 @@ Or pass specific public CLOB token IDs:
 python backtest.py --tokens TOKEN_ID_1 TOKEN_ID_2 --days 30 --fidelity 60
 ```
 
-The default scan reads at most two outcome tokens from each of the five highest-volume markets discovered in a public Gamma sample. It makes one public price-history request per selected token, with a small delay between requests. The report includes sample sizes, split time, P&L, win rate, fees/slippage assumptions, fetch errors, and limitations. It does not model historic order-book depth, resolution payouts, or guaranteed executable fills; treat it as a research diagnostic, not proof of an edge.
+The default scan samples 400 active Gamma markets, ranks them by reported 24-hour volume, then reads up to two outcome tokens from each of the 20 highest-volume markets in that sample. It makes one public price-history request per selected token, with a small delay between requests. The report includes sample sizes, split time, P&L, win rate, fees/slippage assumptions, fetch errors, and limitations. It does not model historic order-book depth, resolution payouts, or guaranteed executable fills; treat it as a research diagnostic, not proof of an edge.
 
 ## Tests
 

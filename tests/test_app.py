@@ -41,6 +41,37 @@ class ParserTests(unittest.TestCase):
             app.append_jsonl(target, {"observed_price": 0.5})
             self.assertEqual(json.loads(target.read_text().strip()), {"observed_price": 0.5})
 
+    def test_poll_records_price_change_candidate_without_execution(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            markets = [
+                {"id": "m1", "question": "Test?", "outcomes": '["Yes"]',
+                 "outcomePrices": '["0.50"]', "clobTokenIds": '["token-1"]'},
+                {"id": "m1", "question": "Test?", "outcomes": '["Yes"]',
+                 "outcomePrices": '["0.55"]', "clobTokenIds": '["token-1"]'},
+            ]
+            old_previous = dict(app._previous)
+            old_total = app._state["signals_total"]
+            try:
+                app._previous.clear()
+                app._state["signals_total"] = 0
+                with patch.object(app, "DATA_DIR", root), \
+                     patch.object(app, "SNAPSHOTS", root / "snapshots.jsonl"), \
+                     patch.object(app, "SIGNALS", root / "signals.jsonl"), \
+                     patch.object(app, "fetch_markets", side_effect=markets):
+                    first = app.poll_once()
+                    second = app.poll_once()
+                self.assertEqual(first["candidates"], 0)
+                self.assertEqual(second["candidates"], 1)
+                record = json.loads((root / "signals.jsonl").read_text().strip())
+                self.assertEqual(record["signal"], "momentum_up")
+                self.assertEqual(record["execution"], "none")
+                self.assertEqual(len((root / "snapshots.jsonl").read_text().splitlines()), 2)
+            finally:
+                app._previous.clear()
+                app._previous.update(old_previous)
+                app._state["signals_total"] = old_total
+
 
 if __name__ == "__main__":
     unittest.main()

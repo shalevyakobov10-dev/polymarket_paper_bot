@@ -40,6 +40,22 @@ docker run --rm -p 8080:8080 -v polymarket-data:/app/data polymarket-paper-bot
 
 The initial worker compares the latest observed price with the previous observation for the same outcome token and records a candidate when the absolute change is at least 0.03. This is a simple exploratory signal, not a validated strategy. It does not account for fees, slippage, liquidity, or calibration. Do not interpret candidate counts as profit or portfolio P&L.
 
+## Historical backtest
+
+`backtest.py` downloads public CLOB price history and runs the same paper-only price-change rule in separate chronological in-sample and out-of-sample windows. It does not submit orders and uses temporary state files only.
+
+```bash
+python backtest.py --markets 5 --days 30 --fidelity 60 --train-ratio 0.7 --output backtest_report.json
+```
+
+Or pass specific public CLOB token IDs:
+
+```bash
+python backtest.py --tokens TOKEN_ID_1 TOKEN_ID_2 --days 30 --fidelity 60
+```
+
+The default scan reads at most two outcome tokens from each of the five highest-volume markets discovered in a public Gamma sample. It makes one public price-history request per selected token, with a small delay between requests. The report includes sample sizes, split time, P&L, win rate, fees/slippage assumptions, fetch errors, and limitations. It does not model historic order-book depth, resolution payouts, or guaranteed executable fills; treat it as a research diagnostic, not proof of an edge.
+
 ## Tests
 
 ```bash

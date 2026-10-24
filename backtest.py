@@ -145,6 +145,87 @@ def utc_from_timestamp(stamp: int) -> datetime:
     return datetime.fromtimestamp(stamp, tz=timezone.utc)
 
 
+def evaluate_forward_returns(
+    rows: list[dict[str, Any]],
+    threshold: float,
+    horizons_hours: tuple[int, ...] = (1, 6, 24),
+    prior_prices: dict[str, float] | None = None,
+) -> dict[str, Any]:
+    """Compare post-signal returns with all-observation returns in the same window.
+
+    The forward point is the first recorded observation at or after the chosen
+    horizon. Signals and benchmarks that lack a full in-window future point are
+    omitted. This is a descriptive event study, not a portfolio simulation.
+    """
+    by_token: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for row in rows:
+        token_id = str(row.get("token_id") or "")
+        price = number(row.get("observed_price"))
+        timestamp = number(row.get("timestamp"))
+        if token_id and price is not None and 0 < price < 1 and timestamp is not None:
+            by_token[token_id].append({"timestamp": int(timestamp), "price": price})
+    for token_rows in by_token.values():
+        token_rows.sort(key=lambda row: row["timestamp"])
+
+    output = {}
+    for horizon in horizons_hours:
+        horizon_seconds = int(horizon * 3600)
+        signal_returns: list[float] = []
+        baseline_returns: list[float] = []
+        signals_seen = 0
+        for token_id, token_rows in by_token.items():
+            seed = number((prior_prices or {}).get(token_id))
+            previous_price = seed
+            future_index = 1
+            count = len(token_rows)
+            for index, row in enumerate(token_rows):
+                current_price = float(row["price"])
+                target_timestamp = int(row["timestamp"]) + horizon_seconds
+                if future_index < index + 1:
+                    future_index = index + 1
+                while future_index < count and int(token_rows[future_index]["timestamp"]) < target_timestamp:
+                    future_index += 1
+                future_return = None
+                if future_index < count:
+                    future_return = float(token_rows[future_index]["price"]) / current_price - 1.0
+                    baseline_returns.append(future_return)
+                if previous_price is not None and current_price - previous_price >= threshold:
+                    signals_seen += 1
+                    if future_return is not None:
+                        signal_returns.append(future_return)
+                previous_price = current_price
+
+        def summarize(values: list[float]) -> dict[str, Any]:
+            if not values:
+                return {"n": 0, "mean_return_pct": None, "median_return_pct": None, "positive_rate_pct": None}
+            ordered = sorted(values)
+            middle = len(ordered) // 2
+            median = ordered[middle] if len(ordered) % 2 else (ordered[middle - 1] + ordered[middle]) / 2
+            return {
+                "n": len(values),
+                "mean_return_pct": round(100 * sum(values) / len(values), 5),
+                "median_return_pct": round(100 * median, 5),
+                "positive_rate_pct": round(100 * sum(1 for value in values if value > 0) / len(values), 3),
+            }
+
+        signal_summary = summarize(signal_returns)
+        baseline_summary = summarize(baseline_returns)
+        excess_mean = None
+        if signal_summary["mean_return_pct"] is not None and baseline_summary["mean_return_pct"] is not None:
+            excess_mean = round(signal_summary["mean_return_pct"] - baseline_summary["mean_return_pct"], 5)
+        output[f"{horizon}h"] = {
+            "signals_detected": signals_seen,
+            "signal_forward_returns": signal_summary,
+            "all_observation_baseline": baseline_summary,
+            "signal_minus_baseline_mean_return_pct": excess_mean,
+        }
+    return {
+        "threshold": threshold,
+        "method": "first observed price at or after horizon; only full in-window horizons; no executable fill assumptions",
+        "horizons": output,
+    }
+
+
 def diagnose_price_changes(rows: list[dict[str, Any]], thresholds: tuple[float, ...] = (0.005, 0.01, 0.02, 0.03)) -> dict[str, Any]:
     """Describe observed moves without trading or selecting a winning threshold."""
     by_token: dict[str, list[dict[str, Any]]] = defaultdict(list)
@@ -231,8 +312,24 @@ def run_threshold_sensitivity(
     for threshold in thresholds:
         trial_config = PaperConfig(**{**base_config.__dict__, "signal_delta": threshold})
         trial = run_backtest(histories, trial_config, train_ratio)
+        run = trial
+        split_timestamp = int(datetime.fromisoformat(run["data"]["split_time_utc"]).timestamp())
+        train_rows = [row for row in histories if int(row["timestamp"]) < split_timestamp]
+        test_rows = [row for row in histories if int(row["timestamp"]) >= split_timestamp]
+        pre_split = {}
+        for row in train_rows:
+            token_id = str(row.get("token_id") or "")
+            if token_id and (token_id not in pre_split or int(row["timestamp"]) > int(pre_split[token_id]["timestamp"])):
+                pre_split[token_id] = row
+        prior_prices = {token_id: float(row["observed_price"]) for token_id, row in pre_split.items()}
+        forward_train = evaluate_forward_returns(train_rows, threshold)
+        forward_test = evaluate_forward_returns(test_rows, threshold, prior_prices=prior_prices)
         results.append({
             "signal_delta": threshold,
+            "forward_return_study": {
+                "in_sample": forward_train,
+                "out_of_sample": forward_test,
+            },
             "in_sample": {
                 "candidate_signals": trial["in_sample"]["candidate_signals"],
                 "positions_opened": trial["in_sample"]["positions_opened"],
@@ -416,6 +513,7 @@ def main() -> int:
         "in_sample_metrics": report["in_sample"]["metrics"],
         "out_of_sample_metrics": report["out_of_sample"]["metrics"],
         "price_change_diagnostics": report["price_change_diagnostics"],
+        "forward_return_study": report.get("forward_return_study"),
         "warnings": report["warnings"],
         "threshold_sensitivity": report.get("threshold_sensitivity"),
         "token_fetch_errors": len(errors),

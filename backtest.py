@@ -264,7 +264,7 @@ def main() -> int:
     parser.add_argument("--tokens", nargs="+", help="Explicit CLOB token IDs; if omitted, discover liquid active markets")
     parser.add_argument("--markets", type=int, default=5, help="Number of markets to discover (default: 5; up to two outcomes each)")
     parser.add_argument("--days", type=int, default=30, help="History lookback in days (default: 30)")
-    parser.add_argument("--fidelity", type=int, default=60, help="History sampling resolution in minutes (default: 60)")
+    parser.add_argument("--fidelity", type=int, default=5, help="History sampling resolution in minutes (default: 5; closer to the live polling cadence)")
     parser.add_argument("--train-ratio", type=float, default=0.7, help="Chronological in-sample share (default: 0.7)")
     parser.add_argument("--output", default="backtest_report.json", help="Output JSON file path")
     parser.add_argument("--signal-delta", type=float, default=0.03)

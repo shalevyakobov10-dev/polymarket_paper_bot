@@ -279,11 +279,11 @@ def run_segment(
     if prime_prices:
         # Seed only the last observed price before the test window. This prevents
         # the first test candle from creating a false "first observation" gap.
-        trader.process_snapshot(prime_prices, prime_timestamp)
+        trader.process_snapshot(prime_prices, prime_timestamp, persist_state=False)
     events = group_by_timestamp(rows)
     candidates = opened = closed = 0
     for stamp, snapshot_rows in events.items():
-        result = trader.process_snapshot(snapshot_rows, utc_from_timestamp(stamp))
+        result = trader.process_snapshot(snapshot_rows, utc_from_timestamp(stamp), persist_state=False)
         candidates += len(result["candidates"])
         opened += len(result["opened"])
         closed += len(result["closed"])

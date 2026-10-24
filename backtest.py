@@ -28,10 +28,18 @@ USER_AGENT = "PolymarketPaperBacktest/1.0"
 
 def get_json(url: str, timeout: int = 20) -> Any:
     request = Request(url, headers={"User-Agent": USER_AGENT, "Accept": "application/json"})
-    with urlopen(request, timeout=timeout) as response:
-        if response.status != 200:
-            raise RuntimeError(f"HTTP {response.status} returned by {url.split('?')[0]}")
-        return json.loads(response.read().decode("utf-8"))
+    try:
+        with urlopen(request, timeout=timeout) as response:
+            if response.status != 200:
+                raise RuntimeError(f"HTTP {response.status} returned by {url.split('?')[0]}")
+            return json.loads(response.read().decode("utf-8"))
+    except HTTPError as exc:
+        detail = ""
+        try:
+            detail = exc.read().decode("utf-8", errors="replace")[:400]
+        except OSError:
+            pass
+        raise RuntimeError(f"HTTP {exc.code} from {url.split('?')[0]}: {detail}") from exc
 
 
 def list_field(value: Any) -> list:
@@ -94,10 +102,12 @@ def discover_tokens(markets_limit: int) -> list[dict[str, str]]:
 
 
 def fetch_price_history(token: dict[str, str], start_ts: int, end_ts: int, fidelity_minutes: int) -> list[dict[str, Any]]:
+    # The current CLOB endpoint supports either an interval or explicit timestamp
+    # bounds. Use interval=max to avoid a 400 from mixed query validation, then
+    # apply the desired window locally. The requested fidelity limits data density.
     params = urlencode({
         "market": token["token_id"],
-        "startTs": start_ts,
-        "endTs": end_ts,
+        "interval": "max",
         "fidelity": fidelity_minutes,
     })
     payload = get_json(f"{CLOB_BASE}/prices-history?{params}")
@@ -116,6 +126,8 @@ def fetch_price_history(token: dict[str, str], start_ts: int, end_ts: int, fidel
             continue
         price = number(point.get("p"))
         if price is None or not 0.0 < price < 1.0:
+            continue
+        if stamp < start_ts or stamp > end_ts:
             continue
         parsed.append({
             "timestamp": stamp,

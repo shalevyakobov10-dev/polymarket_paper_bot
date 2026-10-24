@@ -4,7 +4,7 @@ import unittest
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 
-from paper_trading import PaperConfig, PaperTrader
+from paper_trading import PaperConfig, PaperTrader, rotate_jsonl_file
 
 
 class PaperTraderTests(unittest.TestCase):
@@ -115,6 +115,32 @@ class PaperTraderTests(unittest.TestCase):
         self.assertTrue(event_file.exists())
         events = [json.loads(line) for line in event_file.read_text().splitlines()]
         self.assertTrue(any(e["event_type"] == "position_opened" for e in events))
+
+
+    def test_time_limit_closes_a_stale_position(self):
+        cfg = PaperConfig(**{**self.config.__dict__, "max_hold_hours": 1.0})
+        bot = PaperTrader(Path(self.temp.name) / "time_state.json", cfg)
+        bot.process_snapshot([self.row(0.50)], self.now)
+        bot.process_snapshot([self.row(0.54)], self.now + timedelta(minutes=5))
+        result = bot.process_snapshot([self.row(0.54)], self.now + timedelta(hours=1, minutes=5))
+        self.assertEqual(len(result["closed"]), 1)
+        self.assertEqual(result["closed"][0]["reason"], "simulated_time_limit")
+
+    def test_corrupt_state_refuses_to_reset_account_silently(self):
+        self.state_path.write_text("{not json", encoding="utf-8")
+        with self.assertRaises(ValueError):
+            PaperTrader(self.state_path, self.config)
+
+    def test_jsonl_rotation_retains_configured_backups(self):
+        target = Path(self.temp.name) / "events.jsonl"
+        target.write_text("1234567890", encoding="utf-8")
+        rotate_jsonl_file(target, max_bytes=10, backups=2)
+        self.assertFalse(target.exists())
+        self.assertEqual(target.with_name("events.jsonl.1").read_text(), "1234567890")
+        target.write_text("abcdefghij", encoding="utf-8")
+        rotate_jsonl_file(target, max_bytes=10, backups=2)
+        self.assertEqual(target.with_name("events.jsonl.2").read_text(), "1234567890")
+        self.assertEqual(target.with_name("events.jsonl.1").read_text(), "abcdefghij")
 
 
 if __name__ == "__main__":

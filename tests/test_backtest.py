@@ -1,6 +1,8 @@
 import unittest
+from unittest.mock import patch
+from urllib.parse import parse_qs, urlparse
 
-from backtest import list_field, run_backtest
+from backtest import fetch_price_history, list_field, run_backtest
 from paper_trading import PaperConfig
 
 
@@ -33,6 +35,27 @@ class BacktestTests(unittest.TestCase):
         self.assertEqual(report["out_of_sample"]["metrics"]["cash"] >= 0, True)
         self.assertEqual(report["out_of_sample"]["open_positions_at_end"] <= 5, True)
         self.assertIn("does not guarantee future performance", " ".join(report["limitations"]).lower())
+
+    def test_fetch_price_history_uses_interval_and_filters_requested_window(self):
+        token = {"token_id": "token-123", "market_id": "m", "question": "q", "outcome": "Yes"}
+        payload = {
+            "history": [
+                {"t": 99, "p": "0.4"},
+                {"t": 100, "p": "0.41"},
+                {"t": 150, "p": "0.5"},
+                {"t": 200, "p": "0.6"},
+                {"t": 201, "p": "0.7"},
+            ]
+        }
+        with patch("backtest.get_json", return_value=payload) as mocked:
+            rows = fetch_price_history(token, start_ts=100, end_ts=200, fidelity_minutes=60)
+        self.assertEqual([row["timestamp"] for row in rows], [100, 150, 200])
+        query = parse_qs(urlparse(mocked.call_args.args[0]).query)
+        self.assertEqual(query["market"], ["token-123"])
+        self.assertEqual(query["interval"], ["max"])
+        self.assertEqual(query["fidelity"], ["60"])
+        self.assertNotIn("startTs", query)
+        self.assertNotIn("endTs", query)
 
     def test_backtest_rejects_too_few_points(self):
         history = [

@@ -312,24 +312,9 @@ def run_threshold_sensitivity(
     for threshold in thresholds:
         trial_config = PaperConfig(**{**base_config.__dict__, "signal_delta": threshold})
         trial = run_backtest(histories, trial_config, train_ratio)
-        run = trial
-        split_timestamp = int(datetime.fromisoformat(run["data"]["split_time_utc"]).timestamp())
-        train_rows = [row for row in histories if int(row["timestamp"]) < split_timestamp]
-        test_rows = [row for row in histories if int(row["timestamp"]) >= split_timestamp]
-        pre_split = {}
-        for row in train_rows:
-            token_id = str(row.get("token_id") or "")
-            if token_id and (token_id not in pre_split or int(row["timestamp"]) > int(pre_split[token_id]["timestamp"])):
-                pre_split[token_id] = row
-        prior_prices = {token_id: float(row["observed_price"]) for token_id, row in pre_split.items()}
-        forward_train = evaluate_forward_returns(train_rows, threshold)
-        forward_test = evaluate_forward_returns(test_rows, threshold, prior_prices=prior_prices)
         results.append({
             "signal_delta": threshold,
-            "forward_return_study": {
-                "in_sample": forward_train,
-                "out_of_sample": forward_test,
-            },
+            "forward_return_study": trial["forward_return_study"],
             "in_sample": {
                 "candidate_signals": trial["in_sample"]["candidate_signals"],
                 "positions_opened": trial["in_sample"]["positions_opened"],
@@ -385,6 +370,7 @@ def run_backtest(
             **row,
             "observed_price": float(row["observed_price"]),
         } for row in pre_split_by_token.values()]
+        prior_prices = {token_id: float(row["observed_price"]) for token_id, row in pre_split_by_token.items()}
         test = run_segment(
             test_rows,
             config,
@@ -392,6 +378,10 @@ def run_backtest(
             prime_prices=prime,
             prime_timestamp=utc_from_timestamp(split_ts) - timedelta(microseconds=1),
         )
+    forward_study = {
+        "in_sample": evaluate_forward_returns(train_rows, config.signal_delta),
+        "out_of_sample": evaluate_forward_returns(test_rows, config.signal_delta, prior_prices=prior_prices),
+    }
     warnings = []
     if train["positions_opened"] == 0:
         warnings.append("No simulated positions opened in the in-sample segment for this threshold.")
@@ -424,6 +414,7 @@ def run_backtest(
         },
         "in_sample": train,
         "out_of_sample": test,
+        "forward_return_study": forward_study,
         "price_change_diagnostics": change_diagnostics,
         "warnings": warnings,
         "limitations": [

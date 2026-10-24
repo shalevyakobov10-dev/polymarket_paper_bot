@@ -267,7 +267,10 @@ def run_backtest(
         warnings.append("No simulated positions opened in the in-sample segment for this threshold.")
     if test["positions_opened"] == 0:
         warnings.append("No simulated positions opened in the out-of-sample segment for this threshold.")
-    change_diagnostics = diagnose_price_changes(cleaned)
+    change_diagnostics = {
+        "in_sample": diagnose_price_changes(train_rows),
+        "out_of_sample": diagnose_price_changes(test_rows),
+    }
     return {
         "mode": "HISTORICAL_PAPER_BACKTEST",
         "strategy": {
@@ -285,6 +288,7 @@ def run_backtest(
             "price_observations": len(cleaned),
             "unique_tokens": len({str(row.get("token_id") or "") for row in cleaned}),
             "train_ratio": train_ratio,
+            "history_fidelity_minutes": None,
             "split_time_utc": utc_from_timestamp(split_ts).isoformat(),
             "split_method": "chronological",
         },
@@ -362,6 +366,8 @@ def main() -> int:
     report = run_backtest(histories, config, args.train_ratio)
     report["source"] = "public Gamma market discovery and public CLOB /prices-history endpoint"
     report["fetched_tokens"] = len(tokens)
+    report["data"]["history_fidelity_minutes"] = args.fidelity
+    report["data"]["lookback_days"] = args.days
     report["token_fetch_errors"] = errors
     output = Path(args.output)
     output.parent.mkdir(parents=True, exist_ok=True)
@@ -371,6 +377,8 @@ def main() -> int:
         "data": report["data"],
         "in_sample_metrics": report["in_sample"]["metrics"],
         "out_of_sample_metrics": report["out_of_sample"]["metrics"],
+        "price_change_diagnostics": report["price_change_diagnostics"],
+        "warnings": report["warnings"],
         "token_fetch_errors": len(errors),
         "note": "Paper simulation only; results do not guarantee future performance.",
     }, ensure_ascii=False, indent=2))

@@ -105,6 +105,14 @@ class PaperTraderTests(unittest.TestCase):
         self.assertEqual(result, {"candidates": [], "opened": [], "closed": []})
         self.assertEqual(self.bot.snapshot()["metrics"]["open_positions"], 0)
 
+    def test_in_memory_replay_can_skip_disk_writes(self):
+        self.bot.process_snapshot([self.row(0.50)], self.now, persist_state=False)
+        result = self.bot.process_snapshot([self.row(0.54)], self.now + timedelta(minutes=5), persist_state=False)
+        self.assertEqual(len(result["opened"]), 1)
+        self.assertFalse(self.state_path.exists())
+        self.assertFalse((Path(self.temp.name) / "paper_events.jsonl").exists())
+        self.assertEqual(self.bot.snapshot()["metrics"]["open_positions"], 1)
+
     def test_state_file_is_persisted_and_events_are_logged(self):
         self.bot.process_snapshot([self.row(0.50)], self.now)
         self.bot.process_snapshot([self.row(0.54)], self.now + timedelta(minutes=5))

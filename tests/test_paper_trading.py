@@ -1,0 +1,121 @@
+import json
+import tempfile
+import unittest
+from datetime import datetime, timezone, timedelta
+from pathlib import Path
+
+from paper_trading import PaperConfig, PaperTrader
+
+
+class PaperTraderTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.state_path = Path(self.temp.name) / "paper_state.json"
+        self.config = PaperConfig(
+            starting_cash=100.0, max_position_usd=2.0, max_open_exposure_usd=10.0,
+            max_open_positions=5, signal_delta=0.03, take_profit_pct=0.10,
+            stop_loss_pct=0.10, max_hold_hours=24, simulated_slippage=0.005,
+            fee_rate=0.0, daily_loss_limit_usd=5.0,
+        )
+        self.bot = PaperTrader(self.state_path, self.config)
+        self.now = datetime(2026, 1, 1, 12, tzinfo=timezone.utc)
+
+    def tearDown(self):
+        self.temp.cleanup()
+
+    @staticmethod
+    def row(price, token="token-1"):
+        return {"token_id": token, "market_id": "market-1", "question": "Test?",
+                "outcome": "Yes", "observed_price": price}
+
+    def test_starting_balance_and_no_signal_on_first_observation(self):
+        result = self.bot.process_snapshot([self.row(0.5)], self.now)
+        self.assertEqual(result["candidates"], [])
+        self.assertEqual(self.bot.snapshot()["metrics"]["cash"], 100.0)
+        self.assertEqual(self.bot.snapshot()["metrics"]["open_positions"], 0)
+
+    def test_positive_delta_opens_at_most_two_dollar_position(self):
+        self.bot.process_snapshot([self.row(0.50)], self.now)
+        result = self.bot.process_snapshot([self.row(0.54)], self.now + timedelta(minutes=5))
+        state = self.bot.snapshot()
+        self.assertEqual(len(result["candidates"]), 1)
+        self.assertEqual(len(result["opened"]), 1)
+        self.assertLessEqual(state["metrics"]["open_exposure"], 2.0)
+        self.assertAlmostEqual(state["metrics"]["cash"], 98.0, places=4)
+
+    def test_rejects_new_entries_when_position_limit_is_reached(self):
+        cfg = PaperConfig(max_open_positions=1, **{k: v for k, v in self.config.__dict__.items() if k != "max_open_positions"})
+        bot = PaperTrader(Path(self.temp.name) / "other_state.json", cfg)
+        bot.process_snapshot([self.row(0.50, "a"), self.row(0.50, "b")], self.now)
+        result = bot.process_snapshot([self.row(0.54, "a"), self.row(0.54, "b")], self.now + timedelta(minutes=5))
+        self.assertEqual(len(result["opened"]), 1)
+        skipped = [c for c in result["candidates"] if c.get("paper_action") == "skipped"]
+        self.assertEqual(len(skipped), 1)
+        self.assertEqual(skipped[0]["skip_reason"], "max_open_positions_reached")
+
+    def test_take_profit_closes_position_and_records_realized_pnl(self):
+        self.bot.process_snapshot([self.row(0.50)], self.now)
+        self.bot.process_snapshot([self.row(0.54)], self.now + timedelta(minutes=5))
+        result = self.bot.process_snapshot([self.row(0.62)], self.now + timedelta(minutes=10))
+        state = self.bot.snapshot()
+        self.assertEqual(len(result["closed"]), 1)
+        self.assertEqual(result["closed"][0]["reason"], "simulated_take_profit")
+        self.assertEqual(state["metrics"]["open_positions"], 0)
+        self.assertGreater(state["metrics"]["realized_pnl"], 0)
+
+    def test_stop_loss_closes_position(self):
+        self.bot.process_snapshot([self.row(0.50)], self.now)
+        self.bot.process_snapshot([self.row(0.54)], self.now + timedelta(minutes=5))
+        result = self.bot.process_snapshot([self.row(0.47)], self.now + timedelta(minutes=10))
+        self.assertEqual(len(result["closed"]), 1)
+        self.assertEqual(result["closed"][0]["reason"], "simulated_stop_loss")
+        self.assertLess(result["closed"][0]["pnl"], 0)
+
+    def test_state_survives_restart(self):
+        self.bot.process_snapshot([self.row(0.50)], self.now)
+        self.bot.process_snapshot([self.row(0.54)], self.now + timedelta(minutes=5))
+        restarted = PaperTrader(self.state_path, self.config)
+        state = restarted.snapshot()
+        self.assertEqual(state["metrics"]["open_positions"], 1)
+        self.assertLess(state["metrics"]["cash"], 100.0)
+
+    def test_daily_loss_guard_stops_entries(self):
+        self.bot._state["daily_date_utc"] = self.now.date().isoformat()
+        self.bot._state["daily_realized_pnl"] = -5.0
+        self.bot.process_snapshot([self.row(0.50)], self.now)
+        result = self.bot.process_snapshot([self.row(0.54)], self.now + timedelta(minutes=5))
+        self.assertEqual(len(result["candidates"]), 1)
+        self.assertEqual(result["opened"], [])
+        self.assertEqual(result["candidates"][0]["skip_reason"], "daily_loss_limit_reached")
+
+    def test_fee_assumption_is_applied_on_entry_and_exit(self):
+        cfg = PaperConfig(**{**self.config.__dict__, "fee_rate": 0.01})
+        bot = PaperTrader(Path(self.temp.name) / "fee_state.json", cfg)
+        bot.process_snapshot([self.row(0.50)], self.now)
+        bot.process_snapshot([self.row(0.54)], self.now + timedelta(minutes=5))
+        opened = bot.snapshot()
+        self.assertGreater(opened["metrics"]["total_fees"], 0)
+        bot.process_snapshot([self.row(0.62)], self.now + timedelta(minutes=10))
+        closed = bot.snapshot()
+        self.assertEqual(closed["metrics"]["open_positions"], 0)
+        self.assertGreater(closed["metrics"]["total_fees"], opened["metrics"]["total_fees"])
+
+    def test_bad_or_nonfinite_prices_are_ignored(self):
+        result = self.bot.process_snapshot([self.row(float("nan")), self.row(1.0, "invalid")], self.now)
+        self.assertEqual(result, {"candidates": [], "opened": [], "closed": []})
+        self.assertEqual(self.bot.snapshot()["metrics"]["open_positions"], 0)
+
+    def test_state_file_is_persisted_and_events_are_logged(self):
+        self.bot.process_snapshot([self.row(0.50)], self.now)
+        self.bot.process_snapshot([self.row(0.54)], self.now + timedelta(minutes=5))
+        self.assertTrue(self.state_path.exists())
+        state_file = json.loads(self.state_path.read_text(encoding="utf-8"))
+        self.assertEqual(state_file["mode"], "PAPER_ONLY")
+        event_file = Path(self.temp.name) / "paper_events.jsonl"
+        self.assertTrue(event_file.exists())
+        events = [json.loads(line) for line in event_file.read_text().splitlines()]
+        self.assertTrue(any(e["event_type"] == "position_opened" for e in events))
+
+
+if __name__ == "__main__":
+    unittest.main()

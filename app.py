@@ -109,10 +109,11 @@ def append_jsonl(path: Path, record: dict) -> None:
 def get_paper_trader() -> PaperTrader:
     global _paper_trader, _paper_state_path
     expected_path = (DATA_DIR / "paper_state.json").resolve()
-    if _paper_trader is None or _paper_state_path != expected_path:
-        _paper_trader = PaperTrader(expected_path)
-        _paper_state_path = expected_path
-    return _paper_trader
+    with _lock:
+        if _paper_trader is None or _paper_state_path != expected_path:
+            _paper_trader = PaperTrader(expected_path)
+            _paper_state_path = expected_path
+        return _paper_trader
 
 
 def poll_once() -> dict:

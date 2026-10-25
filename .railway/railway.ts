@@ -24,6 +24,7 @@ export default defineRailway(() => {
     env: {
       DATA_DIR: "/app/data",
       POLL_SECONDS: "60",
+      NEWS_POLL_SECONDS: "300",
       GAMMA_DISCOVERY_LIMIT: "400",
       MARKETS_TO_TRACK: "20",
       PAPER_STARTING_CASH: "100",

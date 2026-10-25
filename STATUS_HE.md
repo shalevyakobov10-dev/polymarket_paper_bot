@@ -10,10 +10,11 @@
 - GitHub Actions לבדיקות Python + Docker, בדיקת API ציבורי, בדיקת RSS מתוזמנת, backtest היסטורי ואימות תצורת Railway.
 
 ## עדכון אחרון — 25 באוקטובר 2026
-- [CI #92](https://github.com/shalevyakobov10-dev/polymarket_paper_bot/actions/runs/40184154517): **הצליח** — קומפילציה, 36 בדיקות יחידה ובניית Docker image עברו אחרי שילוב רכיב החדשות.
+- [CI #95](https://github.com/shalevyakobov10-dev/polymarket_paper_bot/actions/runs/40184297347): **הצליח** — קומפילציה, 37 בדיקות יחידה, בניית Docker, והרצת קונטיינר שבדקה את `/news`, `/status` ו-`/paper`.
 - [Public news RSS smoke check #1](https://github.com/shalevyakobov10-dev/polymarket_paper_bot/actions/runs/40184154516): **הצליח** — כל חמשת פידי ה-RSS החזירו כותרות שניתן לנתח בזמן הבדיקה.
 - [Railway IaC validation #3](https://github.com/shalevyakobov10-dev/polymarket_paper_bot/actions/runs/40184110153): **הצליח** — תצורת Railway עברה אימות.
 - נקודת `/health` מחזירה מצב לא בריא (HTTP 503) אם ה-worker לא רץ או אם אין סריקת שווקים מוצלחת ועדכנית.
+- בדיקת HTTP אמיתית לקונטיינר הצליחה; הופיעה הודעת חיבור שהתאפס בזמן ההפעלה הראשונית, והבדיקה ביצעה retry ואז עברה. זו בדיקת עשן ולא מבחן עומס או יציבות של 24/7.
 - רכיב RSS פועל בשרשור נפרד. כשל במקור חדשות אחד אינו עוצר את איסוף מחירי Polymarket. נקודת `/news` מציגה פריטים אחרונים, מצב מקורות וזמן עדכון.
 - פידים של חדשות הם כיסוי חלקי, לא כל אירוע בעולם; כותרת אינה אימות עצמאי ואינה הופכת אוטומטית לאות מסחר.
 - הצלחת CI מאמתת קוד/בדיקות/בנייה בלבד; היא אינה הוכחה שהשירות נפרס או פועל בענן.

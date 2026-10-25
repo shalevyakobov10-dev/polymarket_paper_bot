@@ -13,9 +13,14 @@ from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
 from paper_trading import PaperTrader, rotate_jsonl_file
+from news_monitor import DEFAULT_FEEDS, NewsCollector
 
 GAMMA_URL = "https://gamma-api.polymarket.com/markets"
 POLL_SECONDS = max(15, int(os.getenv("POLL_SECONDS", "60")))
+try:
+    NEWS_POLL_SECONDS = min(3600, max(60, int(os.getenv("NEWS_POLL_SECONDS", "300"))))
+except (ValueError, TypeError):
+    NEWS_POLL_SECONDS = 300
 DATA_DIR = Path(os.getenv("DATA_DIR", "data"))
 SNAPSHOTS = DATA_DIR / "market_snapshots.jsonl"
 SIGNALS = DATA_DIR / "candidate_signals.jsonl"
@@ -36,6 +41,24 @@ _state = {
 _previous: dict[str, float] = {}
 _paper_trader: PaperTrader | None = None
 _paper_state_path: Path | None = None
+_news_lock = threading.RLock()
+_news_collector: NewsCollector | None = None
+_news_state = {
+    "enabled": True,
+    "worker_running": False,
+    "feeds_configured": len(DEFAULT_FEEDS),
+    "feeds_succeeded": 0,
+    "feeds_failed": 0,
+    "last_poll_at": None,
+    "last_success_at": None,
+    "last_error": None,
+    "last_warning": None,
+    "items_added_last_poll": 0,
+    "items_total_recent": 0,
+    "poll_interval_seconds": NEWS_POLL_SECONDS,
+    "feed_errors": [],
+}
+_news_items_cache: list[dict] = []
 
 
 def utc_now() -> str:
@@ -234,6 +257,49 @@ def health_payload(snapshot: dict, now: datetime | None = None) -> tuple[bool, d
     return healthy, payload
 
 
+def get_news_collector() -> NewsCollector:
+    global _news_collector
+    with _news_lock:
+        if _news_collector is None:
+            _news_collector = NewsCollector(DATA_DIR / "news_events.jsonl")
+        return _news_collector
+
+
+def news_worker_loop() -> None:
+    """Continuously collect attributed headlines without blocking market polling."""
+    with _news_lock:
+        _news_state["worker_running"] = True
+    while True:
+        attempted_at = utc_now()
+        with _news_lock:
+            _news_state["last_poll_at"] = attempted_at
+        try:
+            result = get_news_collector().fetch_once()
+            with _news_lock:
+                _news_state.update({
+                    "feeds_configured": result["feeds_configured"],
+                    "feeds_succeeded": result["feeds_succeeded"],
+                    "feeds_failed": result["feeds_failed"],
+                    "items_added_last_poll": result["items_added"],
+                    "items_total_recent": result["items_total_recent"],
+                    "feed_errors": result["feed_errors"][:10],
+                    "last_warning": (
+                        str(result["feeds_failed"]) + " news feed(s) failed"
+                        if result["feeds_failed"] else None
+                    ),
+                })
+                _news_items_cache[:] = result["latest_items"][:100]
+                if result["feeds_succeeded"] > 0:
+                    _news_state["last_success_at"] = utc_now()
+                    _news_state["last_error"] = None
+                else:
+                    _news_state["last_error"] = "All configured news feeds failed"
+        except Exception as exc:
+            with _news_lock:
+                _news_state["last_error"] = f"Unexpected {type(exc).__name__}: {str(exc)[:300]}"
+        time.sleep(NEWS_POLL_SECONDS)
+
+
 class Handler(BaseHTTPRequestHandler):
     def _send(self, status: int, payload: dict) -> None:
         body = json.dumps(payload, ensure_ascii=False, allow_nan=False).encode("utf-8")
@@ -246,7 +312,7 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def do_GET(self):
-        if self.path in ("/", "/status", "/health", "/paper"):
+        if self.path in ("/", "/status", "/health", "/paper", "/news"):
             with _lock:
                 snapshot = dict(_state)
             if self.path == "/health":
@@ -254,8 +320,15 @@ class Handler(BaseHTTPRequestHandler):
                 self._send(200 if healthy else 503, payload)
             elif self.path == "/paper":
                 self._send(200, get_paper_trader().snapshot())
+            elif self.path == "/news":
+                with _news_lock:
+                    news_snapshot = {**_news_state, "items": list(_news_items_cache)}
+                self._send(200, news_snapshot)
             else:
-                self._send(200, {"service": "Polymarket Paper Research Bot", **snapshot})
+                with _news_lock:
+                    news_snapshot = dict(_news_state)
+                    news_snapshot["feed_errors"] = list(_news_state["feed_errors"])
+                self._send(200, {"service": "Polymarket Paper Research Bot", **snapshot, "news": news_snapshot})
         else:
             self._send(404, {"error": "not_found"})
 
@@ -265,6 +338,7 @@ class Handler(BaseHTTPRequestHandler):
 
 def main() -> None:
     threading.Thread(target=worker_loop, daemon=True, name="market-poller").start()
+    threading.Thread(target=news_worker_loop, daemon=True, name="global-news-poller").start()
     port = int(os.getenv("PORT", "8080"))
     server = ThreadingHTTPServer(("0.0.0.0", port), Handler)
     print(f"Paper research worker listening on port {port}; polling every {POLL_SECONDS}s")

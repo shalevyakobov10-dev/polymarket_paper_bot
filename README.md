@@ -23,6 +23,7 @@ The service listens on port 8080 by default. Routes:
 - `/health`: health response that checks for a recent successful market poll
 - `/paper`: simulated portfolio and performance metrics
 - `/news`: recent attributed news headlines, source links, feed health, and collection status
+- `/matches`: recent headline-to-market keyword-overlap candidates; not probabilities or trade instructions
 
 Environment variables for market selection:
 - `GAMMA_DISCOVERY_LIMIT` (default `400`, bounded to 20–500 active markets fetched for ranking)
@@ -47,7 +48,7 @@ docker run --rm -p 8080:8080 -v polymarket-data:/app/data polymarket-paper-bot
 
 ## News ingestion limits
 
-News records preserve source attribution, original links, publication timestamp when provided by the publisher, and collection timestamp. The collector handles RSS and Atom formats, de-duplicates IDs across restarts, limits response size, and isolates failures per feed. It records headlines and short summaries only; it does not treat news as verified truth or automatically convert news stories into trade signals. Headlines need corroboration and timestamp-aware evaluation before they can be used in research.
+News records preserve source attribution, original links, publication timestamp when provided by the publisher, and collection timestamp. The collector handles RSS and Atom formats, de-duplicates IDs across restarts, limits response size, and isolates failures per feed. It records headlines and short summaries, then emits conservative keyword-overlap candidates for review at `/matches` and in `data/news_market_candidates.jsonl`. This matching is lexical rather than semantic, does not estimate probabilities, and is not a validated trading signal. It does not place or suggest live orders. Headlines need corroboration, timestamp-aware evaluation, and out-of-sample testing before they can inform any strategy.
 
 ## Research methodology
 

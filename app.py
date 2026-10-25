@@ -13,7 +13,7 @@ from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
 from paper_trading import PaperTrader, rotate_jsonl_file
-from news_monitor import DEFAULT_FEEDS, NewsCollector
+from news_monitor import DEFAULT_FEEDS, NewsCollector, NewsMarketMatcher
 
 GAMMA_URL = "https://gamma-api.polymarket.com/markets"
 POLL_SECONDS = max(15, int(os.getenv("POLL_SECONDS", "60")))
@@ -57,8 +57,15 @@ _news_state = {
     "items_total_recent": 0,
     "poll_interval_seconds": NEWS_POLL_SECONDS,
     "feed_errors": [],
+    "matches_added_last_pass": 0,
+    "market_matches_total_recent": 0,
+    "last_match_check_at": None,
+    "last_match_error": None,
 }
 _news_items_cache: list[dict] = []
+_news_matches_cache: list[dict] = []
+_news_matcher: NewsMarketMatcher | None = None
+_latest_market_questions: list[dict] = []
 
 
 def utc_now() -> str:
@@ -168,6 +175,16 @@ def poll_once() -> dict:
     with _lock:
         _state["last_poll_at"] = utc_now()
     markets = fetch_markets()
+    with _lock:
+        _latest_market_questions[:] = [
+            {
+                "market_id": str(market.get("conditionId") or market.get("id") or ""),
+                "question": str(market.get("question") or "")[:500],
+                "volume_24h": market.get("volume24hr"),
+            }
+            for market in markets
+            if (market.get("conditionId") or market.get("id")) and market.get("question")
+        ]
     rows = parse_outcomes(markets)
     trader = get_paper_trader()
     paper_result = trader.process_snapshot(rows)
@@ -202,10 +219,17 @@ def poll_once() -> dict:
             "signals_total": _state["signals_total"] + len(found),
             "paper_trading": paper_status,
         })
+    match_result = {"added": []}
+    try:
+        match_result = match_recent_news()
+    except Exception as exc:
+        with _news_lock:
+            _news_state["last_match_error"] = f"Unexpected {type(exc).__name__}: {str(exc)[:240]}"
     return {
         "markets": len(markets),
         "outcomes": len(rows),
         "candidates": len(found),
+        "news_market_matches": len(match_result.get("added", [])),
         "paper": paper_result,
         "paper_metrics": paper_status["metrics"],
     }
@@ -265,6 +289,33 @@ def get_news_collector() -> NewsCollector:
         return _news_collector
 
 
+def get_news_matcher() -> NewsMarketMatcher:
+    global _news_matcher
+    with _news_lock:
+        if _news_matcher is None:
+            _news_matcher = NewsMarketMatcher(DATA_DIR / "news_market_candidates.jsonl")
+        return _news_matcher
+
+
+def match_recent_news() -> dict:
+    """Link recent headlines to tracked market questions as non-trading research candidates."""
+    with _lock:
+        markets = list(_latest_market_questions)
+    with _news_lock:
+        news_items = list(_news_items_cache)
+        existing_matches = list(_news_matches_cache)
+    if not markets or not news_items:
+        return {"added": [], "items_total_recent": len(existing_matches), "latest": existing_matches}
+    result = get_news_matcher().match(news_items, markets)
+    with _news_lock:
+        _news_matches_cache[:] = result["latest"][:100]
+        _news_state["matches_added_last_pass"] = len(result["added"])
+        _news_state["market_matches_total_recent"] = result["items_total_recent"]
+        _news_state["last_match_check_at"] = utc_now()
+        _news_state["last_match_error"] = None
+    return result
+
+
 def news_worker_loop() -> None:
     """Continuously collect attributed headlines without blocking market polling."""
     with _news_lock:
@@ -294,6 +345,11 @@ def news_worker_loop() -> None:
                     _news_state["last_error"] = None
                 else:
                     _news_state["last_error"] = "All configured news feeds failed"
+            try:
+                match_recent_news()
+            except Exception as exc:
+                with _news_lock:
+                    _news_state["last_match_error"] = f"Unexpected {type(exc).__name__}: {str(exc)[:240]}"
         except Exception as exc:
             with _news_lock:
                 _news_state["last_error"] = f"Unexpected {type(exc).__name__}: {str(exc)[:300]}"
@@ -312,7 +368,7 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def do_GET(self):
-        if self.path in ("/", "/status", "/health", "/paper", "/news"):
+        if self.path in ("/", "/status", "/health", "/paper", "/news", "/matches"):
             with _lock:
                 snapshot = dict(_state)
             if self.path == "/health":
@@ -324,6 +380,18 @@ class Handler(BaseHTTPRequestHandler):
                 with _news_lock:
                     news_snapshot = {**_news_state, "items": list(_news_items_cache)}
                 self._send(200, news_snapshot)
+            elif self.path == "/matches":
+                with _news_lock:
+                    match_snapshot = {
+                        "method": "keyword_overlap_v1",
+                        "research_only": True,
+                        "execution": "none",
+                        "total_recent": _news_state["market_matches_total_recent"],
+                        "last_match_check_at": _news_state["last_match_check_at"],
+                        "last_match_error": _news_state["last_match_error"],
+                        "items": list(_news_matches_cache),
+                    }
+                self._send(200, match_snapshot)
             else:
                 with _news_lock:
                     news_snapshot = dict(_news_state)

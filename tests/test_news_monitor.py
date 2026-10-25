@@ -161,5 +161,39 @@ class NewsMonitorTests(unittest.TestCase):
         self.assertEqual(news_monitor.match_news_to_markets(news, markets), [])
 
 
+    def test_same_story_has_same_id_across_sources(self):
+        first = news_monitor.parse_feed(RSS, "Feed A", "https://example.org/rss-a")
+        second = news_monitor.parse_feed(RSS, "Feed B", "https://example.org/rss-b")
+        self.assertEqual(first[0]["id"], second[0]["id"])
+
+    def test_recent_feed_items_are_sorted_by_publication_time_across_feeds(self):
+        older = (
+            RSS.replace(b"Major event &amp; update", b"Older event")
+            .replace(b"https://example.org/story/1", b"https://example.org/story/old")
+            .replace(b"story-1", b"story-old")
+            .replace(b"10:00:00 GMT", b"09:00:00 GMT")
+        )
+        newer = (
+            RSS.replace(b"Major event &amp; update", b"Newer event")
+            .replace(b"https://example.org/story/1", b"https://example.org/story/new")
+            .replace(b"story-1", b"story-new")
+            .replace(b"10:00:00 GMT", b"11:00:00 GMT")
+        )
+        feeds = (
+            {"source": "Older", "url": "https://example.org/old.xml"},
+            {"source": "Newer", "url": "https://example.org/new.xml"},
+        )
+
+        def fake_urlopen(request, timeout=10):
+            return FakeResponse(older if "/old.xml" in request.full_url else newer)
+
+        with tempfile.TemporaryDirectory() as directory:
+            collector = news_monitor.NewsCollector(Path(directory) / "news.jsonl", feeds)
+            with patch("news_monitor.urlopen", side_effect=fake_urlopen):
+                result = collector.fetch_once()
+        self.assertEqual(result["items_added"], 2)
+        self.assertEqual(result["latest_items"][0]["title"], "Newer event")
+
+
 if __name__ == "__main__":
     unittest.main()

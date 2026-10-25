@@ -140,6 +140,7 @@ class ParserTests(unittest.TestCase):
         thread = threading.Thread(target=server.serve_forever, daemon=True)
         old_state = dict(app._news_state)
         old_items = list(app._news_items_cache)
+        old_matches = list(app._news_matches_cache)
         try:
             with app._news_lock:
                 app._news_state.update({
@@ -156,6 +157,12 @@ class ParserTests(unittest.TestCase):
                     "title": "A test headline",
                     "url": "https://example.org/story",
                 }]
+                app._news_matches_cache[:] = [{
+                    "news_title": "A test headline",
+                    "market_question": "Will this happen?",
+                    "research_only": True,
+                    "execution": "none",
+                }]
             thread.start()
             address = f"http://127.0.0.1:{server.server_port}/news"
             with http_urlopen(address, timeout=3) as response:
@@ -163,6 +170,11 @@ class ParserTests(unittest.TestCase):
             self.assertEqual(payload["feeds_succeeded"], 1)
             self.assertEqual(payload["items"][0]["source"], "Example News")
             self.assertEqual(payload["items"][0]["url"], "https://example.org/story")
+            with http_urlopen(f"http://127.0.0.1:{server.server_port}/matches", timeout=3) as response:
+                matches = json.loads(response.read().decode("utf-8"))
+            self.assertTrue(matches["research_only"])
+            self.assertEqual(matches["execution"], "none")
+            self.assertEqual(matches["items"][0]["news_title"], "A test headline")
         finally:
             server.shutdown()
             server.server_close()
@@ -172,6 +184,7 @@ class ParserTests(unittest.TestCase):
                 app._news_state.clear()
                 app._news_state.update(old_state)
                 app._news_items_cache[:] = old_items
+                app._news_matches_cache[:] = old_matches
 
 if __name__ == "__main__":
     unittest.main()

@@ -102,5 +102,64 @@ class NewsMonitorTests(unittest.TestCase):
         self.assertEqual(result["feed_errors"][0]["source"], "Unavailable")
 
 
+    def test_matcher_links_specific_shared_terms_without_calling_them_probability(self):
+        news = {
+            "id": "headline-1",
+            "source": "Example Finance",
+            "title": "Fed signals interest-rate cuts",
+            "summary": "The Federal Reserve signaled a possible cut in interest rates.",
+            "url": "https://example.org/fed",
+            "published_at": "Sun, 25 Oct 2026 10:00:00 GMT",
+        }
+        markets = [{
+            "market_id": "market-fed",
+            "question": "Will the Fed cut interest rates in December?",
+        }]
+        matches = news_monitor.match_news_to_markets(news, markets)
+        self.assertEqual(len(matches), 1)
+        self.assertIn("rate", matches[0]["matched_terms"])
+        self.assertGreaterEqual(matches[0]["shared_term_count"], 2)
+        self.assertTrue(matches[0]["research_only"])
+        self.assertEqual(matches[0]["execution"], "none")
+        self.assertIn("lexical_overlap", matches[0])
+        self.assertNotIn("probability", matches[0])
+
+    def test_matcher_deduplicates_pairs_across_calls_and_restarts(self):
+        news = {
+            "id": "headline-2",
+            "source": "Example Finance",
+            "title": "Fed signals interest-rate cuts",
+            "summary": "The Federal Reserve signaled a possible cut in interest rates.",
+            "url": "https://example.org/fed",
+        }
+        markets = [{
+            "market_id": "market-fed",
+            "question": "Will the Fed cut interest rates in December?",
+        }]
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "matches.jsonl"
+            matcher = news_monitor.NewsMarketMatcher(path)
+            first = matcher.match([news], markets)
+            second = matcher.match([news], markets)
+            restarted = news_monitor.NewsMarketMatcher(path)
+            third = restarted.match([news], markets)
+            self.assertEqual(len(first["added"]), 1)
+            self.assertEqual(second["added"], [])
+            self.assertEqual(third["added"], [])
+            self.assertEqual(len(path.read_text(encoding="utf-8").splitlines()), 1)
+
+    def test_matcher_ignores_generic_or_unrelated_overlap(self):
+        news = {
+            "id": "headline-3",
+            "title": "Local club wins championship final",
+            "summary": "Fans celebrate after the match.",
+        }
+        markets = [{
+            "market_id": "market-fed",
+            "question": "Will the Federal Reserve cut interest rates in December?",
+        }]
+        self.assertEqual(news_monitor.match_news_to_markets(news, markets), [])
+
+
 if __name__ == "__main__":
     unittest.main()

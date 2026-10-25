@@ -102,7 +102,7 @@ class ParserTests(unittest.TestCase):
 
 
     def test_paper_simulator_respects_position_cap_and_never_executes(self):
-        sim = PaperSimulator(initial_cash=100, max_position_usd=2, fee_rate=0, slippage_rate=0)
+        sim = PaperSimulator(initial_cash=100, max_position_usd=2, fee_rate=0, slippage_rate=0, exit_delta=0.02)
         sim.on_observation({"token_id": "t1", "observed_price": 0.50, "timestamp": "t0"})
         entry = sim.on_observation({"token_id": "t1", "observed_price": 0.54, "timestamp": "t1"})
         self.assertEqual(entry["type"], "entry")

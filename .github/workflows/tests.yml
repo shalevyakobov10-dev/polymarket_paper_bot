@@ -21,3 +21,35 @@ jobs:
         run: python -m unittest discover -s tests -v
       - name: Build Docker image
         run: docker build -t polymarket-paper-bot:ci .
+      - name: Smoke-test container HTTP endpoints
+        run: |
+          set -euo pipefail
+          docker run -d --rm --name polymarket-paper-bot-smoke \
+            -e DATA_DIR=/tmp/polymarket-smoke-data \
+            -p 18080:8080 polymarket-paper-bot:ci
+          cleanup() { docker stop polymarket-paper-bot-smoke >/dev/null 2>&1 || true; }
+          trap cleanup EXIT
+          ready=0
+          for _ in $(seq 1 20); do
+            if curl --silent --show-error --fail http://127.0.0.1:18080/news > /tmp/paper-news.json; then
+              ready=1
+              break
+            fi
+            sleep 1
+          done
+          test "$ready" -eq 1
+          curl --silent --show-error --fail http://127.0.0.1:18080/status > /tmp/paper-status.json
+          curl --silent --show-error --fail http://127.0.0.1:18080/paper > /tmp/paper-portfolio.json
+          python - <<'PY'
+          import json
+          from pathlib import Path
+
+          news = json.loads(Path("/tmp/paper-news.json").read_text())
+          status = json.loads(Path("/tmp/paper-status.json").read_text())
+          paper = json.loads(Path("/tmp/paper-portfolio.json").read_text())
+          assert "items" in news and "feeds_configured" in news, "news endpoint schema mismatch"
+          assert status.get("mode") == "paper_only", "service must stay paper-only"
+          assert isinstance(status.get("news"), dict), "status must include news health"
+          assert isinstance(paper.get("metrics"), dict), "paper endpoint metrics missing"
+          print("Container smoke check passed: /news, /status and /paper returned valid JSON.")
+          PY

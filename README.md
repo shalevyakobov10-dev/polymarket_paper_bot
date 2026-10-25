@@ -1,6 +1,6 @@
 # Polymarket Paper Research Bot
 
-A Python research service that polls public Polymarket Gamma market data, records observed outcome prices, logs experimental price-momentum candidates, and separately collects attributed world-news headlines from public BBC RSS feeds. It exposes health, paper-portfolio, status, and recent-news endpoints.
+A Python research service that polls public Polymarket Gamma market data, records observed outcome prices, logs experimental price-momentum candidates, and separately collects attributed news headlines from 15 public RSS feeds across BBC, The Guardian, Al Jazeera, NPR, Deutsche Welle, Sky News, and France 24. It exposes health, paper-portfolio, status, recent-news, and research-only news-match endpoints.
 
 ## Safety and limitations
 
@@ -37,7 +37,7 @@ Environment variables:
 - `DATA_DIR` (default `data`)
 - `NEWS_POLL_SECONDS` (default `300`, bounded to 60–3600 seconds)
 
-The market worker saves observed public market snapshots to `data/market_snapshots.jsonl` and experimental price-change candidates to `data/candidate_signals.jsonl`. The separate news worker saves new, de-duplicated headlines to `data/news_events.jsonl`. Logs are rotated with bounded size. News-feed failures are tracked separately and do not stop the market-data worker. The default sources are BBC top stories, World, Business, Technology, and Science & Environment RSS feeds. Feed availability and publication latency vary; this is not a comprehensive feed of every world event.
+The market worker saves observed public market snapshots to `data/market_snapshots.jsonl` and experimental price-change candidates to `data/candidate_signals.jsonl`. The separate news worker saves new, de-duplicated headlines to `data/news_events.jsonl`. Logs are rotated with bounded size. News-feed failures are tracked separately and do not stop the market-data worker. The 15 default sources cover BBC top stories/World/Business/Technology/Science & Environment; The Guardian World/US/Business/Technology/Science; Al Jazeera English; NPR Top Stories; Deutsche Welle Top Stories; Sky News World; and France 24 English. Feed availability and publication latency vary; this is not a comprehensive feed of every world event.
 
 ## Run with Docker
 

@@ -1,19 +1,22 @@
 # מצב הפרויקט — 25 באוקטובר 2026
 
 ## מה נמצא במאגר
-- שירות Python לקריאת נתונים ציבוריים מ-Gamma; נקודות HTTP: `/`, `/status`, `/health`, `/paper`.
+- שירות Python לקריאת נתונים ציבוריים מ-Gamma; נקודות HTTP: `/`, `/status`, `/health`, `/paper`, `/news`.
+- רכיב `news_monitor.py` אוסף כותרות/תקצירים מקושרי מקור מחמישה פידים ציבוריים של BBC (כללי, עולם, עסקים, טכנולוגיה, מדע/סביבה), מבצע deduplication, שומר JSONL עם רוטציה ומבודד שגיאות בין מקורות. תדירות ברירת מחדל: 5 דקות.
 - סימולציית תיק בלבד: יתרת פתיחה $100, פוזיציה עד $2, חשיפה עד $10, עד 5 פוזיציות, TP/SL של 10%, החזקה מרבית 24 שעות והחלקה מדומה 0.5% לכל צד.
 - שמירת מצב ואירועים, רוטציה מוגבלת של קובצי JSONL ו-backtest שרץ בזיכרון בלי כתיבה לדיסק בכל נר.
 - כלי `backtest.py`: היסטוריית CLOB ציבורית, split כרונולוגי, ארבעה ספי רגישות, ותשואות קדימה של שעה/6 שעות/24 שעות מול baseline.
 - תצורת Railway Infrastructure as Code ב-`.railway/railway.ts`: שירות יחיד ב-`main`, Volume מתמשך 1GB אל `/app/data`, בדיקת חיות ומשתני סביבה של Paper Trading.
-- GitHub Actions לבדיקות Python + Docker, בדיקת API ציבורי, backtest היסטורי ואימות תצורת Railway.
+- GitHub Actions לבדיקות Python + Docker, בדיקת API ציבורי, בדיקת RSS מתוזמנת, backtest היסטורי ואימות תצורת Railway.
 
 ## עדכון אחרון — 25 באוקטובר 2026
-- [CI #83](https://github.com/shalevyakobov10-dev/polymarket_paper_bot/actions/runs/40166357038): **הצליח** על commit `31f7315f` — קומפילציה, בדיקות יחידה ובניית Docker image עברו.
-- [CI #80](https://github.com/shalevyakobov10-dev/polymarket_paper_bot/actions/runs/40165769842): **הצליח** על commit `ae7078ce` — קומפילציה, 29 בדיקות יחידה ובניית Docker image עברו.
-- הוסרה מחלקת סימולציה כפולה שנוספה במהלך העבודה; היישום ממשיך להשתמש במנוע המתמיד `paper_trading.py`, שכבר כולל מגבלות חשיפה, TP/SL, מגבלת זמן, שמירת מצב ורוטציית לוגים.
-- נקודת `/health` שופרה: היא מחזירה כעת מצב לא בריא (HTTP 503) אם ה-worker לא רץ או שאין סריקת שווקים מוצלחת ועדכנית; נוספו בדיקות לנתונים טריים/מיושנים ולמצב לפני הסריקה הראשונה.
-- הצלחת CI מאמתת בדיקות וקונטיינר בלבד; היא אינה אומרת שהשירות נפרס או רץ בענן.
+- [CI #92](https://github.com/shalevyakobov10-dev/polymarket_paper_bot/actions/runs/40184154517): **הצליח** — קומפילציה, 36 בדיקות יחידה ובניית Docker image עברו אחרי שילוב רכיב החדשות.
+- [Public news RSS smoke check #1](https://github.com/shalevyakobov10-dev/polymarket_paper_bot/actions/runs/40184154516): **הצליח** — כל חמשת פידי ה-RSS החזירו כותרות שניתן לנתח בזמן הבדיקה.
+- [Railway IaC validation #3](https://github.com/shalevyakobov10-dev/polymarket_paper_bot/actions/runs/40184110153): **הצליח** — תצורת Railway עברה אימות.
+- נקודת `/health` מחזירה מצב לא בריא (HTTP 503) אם ה-worker לא רץ או אם אין סריקת שווקים מוצלחת ועדכנית.
+- רכיב RSS פועל בשרשור נפרד. כשל במקור חדשות אחד אינו עוצר את איסוף מחירי Polymarket. נקודת `/news` מציגה פריטים אחרונים, מצב מקורות וזמן עדכון.
+- פידים של חדשות הם כיסוי חלקי, לא כל אירוע בעולם; כותרת אינה אימות עצמאי ואינה הופכת אוטומטית לאות מסחר.
+- הצלחת CI מאמתת קוד/בדיקות/בנייה בלבד; היא אינה הוכחה שהשירות נפרס או פועל בענן.
 
 ## בדיקות מאומתות
 - [Tests #71](https://github.com/shalevyakobov10-dev/polymarket_paper_bot/actions/runs/40112061374): **29 בדיקות עברו**, קומפילציה ובניית Docker image עברו.

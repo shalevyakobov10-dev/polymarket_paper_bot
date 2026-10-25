@@ -6,6 +6,7 @@ place orders, or treat a headline as a verified event or trading signal.
 from __future__ import annotations
 
 import hashlib
+from concurrent.futures import ThreadPoolExecutor
 import html
 import json
 import os
@@ -23,26 +24,21 @@ from paper_trading import rotate_jsonl_file
 
 
 DEFAULT_FEEDS = (
-    {
-        "source": "BBC News",
-        "url": "https://feeds.bbci.co.uk/news/rss.xml",
-    },
-    {
-        "source": "BBC News - World",
-        "url": "https://feeds.bbci.co.uk/news/world/rss.xml",
-    },
-    {
-        "source": "BBC News - Business",
-        "url": "https://feeds.bbci.co.uk/news/business/rss.xml",
-    },
-    {
-        "source": "BBC News - Technology",
-        "url": "https://feeds.bbci.co.uk/news/technology/rss.xml",
-    },
-    {
-        "source": "BBC News - Science and Environment",
-        "url": "https://feeds.bbci.co.uk/news/science_and_environment/rss.xml",
-    },
+    {"source": "BBC News", "url": "https://feeds.bbci.co.uk/news/rss.xml"},
+    {"source": "BBC News - World", "url": "https://feeds.bbci.co.uk/news/world/rss.xml"},
+    {"source": "BBC News - Business", "url": "https://feeds.bbci.co.uk/news/business/rss.xml"},
+    {"source": "BBC News - Technology", "url": "https://feeds.bbci.co.uk/news/technology/rss.xml"},
+    {"source": "BBC News - Science and Environment", "url": "https://feeds.bbci.co.uk/news/science_and_environment/rss.xml"},
+    {"source": "The Guardian - World", "url": "https://www.theguardian.com/world/rss"},
+    {"source": "The Guardian - US News", "url": "https://www.theguardian.com/us-news/rss"},
+    {"source": "The Guardian - Business", "url": "https://www.theguardian.com/uk/business/rss"},
+    {"source": "The Guardian - Technology", "url": "https://www.theguardian.com/uk/technology/rss"},
+    {"source": "The Guardian - Science", "url": "https://www.theguardian.com/science/rss"},
+    {"source": "Al Jazeera English", "url": "https://www.aljazeera.com/xml/rss/all.xml"},
+    {"source": "NPR - Top Stories", "url": "https://feeds.npr.org/1001/rss.xml"},
+    {"source": "Deutsche Welle - Top Stories", "url": "https://rss.dw.com/rdf/rss-en-top"},
+    {"source": "Sky News - World", "url": "https://feeds.skynews.com/feeds/rss/world.xml"},
+    {"source": "France 24 - English", "url": "https://www.france24.com/en/rss"},
 )
 
 MAX_FEED_BYTES = 1_000_000
@@ -401,46 +397,55 @@ class NewsCollector:
         with self.log_path.open("a", encoding="utf-8") as handle:
             handle.write(json.dumps(record, ensure_ascii=False, allow_nan=False) + "\n")
 
+    @staticmethod
+    def _fetch_one(feed: dict[str, str]) -> tuple[str, list[dict[str, str]], dict[str, str] | None]:
+        source = str(feed.get("source") or "Unknown feed")[:100]
+        url = str(feed.get("url") or "")
+        try:
+            if not url.startswith("https://"):
+                raise ValueError("Feed URL must use HTTPS")
+            request = Request(
+                url,
+                headers={
+                    "User-Agent": USER_AGENT,
+                    "Accept": "application/rss+xml, application/atom+xml, application/xml, text/xml",
+                },
+            )
+            with urlopen(request, timeout=10) as response:
+                status = getattr(response, "status", 200)
+                if status != 200:
+                    raise RuntimeError(f"HTTP {status}")
+                payload = response.read(MAX_FEED_BYTES + 1)
+            if len(payload) > MAX_FEED_BYTES:
+                raise ValueError("Feed exceeded the 1 MB response limit")
+            return source, parse_feed(payload, source, url), None
+        except (HTTPError, URLError, TimeoutError, OSError, ValueError, RuntimeError) as exc:
+            return source, [], {"source": source, "error": f"{type(exc).__name__}: {str(exc)[:240]}"}
+        except Exception as exc:
+            return source, [], {"source": source, "error": f"Unexpected {type(exc).__name__}: {str(exc)[:240]}"}
+
     def fetch_once(self) -> dict[str, Any]:
-        """Fetch every configured feed independently; one source cannot block others."""
+        """Fetch feeds concurrently; isolate errors and persist de-duplicated items."""
         successes = 0
         added: list[dict[str, str]] = []
         errors: list[dict[str, str]] = []
-        for feed in self.feeds:
-            source = str(feed.get("source") or "Unknown feed")[:100]
-            url = str(feed.get("url") or "")
-            try:
-                if not url.startswith("https://"):
-                    raise ValueError("Feed URL must use HTTPS")
-                request = Request(
-                    url,
-                    headers={
-                        "User-Agent": USER_AGENT,
-                        "Accept": "application/rss+xml, application/atom+xml, application/xml, text/xml",
-                    },
-                )
-                with urlopen(request, timeout=10) as response:
-                    status = getattr(response, "status", 200)
-                    if status != 200:
-                        raise RuntimeError(f"HTTP {status}")
-                    payload = response.read(MAX_FEED_BYTES + 1)
-                if len(payload) > MAX_FEED_BYTES:
-                    raise ValueError("Feed exceeded the 1 MB response limit")
-                parsed = parse_feed(payload, source, url)
-                successes += 1
-                for record in parsed:
-                    if record["id"] in self.seen_ids:
-                        continue
-                    self._append(record)
-                    self.seen_ids.add(record["id"])
-                    self.items.append(record)
-                    added.append(record)
-            except (HTTPError, URLError, TimeoutError, OSError, ValueError, RuntimeError) as exc:
-                errors.append({"source": source, "error": f"{type(exc).__name__}: {str(exc)[:240]}"})
-            except Exception as exc:
-                errors.append({"source": source, "error": f"Unexpected {type(exc).__name__}: {str(exc)[:240]}"})
+        workers = max(1, min(5, len(self.feeds)))
+        with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="rss-fetch") as pool:
+            # executor.map retains configured feed order while network requests run concurrently.
+            results = list(pool.map(self._fetch_one, self.feeds))
+        for source, parsed, error in results:
+            if error:
+                errors.append(error)
+                continue
+            successes += 1
+            for record in parsed:
+                if record["id"] in self.seen_ids:
+                    continue
+                self._append(record)
+                self.seen_ids.add(record["id"])
+                self.items.append(record)
 
-        self.items.sort(key=self._sort_timestamp)
+
         self.items = self.items[-MAX_RECENT_ITEMS:]
         if len(self.seen_ids) > 20_000:
             self.seen_ids = {str(item["id"]) for item in self.items if item.get("id")}

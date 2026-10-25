@@ -1,6 +1,6 @@
 # Polymarket Paper Research Bot
 
-A small Python service that polls public Polymarket Gamma market data, records observed outcome prices, and logs experimental price-momentum candidates to JSONL. It exposes a basic HTTP status endpoint for container health checks.
+A Python research service that polls public Polymarket Gamma market data, records observed outcome prices, logs experimental price-momentum candidates, and separately collects attributed world-news headlines from public BBC RSS feeds. It exposes health, paper-portfolio, status, and recent-news endpoints.
 
 ## Safety and limitations
 
@@ -20,7 +20,9 @@ python app.py
 
 The service listens on port 8080 by default. Routes:
 - `/` and `/status`: current worker status
-- `/health`: lightweight container health response
+- `/health`: health response that checks for a recent successful market poll
+- `/paper`: simulated portfolio and performance metrics
+- `/news`: recent attributed news headlines, source links, feed health, and collection status
 
 Environment variables for market selection:
 - `GAMMA_DISCOVERY_LIMIT` (default `400`, bounded to 20–500 active markets fetched for ranking)
@@ -32,8 +34,9 @@ Environment variables:
 - `PORT` (default `8080`)
 - `POLL_SECONDS` (default `60`, minimum `15`)
 - `DATA_DIR` (default `data`)
+- `NEWS_POLL_SECONDS` (default `300`, bounded to 60–3600 seconds)
 
-The worker saves observed public market snapshots to `data/market_snapshots.jsonl` and experimental price-change candidates to `data/candidate_signals.jsonl`. These files are append-only and can grow over time.
+The market worker saves observed public market snapshots to `data/market_snapshots.jsonl` and experimental price-change candidates to `data/candidate_signals.jsonl`. The separate news worker saves new, de-duplicated headlines to `data/news_events.jsonl`. Logs are rotated with bounded size. News-feed failures are tracked separately and do not stop the market-data worker. The default sources are BBC top stories, World, Business, Technology, and Science & Environment RSS feeds. Feed availability and publication latency vary; this is not a comprehensive feed of every world event.
 
 ## Run with Docker
 
@@ -41,6 +44,10 @@ The worker saves observed public market snapshots to `data/market_snapshots.json
 docker build -t polymarket-paper-bot .
 docker run --rm -p 8080:8080 -v polymarket-data:/app/data polymarket-paper-bot
 ```
+
+## News ingestion limits
+
+News records preserve source attribution, original links, publication timestamp when provided by the publisher, and collection timestamp. The collector handles RSS and Atom formats, de-duplicates IDs across restarts, limits response size, and isolates failures per feed. It records headlines and short summaries only; it does not treat news as verified truth or automatically convert news stories into trade signals. Headlines need corroboration and timestamp-aware evaluation before they can be used in research.
 
 ## Research methodology
 
@@ -115,6 +122,7 @@ Log files are bounded with automatic rotation to avoid unlimited disk growth:
 - Snapshots: `SNAPSHOT_MAX_MB=25`, `SNAPSHOT_BACKUPS=4`
 - Candidate signals: `SIGNAL_LOG_MAX_MB=5`, `SIGNAL_LOG_BACKUPS=3`
 - Paper events: `PAPER_EVENTS_MAX_MB=5`, `PAPER_EVENTS_BACKUPS=3`
+- News records: `NEWS_LOG_MAX_MB=5`, `NEWS_LOG_BACKUPS=3`
 
 Backups use suffixes such as `.1`, `.2`. Rotated logs are for diagnostics and auditability, not a substitute for a database backup.
 

@@ -444,8 +444,9 @@ class NewsCollector:
                 self._append(record)
                 self.seen_ids.add(record["id"])
                 self.items.append(record)
+                added.append(record)
 
-
+        self.items.sort(key=self._sort_timestamp)
         self.items = self.items[-MAX_RECENT_ITEMS:]
         if len(self.seen_ids) > 20_000:
             self.seen_ids = {str(item["id"]) for item in self.items if item.get("id")}

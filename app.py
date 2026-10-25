@@ -203,6 +203,37 @@ def worker_loop() -> None:
         time.sleep(POLL_SECONDS)
 
 
+def health_payload(snapshot: dict, now: datetime | None = None) -> tuple[bool, dict]:
+    """Report unhealthy when the worker has not produced a recent successful poll."""
+    current = now or datetime.now(timezone.utc)
+    if current.tzinfo is None:
+        current = current.replace(tzinfo=timezone.utc)
+    last_success = snapshot.get("last_success_at")
+    age_seconds = None
+    if last_success:
+        try:
+            parsed = datetime.fromisoformat(str(last_success).replace("Z", "+00:00"))
+            if parsed.tzinfo is None:
+                parsed = parsed.replace(tzinfo=timezone.utc)
+            age_seconds = max(0.0, (current - parsed.astimezone(timezone.utc)).total_seconds())
+        except (TypeError, ValueError, OverflowError):
+            age_seconds = None
+    stale_after = max(180, POLL_SECONDS * 3)
+    healthy = bool(snapshot.get("worker_running")) and age_seconds is not None and age_seconds <= stale_after
+    payload = {
+        "ok": healthy,
+        "mode": "paper_only",
+        "worker_running": bool(snapshot.get("worker_running")),
+        "last_success_at": last_success,
+        "seconds_since_success": round(age_seconds, 1) if age_seconds is not None else None,
+        "stale_after_seconds": stale_after,
+        "last_error": snapshot.get("last_error"),
+    }
+    if not healthy and not payload["last_error"]:
+        payload["last_error"] = "No recent successful market poll"
+    return healthy, payload
+
+
 class Handler(BaseHTTPRequestHandler):
     def _send(self, status: int, payload: dict) -> None:
         body = json.dumps(payload, ensure_ascii=False, allow_nan=False).encode("utf-8")
@@ -219,7 +250,8 @@ class Handler(BaseHTTPRequestHandler):
             with _lock:
                 snapshot = dict(_state)
             if self.path == "/health":
-                self._send(200, {"ok": True, "mode": "paper_only", "worker_running": snapshot["worker_running"]})
+                healthy, payload = health_payload(snapshot)
+                self._send(200 if healthy else 503, payload)
             elif self.path == "/paper":
                 self._send(200, get_paper_trader().snapshot())
             else:

@@ -3,6 +3,7 @@ import os
 import tempfile
 import unittest
 from pathlib import Path
+from datetime import datetime, timezone, timedelta
 from unittest.mock import patch
 from urllib.parse import parse_qs, urlparse
 
@@ -98,6 +99,38 @@ class ParserTests(unittest.TestCase):
                 app._previous.clear()
                 app._previous.update(old_previous)
                 app._state["signals_total"] = old_total
+
+
+    def test_health_requires_worker_and_recent_success(self):
+        now = datetime(2026, 10, 25, 12, tzinfo=timezone.utc)
+        fresh = {
+            "worker_running": True,
+            "last_success_at": (now - timedelta(seconds=30)).isoformat(),
+            "last_error": None,
+        }
+        healthy, payload = app.health_payload(fresh, now)
+        self.assertTrue(healthy)
+        self.assertTrue(payload["ok"])
+        self.assertEqual(payload["seconds_since_success"], 30.0)
+
+        stale = {**fresh, "last_success_at": (now - timedelta(seconds=app.POLL_SECONDS * 4)).isoformat()}
+        healthy, payload = app.health_payload(stale, now)
+        self.assertFalse(healthy)
+        self.assertFalse(payload["ok"])
+
+    def test_health_is_unhealthy_before_first_success_or_when_worker_stops(self):
+        now = datetime(2026, 10, 25, 12, tzinfo=timezone.utc)
+        healthy, payload = app.health_payload({"worker_running": True, "last_success_at": None}, now)
+        self.assertFalse(healthy)
+        self.assertIsNone(payload["seconds_since_success"])
+
+        stopped = {
+            "worker_running": False,
+            "last_success_at": now.isoformat(),
+            "last_error": None,
+        }
+        healthy, payload = app.health_payload(stopped, now)
+        self.assertFalse(healthy)
 
 if __name__ == "__main__":
     unittest.main()

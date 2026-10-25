@@ -1,4 +1,4 @@
-# מצב הפרויקט — 24 באוקטובר 2026
+# מצב הפרויקט — 25 באוקטובר 2026
 
 ## מה נמצא במאגר
 - שירות Python לקריאת נתונים ציבוריים מ-Gamma; נקודות HTTP: `/`, `/status`, `/health`, `/paper`.
@@ -7,6 +7,11 @@
 - כלי `backtest.py`: היסטוריית CLOB ציבורית, split כרונולוגי, ארבעה ספי רגישות, ותשואות קדימה של שעה/6 שעות/24 שעות מול baseline.
 - תצורת Railway Infrastructure as Code ב-`.railway/railway.ts`: שירות יחיד ב-`main`, Volume מתמשך 1GB אל `/app/data`, בדיקת חיות ומשתני סביבה של Paper Trading.
 - GitHub Actions לבדיקות Python + Docker, בדיקת API ציבורי, backtest היסטורי ואימות תצורת Railway.
+
+## עדכון אחרון — 25 באוקטובר 2026
+- [CI #80](https://github.com/shalevyakobov10-dev/polymarket_paper_bot/actions/runs/40165769842): **הצליח** על commit `ae7078ce` — קומפילציה, 29 בדיקות יחידה ובניית Docker image עברו.
+- הוסרה מחלקת סימולציה כפולה שנוספה במהלך העבודה; היישום ממשיך להשתמש במנוע המתמיד `paper_trading.py`, שכבר כולל מגבלות חשיפה, TP/SL, מגבלת זמן, שמירת מצב ורוטציית לוגים.
+- הצלחת CI מאמתת בדיקות וקונטיינר בלבד; היא אינה אומרת שהשירות נפרס או רץ בענן.
 
 ## בדיקות מאומתות
 - [Tests #71](https://github.com/shalevyakobov10-dev/polymarket_paper_bot/actions/runs/40112061374): **29 בדיקות עברו**, קומפילציה ובניית Docker image עברו.

@@ -1,0 +1,53 @@
+name: Public news RSS smoke check
+on:
+  push:
+    branches: [main]
+    paths:
+      - "news_monitor.py"
+      - ".github/workflows/news-rss-smoke.yml"
+  workflow_dispatch:
+  schedule:
+    - cron: "29 7 * * *"
+permissions:
+  contents: read
+jobs:
+  rss-read:
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Check public RSS feed availability and parseable headlines
+        run: |
+          python - <<'PY'
+          from urllib.request import Request, urlopen
+          from news_monitor import DEFAULT_FEEDS, MAX_FEED_BYTES, USER_AGENT, parse_feed
+
+          successes = 0
+          errors = []
+          for feed in DEFAULT_FEEDS:
+              source = feed["source"]
+              try:
+                  request = Request(feed["url"], headers={
+                      "User-Agent": USER_AGENT,
+                      "Accept": "application/rss+xml, application/atom+xml, application/xml, text/xml",
+                  })
+                  with urlopen(request, timeout=12) as response:
+                      if response.status != 200:
+                          raise RuntimeError(f"HTTP {response.status}")
+                      payload = response.read(MAX_FEED_BYTES + 1)
+                  items = parse_feed(payload, source, feed["url"])
+                  if not items:
+                      raise RuntimeError("feed returned no parseable headlines")
+                  successes += 1
+                  print(f"OK: {source}: {len(items)} headline(s)")
+              except Exception as exc:
+                  errors.append(f"{source}: {type(exc).__name__}: {str(exc)[:180]}")
+                  print(f"WARN: {errors[-1]}")
+
+          print(f"Summary: {successes}/{len(DEFAULT_FEEDS)} feeds healthy")
+          if successes == 0:
+              raise SystemExit("No configured public news feeds could be read")
+          PY

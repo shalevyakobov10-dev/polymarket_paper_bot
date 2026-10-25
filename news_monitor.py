@@ -12,6 +12,7 @@ import os
 import re
 import threading
 from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
 from pathlib import Path
 from typing import Any
 from urllib.error import HTTPError, URLError
@@ -110,7 +111,10 @@ def parse_feed(
         if not title or not link.startswith(("https://", "http://")):
             continue
         stable_key = stable_id.strip() or f"{title}|{published}"
-        item_id = hashlib.sha256(f"{source}|{stable_key}".encode("utf-8")).hexdigest()
+        # Use the article URL as the global identity when present so one story
+        # syndicated across multiple configured feeds is not stored repeatedly.
+        identity = link.split("#", 1)[0].strip() if link else f"{source}|{stable_key}"
+        item_id = hashlib.sha256(identity.encode("utf-8")).hexdigest()
         records.append({
             "id": item_id,
             "source": source[:100],
@@ -335,6 +339,27 @@ class NewsCollector:
             for index in range(1, backups + 1)
         ]
 
+    @staticmethod
+    def _sort_timestamp(record: dict[str, Any]) -> float:
+        for key in ("published_at", "fetched_at"):
+            raw = str(record.get(key) or "").strip()
+            if not raw:
+                continue
+            try:
+                parsed = parsedate_to_datetime(raw)
+                if parsed.tzinfo is None:
+                    parsed = parsed.replace(tzinfo=timezone.utc)
+                return parsed.timestamp()
+            except (TypeError, ValueError, OverflowError):
+                try:
+                    parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+                    if parsed.tzinfo is None:
+                        parsed = parsed.replace(tzinfo=timezone.utc)
+                    return parsed.timestamp()
+                except (TypeError, ValueError, OverflowError):
+                    continue
+        return 0.0
+
     def _load_existing(self) -> None:
         stored: list[dict[str, str]] = []
         for path in reversed(self._paths()):
@@ -354,7 +379,7 @@ class NewsCollector:
                         stored.append({str(k): str(v) for k, v in record.items()})
             except OSError:
                 continue
-        stored.sort(key=lambda row: row.get("fetched_at", ""))
+        stored.sort(key=self._sort_timestamp)
         self.items = stored[-MAX_RECENT_ITEMS:]
         # A bounded set is enough to avoid duplicates across recent restarts.
         if len(self.seen_ids) > 20_000:
@@ -415,6 +440,7 @@ class NewsCollector:
             except Exception as exc:
                 errors.append({"source": source, "error": f"Unexpected {type(exc).__name__}: {str(exc)[:240]}"})
 
+        self.items.sort(key=self._sort_timestamp)
         self.items = self.items[-MAX_RECENT_ITEMS:]
         if len(self.seen_ids) > 20_000:
             self.seen_ids = {str(item["id"]) for item in self.items if item.get("id")}

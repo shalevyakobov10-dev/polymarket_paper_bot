@@ -71,10 +71,9 @@ class PaperSimulator:
         position = self.positions.get(token)
 
         if position is not None:
+            prior_price = float(row.get("previous_observed_price", previous if previous is not None else price))
             position.last_price = price
-            delta = price - position.last_price if False else (
-                price - float(row.get("previous_observed_price", previous if previous is not None else price))
-            )
+            delta = price - prior_price
             # Close on a sufficiently negative observed move from prior snapshot.
             if delta <= -self.exit_delta:
                 fill_price = min(0.999999, price * (1 + self.slippage_rate))

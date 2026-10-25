@@ -1,10 +1,12 @@
 import json
 import os
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 from datetime import datetime, timezone, timedelta
 from unittest.mock import patch
+from urllib.request import urlopen as http_urlopen
 from urllib.parse import parse_qs, urlparse
 
 import app
@@ -131,6 +133,45 @@ class ParserTests(unittest.TestCase):
         }
         healthy, payload = app.health_payload(stopped, now)
         self.assertFalse(healthy)
+
+
+    def test_news_endpoint_returns_status_and_attributed_items(self):
+        server = app.ThreadingHTTPServer(("127.0.0.1", 0), app.Handler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        old_state = dict(app._news_state)
+        old_items = list(app._news_items_cache)
+        try:
+            with app._news_lock:
+                app._news_state.update({
+                    "worker_running": True,
+                    "feeds_configured": 1,
+                    "feeds_succeeded": 1,
+                    "feeds_failed": 0,
+                    "last_success_at": app.utc_now(),
+                    "last_error": None,
+                })
+                app._news_items_cache[:] = [{
+                    "id": "test-id",
+                    "source": "Example News",
+                    "title": "A test headline",
+                    "url": "https://example.org/story",
+                }]
+            thread.start()
+            address = f"http://127.0.0.1:{server.server_port}/news"
+            with http_urlopen(address, timeout=3) as response:
+                payload = json.loads(response.read().decode("utf-8"))
+            self.assertEqual(payload["feeds_succeeded"], 1)
+            self.assertEqual(payload["items"][0]["source"], "Example News")
+            self.assertEqual(payload["items"][0]["url"], "https://example.org/story")
+        finally:
+            server.shutdown()
+            server.server_close()
+            if thread.is_alive():
+                thread.join(timeout=2)
+            with app._news_lock:
+                app._news_state.clear()
+                app._news_state.update(old_state)
+                app._news_items_cache[:] = old_items
 
 if __name__ == "__main__":
     unittest.main()

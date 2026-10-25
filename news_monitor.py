@@ -10,6 +10,7 @@ import html
 import json
 import os
 import re
+import threading
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -123,6 +124,196 @@ def parse_feed(
     return records
 
 
+_STOP_WORDS = {
+    "a", "an", "and", "are", "as", "at", "be", "been", "being", "but",
+    "by", "can", "could", "did", "do", "does", "for", "from", "had",
+    "has", "have", "he", "her", "here", "hers", "him", "his", "how",
+    "i", "if", "in", "into", "is", "it", "its", "may", "might", "more",
+    "most", "must", "news", "of", "on", "or", "our", "ours", "shall",
+    "she", "should", "so", "some", "such", "than", "that", "the", "their",
+    "theirs", "them", "then", "there", "these", "they", "this", "those",
+    "through", "to", "under", "up", "us", "very", "was", "we", "were",
+    "what", "when", "where", "which", "while", "who", "why", "will",
+    "with", "would", "you", "your", "yours", "market", "markets", "update",
+    "latest", "live", "report", "reports", "says", "said",
+}
+
+
+def _tokens(value: str) -> set[str]:
+    tokens = set()
+    for raw in re.findall(r"[a-z0-9]{3,}", (value or "").lower()):
+        token = raw
+        if len(token) > 5 and token.endswith("ing"):
+            token = token[:-3]
+        elif len(token) > 4 and token.endswith("ed"):
+            token = token[:-2]
+        elif len(token) > 4 and token.endswith("ies"):
+            token = token[:-3] + "y"
+        elif len(token) > 4 and token.endswith("s") and not token.endswith("ss"):
+            token = token[:-1]
+        if len(token) >= 3 and token not in _STOP_WORDS:
+            tokens.add(token)
+    return tokens
+
+
+def match_news_to_markets(
+    news_item: dict[str, Any],
+    markets: list[dict[str, Any]],
+    *,
+    max_matches: int = 3,
+) -> list[dict[str, Any]]:
+    """Return conservative keyword-overlap candidates, never probabilities."""
+    title_tokens = _tokens(str(news_item.get("title") or ""))
+    news_tokens = title_tokens | _tokens(str(news_item.get("summary") or ""))
+    if len(title_tokens) < 2 or len(news_tokens) < 2:
+        return []
+
+    candidates = []
+    seen_market_ids: set[str] = set()
+    for market in markets:
+        market_id = str(market.get("market_id") or market.get("conditionId") or market.get("id") or "")
+        question = str(market.get("question") or "").strip()
+        if not market_id or not question or market_id in seen_market_ids:
+            continue
+        seen_market_ids.add(market_id)
+        market_tokens = _tokens(question)
+        shared = news_tokens & market_tokens
+        title_shared = title_tokens & market_tokens
+        # Require multiple non-generic terms and at least one in the headline itself.
+        if len(shared) < 2 or not title_shared:
+            continue
+        candidates.append({
+            "market_id": market_id,
+            "question": question[:500],
+            "matched_terms": sorted(shared),
+            "headline_matched_terms": sorted(title_shared),
+            "shared_term_count": len(shared),
+            "lexical_overlap": round(len(shared) / max(1, len(market_tokens)), 4),
+            "method": "keyword_overlap_v1",
+            "research_only": True,
+            "execution": "none",
+        })
+    candidates.sort(
+        key=lambda row: (row["shared_term_count"], row["lexical_overlap"]),
+        reverse=True,
+    )
+    return candidates[:max(1, min(10, int(max_matches)))]
+
+
+class NewsMarketMatcher:
+    """Persist de-duplicated news-to-market keyword links for research review."""
+
+    def __init__(
+        self,
+        log_path: str | Path,
+        *,
+        max_recent: int = 500,
+    ) -> None:
+        self.log_path = Path(log_path)
+        self.max_recent = max(1, min(5000, int(max_recent)))
+        self._lock = threading.RLock()
+        self.seen_pairs: set[str] = set()
+        self.recent: list[dict[str, Any]] = []
+        self._load_existing()
+
+    def _paths(self) -> list[Path]:
+        try:
+            backups = int(os.getenv("NEWS_MATCH_LOG_BACKUPS", "3"))
+        except (ValueError, TypeError):
+            backups = 3
+        backups = min(10, max(0, backups))
+        return [self.log_path] + [
+            self.log_path.with_name(f"{self.log_path.name}.{index}")
+            for index in range(1, backups + 1)
+        ]
+
+    def _load_existing(self) -> None:
+        records: list[dict[str, Any]] = []
+        for path in reversed(self._paths()):
+            if not path.exists():
+                continue
+            try:
+                with path.open("r", encoding="utf-8") as handle:
+                    for line in handle:
+                        try:
+                            record = json.loads(line)
+                        except (ValueError, TypeError):
+                            continue
+                        if not isinstance(record, dict) or not record.get("pair_id"):
+                            continue
+                        self.seen_pairs.add(str(record["pair_id"]))
+                        records.append(record)
+            except OSError:
+                continue
+        records.sort(key=lambda row: str(row.get("matched_at") or ""))
+        self.recent = records[-self.max_recent:]
+        if len(self.seen_pairs) > 100_000:
+            self.seen_pairs = {str(row["pair_id"]) for row in self.recent if row.get("pair_id")}
+
+    def match(
+        self,
+        news_items: list[dict[str, Any]],
+        markets: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        with self._lock:
+            added: list[dict[str, Any]] = []
+            for news in news_items:
+                news_id = str(news.get("id") or "").strip()
+                if not news_id:
+                    continue
+                for candidate in match_news_to_markets(news, markets):
+                    market_id = str(candidate["market_id"])
+                    pair_id = hashlib.sha256(f"{news_id}|{market_id}".encode("utf-8")).hexdigest()
+                    if pair_id in self.seen_pairs:
+                        continue
+                    record = {
+                        "pair_id": pair_id,
+                        "news_id": news_id,
+                        "source": str(news.get("source") or "")[:100],
+                        "news_title": str(news.get("title") or "")[:MAX_TITLE_CHARS],
+                        "news_url": str(news.get("url") or "")[:2000],
+                        "news_published_at": str(news.get("published_at") or "")[:100],
+                        "market_id": market_id,
+                        "market_question": candidate["question"],
+                        "matched_terms": candidate["matched_terms"],
+                        "headline_matched_terms": candidate["headline_matched_terms"],
+                        "shared_term_count": candidate["shared_term_count"],
+                        "lexical_overlap": candidate["lexical_overlap"],
+                        "method": candidate["method"],
+                        "research_only": True,
+                        "execution": "none",
+                        "matched_at": utc_now(),
+                    }
+                    self._append(record)
+                    self.seen_pairs.add(pair_id)
+                    self.recent.append(record)
+                    added.append(record)
+            self.recent = self.recent[-self.max_recent:]
+            if len(self.seen_pairs) > 100_000:
+                self.seen_pairs = {str(row["pair_id"]) for row in self.recent if row.get("pair_id")}
+            return {
+                "added": added,
+                "items_total_recent": len(self.recent),
+                "latest": list(reversed(self.recent)),
+            }
+
+    def _append(self, record: dict[str, Any]) -> None:
+        self.log_path.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            max_mb = int(os.getenv("NEWS_MATCH_LOG_MAX_MB", "5"))
+        except (ValueError, TypeError):
+            max_mb = 5
+        max_mb = min(100, max(1, max_mb))
+        try:
+            backups = int(os.getenv("NEWS_MATCH_LOG_BACKUPS", "3"))
+        except (ValueError, TypeError):
+            backups = 3
+        backups = min(10, max(0, backups))
+        rotate_jsonl_file(self.log_path, max_mb * 1024 * 1024, backups)
+        with self.log_path.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(record, ensure_ascii=False, allow_nan=False) + "\n")
+
+
 class NewsCollector:
     """Fetch a small, configurable set of public RSS feeds with de-duplication."""
 
@@ -233,6 +424,7 @@ class NewsCollector:
             "feeds_failed": len(errors),
             "feed_errors": errors,
             "items_added": len(added),
+            "new_items": added,
             "items_total_recent": len(self.items),
             "latest_items": list(reversed(self.items[-MAX_RECENT_ITEMS:])),
         }

@@ -7,6 +7,7 @@ from unittest.mock import patch
 from urllib.parse import parse_qs, urlparse
 
 import app
+from paper_simulator import PaperSimulator
 
 
 class ParserTests(unittest.TestCase):
@@ -98,6 +99,25 @@ class ParserTests(unittest.TestCase):
                 app._previous.clear()
                 app._previous.update(old_previous)
                 app._state["signals_total"] = old_total
+
+
+    def test_paper_simulator_respects_position_cap_and_never_executes(self):
+        sim = PaperSimulator(initial_cash=100, max_position_usd=2, fee_rate=0, slippage_rate=0)
+        sim.on_observation({"token_id": "t1", "observed_price": 0.50, "timestamp": "t0"})
+        entry = sim.on_observation({"token_id": "t1", "observed_price": 0.54, "timestamp": "t1"})
+        self.assertEqual(entry["type"], "entry")
+        self.assertAlmostEqual(entry["stake_usd"], 2.0)
+        self.assertEqual(entry["execution"], "simulated_only")
+        self.assertAlmostEqual(sim.cash, 98.0)
+        sim.on_observation({"token_id": "t1", "observed_price": 0.53, "timestamp": "t2"})
+        exit_event = sim.on_observation({"token_id": "t1", "observed_price": 0.51, "timestamp": "t3"})
+        self.assertEqual(exit_event["type"], "exit")
+        self.assertEqual(exit_event["execution"], "simulated_only")
+        self.assertEqual(len(sim.positions), 0)
+        summary = sim.summary()
+        self.assertEqual(summary["mode"], "paper_only")
+        self.assertEqual(summary["closed_trades"], 1)
+        self.assertAlmostEqual(summary["equity_usd"], 99.88888888888889)
 
 
 if __name__ == "__main__":

@@ -654,7 +654,14 @@ class Handler(BaseHTTPRequestHandler):
                     news_snapshot["gdelt"] = dict(_gdelt_state)
                 with _lock:
                     stream_snapshot = dict(_market_stream_state)
-                self._send(200, {"service": "Polymarket Paper Research Bot", **snapshot, "news": news_snapshot, "market_stream": stream_snapshot})
+                    resolution_snapshot = dict(_resolution_state)
+                self._send(200, {
+                    "service": "Polymarket Paper Research Bot",
+                    **snapshot,
+                    "news": news_snapshot,
+                    "market_stream": stream_snapshot,
+                    "resolutions": resolution_snapshot,
+                })
         else:
             self._send(404, {"error": "not_found"})
 

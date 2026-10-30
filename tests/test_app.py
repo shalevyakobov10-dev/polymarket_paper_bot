@@ -125,9 +125,13 @@ class ParserTests(unittest.TestCase):
             ]
             old_previous = dict(app._previous)
             old_total = app._state["signals_total"]
+            old_feature_timestamps = dict(app._research_feature_last_written)
+            old_feature_schedule_loaded = app._research_feature_schedule_loaded
             try:
                 app._previous.clear()
                 app._state["signals_total"] = 0
+                app._research_feature_last_written.clear()
+                app._research_feature_schedule_loaded = False
                 with patch.object(app, "DATA_DIR", root), \
                      patch.object(app, "SNAPSHOTS", root / "snapshots.jsonl"), \
                      patch.object(app, "SIGNALS", root / "signals.jsonl"), \
@@ -135,6 +139,10 @@ class ParserTests(unittest.TestCase):
                      patch.object(app, "fetch_markets", side_effect=[[markets[0]], [markets[1]]]), \
                      patch.object(app, "fetch_order_books", return_value={}):
                     first = app.poll_once()
+                    app._research_feature_last_written["m1"] = (
+                        datetime.now(timezone.utc).timestamp()
+                        - app.RESEARCH_FEATURES_SNAPSHOT_SECONDS - 1
+                    )
                     second = app.poll_once()
                 self.assertEqual(first["candidates"], 0)
                 self.assertEqual(second["candidates"], 1)
@@ -143,6 +151,8 @@ class ParserTests(unittest.TestCase):
                 self.assertEqual(record["execution"], "none")
                 self.assertEqual(len((root / "snapshots.jsonl").read_text().splitlines()), 2)
                 feature_records = [json.loads(line) for line in (root / "research_features.jsonl").read_text().splitlines()]
+                self.assertEqual(first["research_features_written"], 1)
+                self.assertEqual(second["research_features_written"], 1)
                 self.assertEqual(len(feature_records), 2)
                 self.assertEqual(feature_records[-1]["gamma_yes_probability"], 0.55)
                 self.assertIsNone(feature_records[-1]["forecast"])
@@ -150,6 +160,9 @@ class ParserTests(unittest.TestCase):
                 app._previous.clear()
                 app._previous.update(old_previous)
                 app._state["signals_total"] = old_total
+                app._research_feature_last_written.clear()
+                app._research_feature_last_written.update(old_feature_timestamps)
+                app._research_feature_schedule_loaded = old_feature_schedule_loaded
 
 
     def test_forecast_evaluation_endpoint_is_available_without_resolved_samples(self):

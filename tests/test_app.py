@@ -89,12 +89,18 @@ class ParserTests(unittest.TestCase):
             "outcomePrices": '["0.62", "0.38"]',
             "clobTokenIds": '["yes-token", "no-token"]',
             "volume24hr": 10,
+            "feesEnabled": True,
+            "feeType": "general_fees",
+            "feeSchedule": {"rate": 0.05, "exponent": 1, "takerOnly": True},
         }]
         rows = app.parse_outcomes(markets)
         self.assertEqual(len(rows), 2)
         self.assertEqual(rows[0]["observed_price"], 0.62)
         self.assertEqual(rows[0]["token_id"], "yes-token")
         self.assertEqual(rows[1]["outcome"], "No")
+        self.assertTrue(rows[0]["fees_enabled"])
+        self.assertEqual(rows[0]["fee_type"], "general_fees")
+        self.assertEqual(rows[0]["fee_schedule"]["rate"], 0.05)
 
     def test_skips_invalid_prices(self):
         rows = app.parse_outcomes([{

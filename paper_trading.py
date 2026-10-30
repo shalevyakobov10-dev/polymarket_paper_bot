@@ -143,6 +143,7 @@ class PaperTrader:
             "losing_trades": 0,
             "daily_date_utc": now.date().isoformat(),
             "daily_realized_pnl": 0.0,
+            "daily_unrealized_baseline": 0.0,
             "positions": {},
             "last_prices": {},
             "recent_events": [],
@@ -170,6 +171,7 @@ class PaperTrader:
         loaded.setdefault("losing_trades", 0)
         loaded.setdefault("daily_date_utc", utc_now().date().isoformat())
         loaded.setdefault("daily_realized_pnl", 0.0)
+        loaded.setdefault("daily_unrealized_baseline", 0.0)
         loaded.setdefault("recent_events", [])
         return loaded
 
@@ -202,6 +204,10 @@ class PaperTrader:
         if self._state.get("daily_date_utc") != today:
             self._state["daily_date_utc"] = today
             self._state["daily_realized_pnl"] = 0.0
+            self._state["daily_unrealized_baseline"] = sum(
+                float(position.get("unrealized_pnl", 0.0))
+                for position in self._state["positions"].values()
+            )
 
     def process_snapshot(self, rows: list[dict[str, Any]], now: datetime | None = None, *, persist_state: bool = True) -> dict[str, list[dict[str, Any]]]:
         """Update marks, simulate exits, and consider entries from one observed snapshot."""
@@ -283,8 +289,11 @@ class PaperTrader:
             max(0.0, self.config.max_open_exposure_usd - exposure),
             available_cash / (1.0 + self.config.fee_rate),
         )
-        open_unrealized_pnl = sum(
+        open_unrealized_total = sum(
             float(position.get("unrealized_pnl", 0.0)) for position in positions.values()
+        )
+        open_unrealized_pnl = (
+            open_unrealized_total - float(self._state.get("daily_unrealized_baseline", 0.0))
         )
         decision = evaluate_paper_entry(
             price=observed_price,

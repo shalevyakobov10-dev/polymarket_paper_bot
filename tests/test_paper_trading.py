@@ -88,6 +88,27 @@ class PaperTraderTests(unittest.TestCase):
         self.assertEqual(result["opened"], [])
         self.assertEqual(result["candidates"][0]["skip_reason"], "daily_loss_limit_reached")
 
+    def test_daily_loss_guard_includes_open_unrealized_losses(self):
+        cfg = PaperConfig(**{
+            **self.config.__dict__,
+            "max_open_exposure_usd": 10.0,
+            "daily_loss_limit_usd": 0.5,
+        })
+        bot = PaperTrader(Path(self.temp.name) / "unrealized_state.json", cfg)
+        tokens = [f"token-{index}" for index in range(6)]
+        bot.process_snapshot([self.row(0.50, token) for token in tokens], self.now)
+        bot.process_snapshot(
+            [self.row(0.54, token) for token in tokens[:5]] + [self.row(0.50, tokens[5])],
+            self.now + timedelta(minutes=5),
+        )
+        self.assertEqual(bot.snapshot()["metrics"]["open_positions"], 5)
+        result = bot.process_snapshot(
+            [self.row(0.50, token) for token in tokens[:5]] + [self.row(0.54, tokens[5])],
+            self.now + timedelta(minutes=10),
+        )
+        self.assertEqual(result["opened"], [])
+        self.assertEqual(result["candidates"][0]["skip_reason"], "daily_loss_limit_reached")
+
     def test_fee_assumption_is_applied_on_entry_and_exit(self):
         cfg = PaperConfig(**{**self.config.__dict__, "fee_rate": 0.01})
         bot = PaperTrader(Path(self.temp.name) / "fee_state.json", cfg)

@@ -12,7 +12,7 @@ class GDELTCollectorTests(unittest.TestCase):
             {"title": "Global event update", "url": "https://example.org/a", "seendate": "20261030T120000Z", "domain": "example.org", "sourcecountry": "US", "language": "English"},
             {"title": "Duplicate syndicated copy", "url": "https://example.org/a#fragment"},
             {"title": "Unsafe URL", "url": "http://example.org/b"},
-            {"title": "No title", "url": "https://example.org/c"},
+            {"title": "", "url": "https://example.org/c"},
         ]}
         rows = global_news.normalize_gdelt_articles(payload, "2026-10-30T12:01:00+00:00")
         self.assertEqual(len(rows), 1)

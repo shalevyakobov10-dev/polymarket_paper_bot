@@ -27,6 +27,7 @@ The service listens on port 8080 by default. Routes:
 - `/resolutions`: health and ingestion counts for public resolved binary markets
 - `/forecast-evaluation`: Brier score, log loss, accuracy, calibration bins and Brier skill against the sample base rate for archived pre-resolution Yes prices
 - `/research-features`: latest joined point-in-time market features (Gamma Yes/No prices, public CLOB spread/depth, and timestamp-filtered lexical news matches)
+- `/independent-model-evaluation`: leakage-aware comparison of a regularized feature model against the raw Polymarket probability on a purged chronological holdout
 
 Environment variables for market selection:
 - `GAMMA_DISCOVERY_LIMIT` (default `400`, bounded to 20–500 active markets fetched for ranking)
@@ -81,6 +82,14 @@ The resolution worker polls the public Gamma API for recently closed markets and
 The scorecard reports Brier score, log loss, 50% threshold accuracy, calibration bins, expected calibration error, and Brier skill versus the empirical base-rate forecast. Lower Brier and log loss are better; positive Brier skill means the archived market prices beat the simple base-rate reference on this same sample. It also reports a chronological holdout: the earlier 70% of resolved markets estimate a base-rate reference, and the later 30% are evaluated against that frozen reference. The holdout is withheld until at least 20 training and 10 test markets are available. The endpoint explicitly warns when there are too few resolved samples.
 
 **Important:** this first evaluation stage measures the historical calibration of Polymarket's own implied Yes prices. It is not an independent news/sentiment model, it is not evidence of a profitable strategy, and it does not estimate executable trading returns. It currently supports binary Yes/No markets only. Historical samples accumulate only while the research worker is collecting snapshots; resolved markets that were never observed before resolution are excluded. This separation is intentional: first establish a reliable, leak-free baseline before attempting to train or evaluate an independent model.
+
+## Independent feature-model evaluation
+
+The `/independent-model-evaluation` endpoint joins `research_features.jsonl` with resolved binary outcomes and selects one point-in-time feature row per market closest to 24 hours before resolution (12-hour tolerance). It compares the raw Gamma Yes probability with a fixed regularized logistic model using the market log-odds, the CLOB midpoint difference, book availability, top-five depth imbalance, log spread, recent lexical news-match count, mean headline keyword overlap, and log 24-hour volume.
+
+The time split is based on the feature observation timestamp, not random sampling. Training rows are additionally purged unless their market outcome had already resolved before the first test forecast timestamp. Imputation and standardization parameters are learned only from the training window. The model is withheld until at least 80 leakage-safe training markets and 20 later test markets are available, and is also withheld if the training set contains only one outcome class. The L2 regularization setting and feature set are fixed rather than selected against the holdout.
+
+The endpoint reports Brier score, log loss, accuracy, and score differences between the model and the market baseline. A positive score difference on one holdout is not proof of statistical significance, persistent predictive edge, or profitability. The evaluation is not a trading backtest and does not model executable fills, fees, slippage, position sizing, or portfolio risk. The model does not issue trade instructions or orders. Insufficient historical data is an explicit status, not a reason to lower the sample thresholds.
 
 ## Historical backtest
 

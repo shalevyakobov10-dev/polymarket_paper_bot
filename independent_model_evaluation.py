@@ -319,13 +319,19 @@ def evaluate_feature_model(
             or not isinstance(features, dict)
         ):
             continue
-        try:
-            vector = extract_model_features({
-                "gamma_yes_probability": market_probability,
-                **features,
-            })
-        except ValueError:
-            continue
+        clipped_market = min(0.99, max(0.01, market_probability))
+        vector: dict[str, float | None] = {}
+        for name in FEATURE_NAMES:
+            value = _number(features.get(name))
+            if value is not None:
+                vector[name] = value
+            else:
+                vector[name] = None
+        # Rebuild the market-prior feature from the separately validated baseline
+        # probability rather than trusting a potentially inconsistent stored value.
+        vector["logit_market_probability"] = math.log(
+            clipped_market / (1.0 - clipped_market)
+        )
         eligible.append({
             **sample,
             "forecast_timestamp": _iso(forecast_stamp),

@@ -101,17 +101,39 @@ def _volume_value(market: dict) -> float:
 
 
 def fetch_markets() -> list[dict]:
-    discovery_limit = _bounded_int_env("GAMMA_DISCOVERY_LIMIT", 400, 20, 500)
+    """Discover active markets across bounded Gamma pages, then rank by 24h volume."""
+    page_size = _bounded_int_env("GAMMA_DISCOVERY_LIMIT", 400, 20, 500)
+    max_pages = _bounded_int_env("GAMMA_DISCOVERY_PAGES", 5, 1, 10)
     markets_to_track = _bounded_int_env("MARKETS_TO_TRACK", 20, 1, 100)
-    query = urlencode({"active": "true", "closed": "false", "limit": discovery_limit, "offset": 0})
-    request = Request(f"{GAMMA_URL}?{query}", headers={"User-Agent": "PolymarketPaperResearchBot/1.0"})
-    with urlopen(request, timeout=15) as response:
-        if response.status != 200:
-            raise RuntimeError(f"Gamma API returned HTTP {response.status}")
-        payload = json.loads(response.read().decode("utf-8"))
-    if not isinstance(payload, list):
-        raise ValueError("Gamma response was not a list")
-    markets = [item for item in payload if isinstance(item, dict)]
+    discovered: dict[str, dict] = {}
+    for page in range(max_pages):
+        query = urlencode({
+            "active": "true",
+            "closed": "false",
+            "limit": page_size,
+            "offset": page * page_size,
+        })
+        request = Request(
+            f"{GAMMA_URL}?{query}",
+            headers={"User-Agent": "PolymarketPaperResearchBot/1.0"},
+        )
+        with urlopen(request, timeout=15) as response:
+            if response.status != 200:
+                raise RuntimeError(f"Gamma API returned HTTP {response.status}")
+            payload = json.loads(response.read().decode("utf-8"))
+        if not isinstance(payload, list):
+            raise ValueError("Gamma response was not a list")
+        page_markets = [item for item in payload if isinstance(item, dict)]
+        for index, market in enumerate(page_markets):
+            market_id = str(market.get("conditionId") or market.get("id") or "").strip()
+            if not market_id:
+                # Preserve anonymous records only within this page; they cannot be
+                # safely deduplicated across pages without a stable market ID.
+                market_id = f"page-{page}-item-{index}"
+            discovered.setdefault(market_id, market)
+        if len(payload) < page_size:
+            break
+    markets = list(discovered.values())
     markets.sort(key=_volume_value, reverse=True)
     with _lock:
         _state["markets_discovered"] = len(markets)

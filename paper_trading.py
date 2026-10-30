@@ -14,6 +14,7 @@ from typing import Any
 from risk_manager import evaluate_paper_entry
 from market_quality import evaluate_order_book_quality
 from paper_fills import simulate_orderbook_fill
+from paper_fees import conservative_fee_fraction_of_notional, estimate_taker_fee, resolve_taker_fee_model
 
 
 def utc_now() -> datetime:
@@ -341,6 +342,16 @@ class PaperTrader:
         )
         if not market_quality["eligible"]:
             return None, str(market_quality["reason"])
+        fee_model = resolve_taker_fee_model(row, fallback_rate=self.config.fee_rate)
+        if fee_model.get("status") == "unknown":
+            return None, str(fee_model.get("reason") or fee_model.get("mode") or "unknown_market_fee_schedule")
+        orderbook = row.get("orderbook") if isinstance(row.get("orderbook"), dict) else {}
+        lowest_entry_price = finite_float(orderbook.get("best_ask")) if market_quality.get("reason") == "approved_market_quality" else observed_price
+        fee_reserve_rate = conservative_fee_fraction_of_notional(
+            fee_model, lowest_price=lowest_entry_price
+        )
+        if fee_reserve_rate is None:
+            return None, "market_fee_reserve_unavailable"
         positions: dict[str, dict[str, Any]] = self._state["positions"]
         exposure = sum(float(position.get("gross_cost", 0.0)) for position in positions.values())
         entry_reference_price = observed_price
@@ -351,7 +362,7 @@ class PaperTrader:
         spend = min(
             self.config.max_position_usd,
             max(0.0, self.config.max_open_exposure_usd - exposure),
-            available_cash / (1.0 + self.config.fee_rate),
+            available_cash / (1.0 + fee_reserve_rate),
         )
         open_unrealized_total = sum(
             float(position.get("unrealized_pnl", 0.0)) for position in positions.values()
@@ -383,7 +394,7 @@ class PaperTrader:
             daily_realized_pnl=float(self._state["daily_realized_pnl"]),
             open_unrealized_pnl=open_unrealized_pnl,
             daily_loss_limit_usd=self.config.daily_loss_limit_usd,
-            fee_rate=self.config.fee_rate,
+            fee_rate=fee_reserve_rate,
             opposing_market_outcome_open=opposing_market_outcome_open,
         )
         if not decision.approved:
@@ -413,7 +424,17 @@ class PaperTrader:
             else:
                 initial_mark_price = observed_price
                 initial_mark_source = "gamma_outcome_price_fallback_insufficient_bid_depth"
-        entry_fee = spend * self.config.fee_rate
+        entry_fee_details = estimate_taker_fee(
+            fee_model,
+            shares=shares,
+            price=entry_price,
+            notional=spend,
+        )
+        if not entry_fee_details.get("known"):
+            return None, "entry_fee_estimate_unavailable"
+        entry_fee = float(entry_fee_details["fee"])
+        if spend + entry_fee > available_cash + 1e-8:
+            return None, "insufficient_cash_after_market_fee"
         position = {
             "token_id": key,
             "market_id": str(row.get("market_id") or ""),
@@ -429,6 +450,8 @@ class PaperTrader:
             "shares": round(shares, 12),
             "gross_cost": round(spend, 8),
             "entry_fee": round(entry_fee, 8),
+            "fee_model": fee_model,
+            "entry_fee_details": entry_fee_details,
             "signal_delta": round(delta, 8),
             "entry_market_quality": market_quality,
             "entry_fill_details": entry_fill_details,
@@ -458,9 +481,33 @@ class PaperTrader:
             return "simulated_time_limit"
         return None
 
+    def _position_fee_model(self, position: dict[str, Any]) -> dict[str, Any]:
+        stored = position.get("fee_model")
+        if isinstance(stored, dict):
+            return stored
+        # Backward compatibility for positions created before market-specific fees.
+        return {
+            "status": "assumed",
+            "mode": "legacy_flat_rate_fallback",
+            "rate": self.config.fee_rate,
+            "source": "legacy_paper_config",
+            "research_only": True,
+            "execution": "none",
+        }
+
     def _position_unrealized(self, position: dict[str, Any], observed_price: float) -> float:
         exit_price = observed_price * (1.0 - self.config.simulated_slippage)
-        net_proceeds = float(position["shares"]) * exit_price * (1.0 - self.config.fee_rate)
+        shares = float(position["shares"])
+        gross_proceeds = shares * exit_price
+        fee_details = estimate_taker_fee(
+            self._position_fee_model(position),
+            shares=shares,
+            price=exit_price,
+            notional=gross_proceeds,
+        )
+        if not fee_details.get("known"):
+            return -float(position["gross_cost"]) - float(position["entry_fee"])
+        net_proceeds = gross_proceeds - float(fee_details["fee"])
         return net_proceeds - float(position["gross_cost"]) - float(position["entry_fee"])
 
     def _close_position(
@@ -476,7 +523,16 @@ class PaperTrader:
         position = self._state["positions"].pop(key)
         exit_price = observed_price * (1.0 - self.config.simulated_slippage)
         gross_proceeds = float(position["shares"]) * exit_price
-        exit_fee = gross_proceeds * self.config.fee_rate
+        fee_model = self._position_fee_model(position)
+        exit_fee_details = estimate_taker_fee(
+            fee_model,
+            shares=float(position["shares"]),
+            price=exit_price,
+            notional=gross_proceeds,
+        )
+        if not exit_fee_details.get("known"):
+            raise ValueError("Cannot close paper position without a valid fee estimate")
+        exit_fee = float(exit_fee_details["fee"])
         net_proceeds = gross_proceeds - exit_fee
         pnl = net_proceeds - float(position["gross_cost"]) - float(position["entry_fee"])
         self._state["cash"] = round(float(self._state["cash"]) + net_proceeds, 8)
@@ -506,6 +562,8 @@ class PaperTrader:
             "gross_cost": position["gross_cost"],
             "entry_fee": position["entry_fee"],
             "exit_fee": round(exit_fee, 8),
+            "fee_model": fee_model,
+            "exit_fee_details": exit_fee_details,
             "pnl": round(pnl, 8),
             "reason": reason,
             "execution": "simulated_only",
@@ -520,7 +578,19 @@ class PaperTrader:
             exposure = 0.0
             for position in positions:
                 mark = finite_float(position.get("mark_price")) or 0.0
-                marked_value += max(0.0, float(position.get("shares", 0.0)) * mark * (1.0 - self.config.simulated_slippage) * (1.0 - self.config.fee_rate))
+                shares = float(position.get("shares", 0.0))
+                exit_price = mark * (1.0 - self.config.simulated_slippage)
+                gross_value = shares * exit_price
+                fee_details = estimate_taker_fee(
+                    self._position_fee_model(position),
+                    shares=shares,
+                    price=exit_price,
+                    notional=gross_value,
+                )
+                marked_value += max(
+                    0.0,
+                    gross_value - float(fee_details["fee"] if fee_details.get("known") else gross_value),
+                )
                 unrealized += float(position.get("unrealized_pnl", 0.0))
                 exposure += float(position.get("gross_cost", 0.0))
             equity = float(state["cash"]) + marked_value

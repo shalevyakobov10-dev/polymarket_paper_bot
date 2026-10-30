@@ -292,5 +292,28 @@ class ParserTests(unittest.TestCase):
                     thread.join(timeout=2)
                 app.RESEARCH_FEATURES = old_path
 
+
+    def test_independent_model_evaluation_reports_insufficient_data_without_fitting(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            old_features = app.RESEARCH_FEATURES
+            old_resolutions = app.RESOLUTIONS
+            old_collector = app._resolution_collector
+            try:
+                app.RESEARCH_FEATURES = root / "research_features.jsonl"
+                app.RESOLUTIONS = root / "resolved_markets.jsonl"
+                app._resolution_collector = None
+                report = app.independent_model_evaluation_payload()
+                self.assertEqual(report["mode"], "INDEPENDENT_FEATURE_MODEL_EVALUATION_V1")
+                self.assertEqual(report["status"], "insufficient_data")
+                self.assertEqual(report["eligible_markets"], 0)
+                self.assertTrue(report["research_only"])
+                self.assertIsNone(report["forecast"])
+                self.assertEqual(report["execution"], "none")
+            finally:
+                app.RESEARCH_FEATURES = old_features
+                app.RESOLUTIONS = old_resolutions
+                app._resolution_collector = old_collector
+
 if __name__ == "__main__":
     unittest.main()

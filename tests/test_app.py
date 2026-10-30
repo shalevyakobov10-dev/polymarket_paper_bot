@@ -131,6 +131,7 @@ class ParserTests(unittest.TestCase):
                 with patch.object(app, "DATA_DIR", root), \
                      patch.object(app, "SNAPSHOTS", root / "snapshots.jsonl"), \
                      patch.object(app, "SIGNALS", root / "signals.jsonl"), \
+                     patch.object(app, "RESEARCH_FEATURES", root / "research_features.jsonl"), \
                      patch.object(app, "fetch_markets", side_effect=[[markets[0]], [markets[1]]]), \
                      patch.object(app, "fetch_order_books", return_value={}):
                     first = app.poll_once()
@@ -141,6 +142,10 @@ class ParserTests(unittest.TestCase):
                 self.assertEqual(record["signal"], "momentum_up")
                 self.assertEqual(record["execution"], "none")
                 self.assertEqual(len((root / "snapshots.jsonl").read_text().splitlines()), 2)
+                feature_records = [json.loads(line) for line in (root / "research_features.jsonl").read_text().splitlines()]
+                self.assertEqual(len(feature_records), 2)
+                self.assertEqual(feature_records[-1]["gamma_yes_probability"], 0.55)
+                self.assertIsNone(feature_records[-1]["forecast"])
             finally:
                 app._previous.clear()
                 app._previous.update(old_previous)
@@ -248,6 +253,44 @@ class ParserTests(unittest.TestCase):
                 app._news_state.update(old_state)
                 app._news_items_cache[:] = old_items
                 app._news_matches_cache[:] = old_matches
+
+
+    def test_research_features_endpoint_returns_latest_snapshot_per_market(self):
+        server = app.ThreadingHTTPServer(("127.0.0.1", 0), app.Handler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        old_path = app.RESEARCH_FEATURES
+        with tempfile.TemporaryDirectory() as directory:
+            try:
+                app.RESEARCH_FEATURES = Path(directory) / "research_features.jsonl"
+                app.RESEARCH_FEATURES.write_text(
+                    json.dumps({
+                        "market_id": "m1", "observed_at": "2026-10-30T11:00:00+00:00",
+                        "gamma_yes_probability": 0.4, "clob_book_usable": True,
+                        "clob_book_quality_eligible": True, "news_match_count_24h": 0,
+                    }) + "\\n" +
+                    json.dumps({
+                        "market_id": "m1", "observed_at": "2026-10-30T12:00:00+00:00",
+                        "gamma_yes_probability": 0.6, "clob_book_usable": False,
+                        "clob_book_quality_eligible": False, "news_match_count_24h": 2,
+                    }) + "\\n",
+                    encoding="utf-8",
+                )
+                thread.start()
+                address = f"http://127.0.0.1:{server.server_port}/research-features"
+                with http_urlopen(address, timeout=3) as response:
+                    payload = json.loads(response.read().decode("utf-8"))
+                self.assertEqual(payload["mode"], "RESEARCH_FEATURES_V1")
+                self.assertEqual(payload["markets_with_latest_features"], 1)
+                self.assertEqual(payload["items"][0]["gamma_yes_probability"], 0.6)
+                self.assertEqual(payload["summary"]["news_matches_24h_total"], 2)
+                self.assertIsNone(payload["forecast"])
+                self.assertEqual(payload["execution"], "none")
+            finally:
+                server.shutdown()
+                server.server_close()
+                if thread.is_alive():
+                    thread.join(timeout=2)
+                app.RESEARCH_FEATURES = old_path
 
 if __name__ == "__main__":
     unittest.main()

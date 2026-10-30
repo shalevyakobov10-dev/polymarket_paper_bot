@@ -14,6 +14,7 @@ from urllib.request import Request, urlopen
 
 from paper_trading import PaperTrader, rotate_jsonl_file
 from market_data import fetch_order_books
+from market_stream import MarketStreamCollector
 from global_news import GDELTCollector
 from news_monitor import DEFAULT_FEEDS, NewsCollector, NewsMarketMatcher, summarize_market_corroboration, summarize_news_freshness
 
@@ -45,6 +46,19 @@ _state = {
     "worker_running": False,
     "paper_trading": None,
 }
+_market_stream_state = {
+    "enabled": True,
+    "worker_running": False,
+    "connected": False,
+    "last_connect_at": None,
+    "last_message_at": None,
+    "last_error": None,
+    "subscribed_tokens": 0,
+    "events_persisted_last_session": 0,
+    "sessions": 0,
+}
+_latest_token_ids: list[str] = []
+_market_stream_collector: MarketStreamCollector | None = None
 _previous: dict[str, float] = {}
 _paper_trader: PaperTrader | None = None
 _paper_state_path: Path | None = None
@@ -224,6 +238,10 @@ def poll_once() -> dict:
             if (market.get("conditionId") or market.get("id")) and market.get("question")
         ]
     rows = parse_outcomes(markets)
+    with _lock:
+        _latest_token_ids[:] = list(dict.fromkeys(
+            str(row.get("token_id") or "") for row in rows if row.get("token_id")
+        ))[:200]
     # Read-only top-of-book snapshots enrich research data; Gamma prices remain
     # the paper simulator's existing input until a separately validated model exists.
     books = fetch_order_books(rows)
@@ -293,6 +311,39 @@ def poll_once() -> dict:
         "paper_metrics": paper_status["metrics"],
     }
 
+
+
+def get_market_stream_collector() -> MarketStreamCollector:
+    global _market_stream_collector
+    with _lock:
+        if _market_stream_collector is None:
+            _market_stream_collector = MarketStreamCollector(DATA_DIR / "market_stream_events.jsonl")
+        return _market_stream_collector
+
+
+def market_stream_worker_loop() -> None:
+    """Reconnect bounded public market subscriptions and persist incoming events."""
+    with _lock:
+        _market_stream_state["worker_running"] = True
+    while True:
+        with _lock:
+            tokens = list(_latest_token_ids)
+        if not tokens:
+            time.sleep(5)
+            continue
+        result = get_market_stream_collector().run_session(tokens, max_seconds=45)
+        with _lock:
+            _market_stream_state.update({
+                "connected": bool(result.get("connected")),
+                "last_connect_at": utc_now() if result.get("connected") else _market_stream_state.get("last_connect_at"),
+                "last_message_at": result.get("last_message_at") or _market_stream_state.get("last_message_at"),
+                "last_error": result.get("reason"),
+                "subscribed_tokens": int(result.get("subscribed_tokens") or 0),
+                "events_persisted_last_session": int(result.get("events_persisted") or 0),
+                "sessions": int(_market_stream_state["sessions"]) + 1,
+            })
+        if not result.get("connected"):
+            time.sleep(5)
 
 def worker_loop() -> None:
     with _lock:
@@ -453,7 +504,7 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def do_GET(self):
-        if self.path in ("/", "/status", "/health", "/paper", "/news", "/matches"):
+        if self.path in ("/", "/status", "/health", "/paper", "/news", "/matches", "/market-stream"):
             with _lock:
                 snapshot = dict(_state)
             if self.path == "/health":
@@ -470,6 +521,10 @@ class Handler(BaseHTTPRequestHandler):
                         "gdelt": dict(_gdelt_state),
                     }
                 self._send(200, news_snapshot)
+            elif self.path == "/market-stream":
+                with _lock:
+                    stream_snapshot = dict(_market_stream_state)
+                self._send(200, stream_snapshot)
             elif self.path == "/matches":
                 with _news_lock:
                     match_snapshot = {
@@ -489,7 +544,9 @@ class Handler(BaseHTTPRequestHandler):
                     news_snapshot["feed_errors"] = list(_news_state["feed_errors"])
                     news_snapshot["freshness"] = summarize_news_freshness(_news_items_cache)
                     news_snapshot["gdelt"] = dict(_gdelt_state)
-                self._send(200, {"service": "Polymarket Paper Research Bot", **snapshot, "news": news_snapshot})
+                with _lock:
+                    stream_snapshot = dict(_market_stream_state)
+                self._send(200, {"service": "Polymarket Paper Research Bot", **snapshot, "news": news_snapshot, "market_stream": stream_snapshot})
         else:
             self._send(404, {"error": "not_found"})
 
@@ -500,6 +557,7 @@ class Handler(BaseHTTPRequestHandler):
 def main() -> None:
     threading.Thread(target=worker_loop, daemon=True, name="market-poller").start()
     threading.Thread(target=news_worker_loop, daemon=True, name="global-news-poller").start()
+    threading.Thread(target=market_stream_worker_loop, daemon=True, name="market-stream-poller").start()
     port = int(os.getenv("PORT", "8080"))
     server = ThreadingHTTPServer(("0.0.0.0", port), Handler)
     print(f"Paper research worker listening on port {port}; polling every {POLL_SECONDS}s")

@@ -267,12 +267,12 @@ class ParserTests(unittest.TestCase):
                         "market_id": "m1", "observed_at": "2026-10-30T11:00:00+00:00",
                         "gamma_yes_probability": 0.4, "clob_book_usable": True,
                         "clob_book_quality_eligible": True, "news_match_count_24h": 0,
-                    }) + "\\n" +
+                    }) + "\n" +
                     json.dumps({
                         "market_id": "m1", "observed_at": "2026-10-30T12:00:00+00:00",
                         "gamma_yes_probability": 0.6, "clob_book_usable": False,
                         "clob_book_quality_eligible": False, "news_match_count_24h": 2,
-                    }) + "\\n",
+                    }) + "\n",
                     encoding="utf-8",
                 )
                 thread.start()

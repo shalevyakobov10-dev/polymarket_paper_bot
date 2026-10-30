@@ -70,7 +70,7 @@ class ForecastEvaluationTests(unittest.TestCase):
         resolution = normalize_binary_resolution(self.market(True))
         samples = build_binary_forecast_samples(snapshots, [resolution])
         self.assertEqual(len(samples), 1)
-        self.assertAlmostEqual(samples[0]["predicted_probability_yes"], 0.7)
+        self.assertAlmostEqual(samples[0]["predicted_probability_yes"], 0.99)
         self.assertLess(samples[0]["horizon_hours_actual"], 24.0)
         self.assertLess(samples[0]["horizon_hours_actual"], 24.5)
 

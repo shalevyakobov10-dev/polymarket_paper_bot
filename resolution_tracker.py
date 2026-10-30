@@ -17,6 +17,14 @@ GAMMA_MARKETS_URL = "https://gamma-api.polymarket.com/markets"
 USER_AGENT = "PolymarketPaperResearchBot/1.0"
 
 
+def _bounded_env_int(name: str, default: int, minimum: int, maximum: int) -> int:
+    try:
+        value = int(os.getenv(name, str(default)))
+    except (TypeError, ValueError):
+        value = default
+    return min(maximum, max(minimum, value))
+
+
 def fetch_recent_resolved_markets(
     *,
     limit: int = 100,
@@ -66,7 +74,7 @@ class ResolutionCollector:
         self._known_ids = self._load_known_ids()
 
     def _rotation_paths(self) -> list[Path]:
-        backups = min(10, max(0, int(os.getenv("RESOLUTION_LOG_BACKUPS", "3"))))
+        backups = _bounded_env_int("RESOLUTION_LOG_BACKUPS", 3, 0, 10)
         return [
             self.path.with_name(f"{self.path.name}.{index}")
             for index in range(backups, 0, -1)
@@ -91,11 +99,8 @@ class ResolutionCollector:
         return known
 
     def fetch_once(self) -> dict[str, Any]:
-        try:
-            limit = min(100, max(1, int(os.getenv("RESOLUTION_MARKETS_PER_POLL", "100"))))
-            pages = min(10, max(1, int(os.getenv("RESOLUTION_PAGES", "2"))))
-        except (ValueError, TypeError):
-            limit, pages = 100, 2
+        limit = _bounded_env_int("RESOLUTION_MARKETS_PER_POLL", 100, 1, 100)
+        pages = _bounded_env_int("RESOLUTION_PAGES", 2, 1, 10)
         markets = fetch_recent_resolved_markets(limit=limit, pages=pages)
         added = []
         for market in markets:
@@ -107,8 +112,8 @@ class ResolutionCollector:
                 "collected_at": datetime.now(timezone.utc).isoformat(),
             }
             self.path.parent.mkdir(parents=True, exist_ok=True)
-            max_mb = min(50, max(1, int(os.getenv("RESOLUTION_LOG_MAX_MB", "5"))))
-            backups = min(10, max(0, int(os.getenv("RESOLUTION_LOG_BACKUPS", "3"))))
+            max_mb = _bounded_env_int("RESOLUTION_LOG_MAX_MB", 5, 1, 50)
+            backups = _bounded_env_int("RESOLUTION_LOG_BACKUPS", 3, 0, 10)
             rotate_jsonl_file(self.path, max_mb * 1024 * 1024, backups)
             with self.path.open("a", encoding="utf-8") as handle:
                 handle.write(json.dumps(record, ensure_ascii=False, allow_nan=False) + "\n")

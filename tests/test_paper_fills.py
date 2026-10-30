@@ -61,7 +61,7 @@ class PaperFillSimulationTests(unittest.TestCase):
         self.assertEqual(result["reason"], "insufficient_visible_ask_depth")
         self.assertGreater(result["unfilled_notional_usd"], 0)
         self.assertAlmostEqual(result["filled_shares"], 1.0)
-        self.assertIsNone(result["average_price"] if result["filled_shares"] == 0 else None)
+        self.assertAlmostEqual(result["average_price"], 0.50)
 
     def test_missing_levels_do_not_fabricate_a_fill(self):
         result = simulate_orderbook_fill({}, side="sell", target_shares=2.0)

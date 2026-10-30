@@ -45,6 +45,7 @@ def evaluate_paper_entry(
     open_unrealized_pnl: float,
     daily_loss_limit_usd: float,
     fee_rate: float,
+    opposing_market_outcome_open: bool = False,
 ) -> RiskDecision:
     """Approve or reject a proposed paper entry using conservative hard limits."""
     requested = float(requested_notional) if _finite_nonnegative(requested_notional) else 0.0
@@ -67,6 +68,8 @@ def evaluate_paper_entry(
     daily_pnl = float(daily_realized_pnl) + float(open_unrealized_pnl)
     if daily_pnl <= -float(daily_loss_limit_usd):
         return reject("daily_loss_limit_reached")
+    if opposing_market_outcome_open:
+        return reject("opposing_outcome_already_open")
     if not isinstance(open_positions, int) or not isinstance(max_open_positions, int):
         return reject("invalid_position_count")
     if open_positions < 0 or max_open_positions < 1:

@@ -47,6 +47,11 @@ class PaperRiskManagerTests(unittest.TestCase):
         decision = self.evaluate(cash=2.0, fee_rate=0.01)
         self.assertEqual(decision.reason, "insufficient_simulated_cash_after_fee")
 
+    def test_rejects_opposing_outcome_when_same_market_is_already_open(self):
+        decision = self.evaluate(opposing_market_outcome_open=True)
+        self.assertFalse(decision.approved)
+        self.assertEqual(decision.reason, "opposing_outcome_already_open")
+
     def test_rejects_invalid_prices_and_nonfinite_inputs(self):
         self.assertEqual(self.evaluate(price=0.0).reason, "price_outside_entry_range")
         self.assertEqual(self.evaluate(price=1.0).reason, "price_outside_entry_range")

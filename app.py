@@ -12,8 +12,9 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
-from paper_trading import PaperTrader, rotate_jsonl_file
+from paper_trading import PaperConfig, PaperTrader, rotate_jsonl_file
 from market_data import fetch_order_books
+from market_quality import evaluate_order_book_quality
 from market_stream import MarketStreamCollector
 from global_news import GDELTCollector
 from news_monitor import DEFAULT_FEEDS, NewsCollector, NewsMarketMatcher, summarize_market_corroboration, summarize_news_freshness
@@ -40,6 +41,8 @@ _state = {
     "orderbooks_seen": 0,
     "orderbooks_usable": 0,
     "orderbooks_failed": 0,
+    "orderbooks_quality_eligible": 0,
+    "orderbooks_quality_rejected": 0,
     "orderbook_last_success_at": None,
     "signals_total": 0,
     "mode": "paper_only",
@@ -218,7 +221,8 @@ def get_paper_trader() -> PaperTrader:
     expected_path = (DATA_DIR / "paper_state.json").resolve()
     with _lock:
         if _paper_trader is None or _paper_state_path != expected_path:
-            _paper_trader = PaperTrader(expected_path)
+            paper_config = PaperConfig.from_env(require_orderbook_default=True)
+            _paper_trader = PaperTrader(expected_path, paper_config)
             _paper_state_path = expected_path
         return _paper_trader
 
@@ -243,10 +247,14 @@ def poll_once() -> dict:
             str(row.get("token_id") or "") for row in rows if row.get("token_id")
         ))[:200]
     # Read-only top-of-book snapshots enrich research data; Gamma prices remain
-    # the paper simulator's existing input until a separately validated model exists.
+    # the signal/mark input. A separate quality gate protects new paper entries.
     books = fetch_order_books(rows)
+    trader = get_paper_trader()
     usable_books = 0
     failed_books = 0
+    quality_eligible = 0
+    quality_rejected = 0
+    quality_now = datetime.now(timezone.utc)
     for row in rows:
         book = books.get(row.get("token_id"))
         if book:
@@ -256,7 +264,19 @@ def poll_once() -> dict:
                 usable_books += 1
             elif book.get("error"):
                 failed_books += 1
-    trader = get_paper_trader()
+        quality = evaluate_order_book_quality(
+            row.get("orderbook"),
+            now=quality_now,
+            max_age_seconds=trader.config.max_orderbook_age_seconds,
+            max_spread_bps=trader.config.max_orderbook_spread_bps,
+            min_side_depth_usd=trader.config.min_orderbook_side_depth_usd,
+            require_orderbook=trader.config.require_orderbook,
+        )
+        row["market_quality"] = quality
+        if quality["eligible"]:
+            quality_eligible += 1
+        else:
+            quality_rejected += 1
     paper_result = trader.process_snapshot(rows)
     signal_delta = trader.config.signal_delta
     found = []
@@ -289,6 +309,8 @@ def poll_once() -> dict:
             "orderbooks_seen": len(books),
             "orderbooks_usable": usable_books,
             "orderbooks_failed": failed_books,
+            "orderbooks_quality_eligible": quality_eligible,
+            "orderbooks_quality_rejected": quality_rejected,
             "orderbook_last_success_at": utc_now() if usable_books else _state.get("orderbook_last_success_at"),
             "signals_total": _state["signals_total"] + len(found),
             "paper_trading": paper_status,
@@ -305,6 +327,8 @@ def poll_once() -> dict:
         "orderbooks": len(books),
         "orderbooks_usable": usable_books,
         "orderbooks_failed": failed_books,
+        "orderbooks_quality_eligible": quality_eligible,
+        "orderbooks_quality_rejected": quality_rejected,
         "candidates": len(found),
         "news_market_matches": len(match_result.get("added", [])),
         "paper": paper_result,

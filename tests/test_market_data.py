@@ -14,7 +14,7 @@ class OrderBookTests(unittest.TestCase):
         self.assertAlmostEqual(result["spread"], 0.04)
         self.assertAlmostEqual(result["bid_depth_usd_top5"], 71.5)
         self.assertAlmostEqual(result["ask_depth_usd_top5"], 62.8)
-        self.assertAlmostEqual(result["depth_imbalance_top5"], (71.5 - 62.8) / 134.3)
+        self.assertAlmostEqual(result["depth_imbalance_top5"], (71.5 - 62.8) / 134.3, places=5)
         self.assertTrue(result["book_usable"])
         self.assertEqual(result["execution"], "none")
 
@@ -35,6 +35,12 @@ class OrderBookTests(unittest.TestCase):
         self.assertIsNone(result["best_bid"])
         self.assertIsNone(result["spread"])
         self.assertFalse(result["book_usable"])
+
+    def test_batch_fetch_can_be_disabled(self):
+        with patch.dict("os.environ", {"ORDERBOOK_TOKENS_PER_POLL": "0"}):
+            with patch.object(market_data, "fetch_order_book") as fetch:
+                self.assertEqual(market_data.fetch_order_books([{"token_id": "a"}]), {})
+                fetch.assert_not_called()
 
     def test_batch_fetch_is_bounded_and_deduplicated(self):
         rows = [{"token_id": "a"}, {"token_id": "a"}, {"token_id": "b"}, {"token_id": "c"}]

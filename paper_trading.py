@@ -13,6 +13,7 @@ from typing import Any
 
 from risk_manager import evaluate_paper_entry
 from market_quality import evaluate_order_book_quality
+from paper_fills import simulate_orderbook_fill
 
 
 def utc_now() -> datetime:
@@ -255,6 +256,7 @@ class PaperTrader:
                     position = self._state["positions"][key]
                     mark_price = price
                     mark_source = "gamma_outcome_price_fallback"
+                    exit_fill = None
                     book_quality = evaluate_order_book_quality(
                         row.get("orderbook"),
                         now=current_time,
@@ -264,18 +266,29 @@ class PaperTrader:
                         require_orderbook=False,
                     )
                     if book_quality.get("reason") == "approved_market_quality":
-                        bid = finite_float((row.get("orderbook") or {}).get("best_bid"))
-                        if bid is not None and 0.0 < bid < 1.0:
-                            mark_price = bid
-                            mark_source = "clob_best_bid"
+                        exit_fill = simulate_orderbook_fill(
+                            row.get("orderbook"),
+                            side="sell",
+                            target_shares=float(position.get("shares") or 0.0),
+                        )
+                        if exit_fill.get("eligible"):
+                            mark_price = float(exit_fill["average_price"])
+                            mark_source = "clob_top5_depth_vwap"
+                        else:
+                            # Do not pretend the full position can be liquidated at top bid
+                            # when visible depth cannot absorb all of its shares.
+                            mark_price = finite_float(position.get("mark_price")) or price
+                            mark_source = "clob_insufficient_visible_depth_last_mark"
+                            position["last_exit_fill_attempt"] = exit_fill
                     position["mark_price"] = mark_price
                     position["mark_source"] = mark_source
                     position["mark_updated_at"] = iso_time(current_time)
                     position["unrealized_pnl"] = round(self._position_unrealized(position, mark_price), 8)
                     reason = self._exit_reason(position, mark_price, current_time)
-                    if reason:
+                    if reason and (exit_fill is None or exit_fill.get("eligible")):
                         closed = self._close_position(
-                            key, mark_price, reason, current_time, price_source=mark_source
+                            key, mark_price, reason, current_time,
+                            price_source=mark_source, fill_details=exit_fill,
                         )
                         result["closed"].append(closed)
                         events.append(closed)
@@ -334,19 +347,6 @@ class PaperTrader:
         entry_price_source = "gamma_outcome_price_fallback"
         initial_mark_price = observed_price
         initial_mark_source = "gamma_outcome_price_fallback"
-        if market_quality.get("reason") == "approved_market_quality":
-            orderbook = row.get("orderbook") or {}
-            ask = finite_float(orderbook.get("best_ask"))
-            bid = finite_float(orderbook.get("best_bid"))
-            if ask is not None and 0.0 < ask < 1.0:
-                entry_reference_price = ask
-                entry_price_source = "clob_best_ask"
-            if bid is not None and 0.0 < bid < 1.0:
-                initial_mark_price = bid
-                initial_mark_source = "clob_best_bid"
-        entry_price = entry_reference_price * (1.0 + self.config.simulated_slippage)
-        if entry_price >= 1.0:
-            return None, "slippage_makes_entry_price_invalid"
         available_cash = float(self._state["cash"])
         spend = min(
             self.config.max_position_usd,
@@ -389,7 +389,30 @@ class PaperTrader:
         if not decision.approved:
             return None, decision.reason
         spend = decision.approved_notional
+        entry_fill_details = None
+        initial_mark_fill_details = None
+        if market_quality.get("reason") == "approved_market_quality":
+            entry_fill_details = simulate_orderbook_fill(
+                row.get("orderbook"), side="buy", target_notional_usd=spend
+            )
+            if not entry_fill_details.get("eligible"):
+                return None, str(entry_fill_details.get("reason") or "entry_book_depth_unavailable")
+            entry_reference_price = float(entry_fill_details["average_price"])
+            entry_price_source = "clob_top5_depth_vwap"
+        entry_price = entry_reference_price * (1.0 + self.config.simulated_slippage)
+        if entry_price >= 1.0:
+            return None, "slippage_makes_entry_price_invalid"
         shares = spend / entry_price
+        if market_quality.get("reason") == "approved_market_quality":
+            initial_mark_fill_details = simulate_orderbook_fill(
+                row.get("orderbook"), side="sell", target_shares=shares
+            )
+            if initial_mark_fill_details.get("eligible"):
+                initial_mark_price = float(initial_mark_fill_details["average_price"])
+                initial_mark_source = "clob_top5_depth_vwap"
+            else:
+                initial_mark_price = observed_price
+                initial_mark_source = "gamma_outcome_price_fallback_insufficient_bid_depth"
         entry_fee = spend * self.config.fee_rate
         position = {
             "token_id": key,
@@ -408,6 +431,8 @@ class PaperTrader:
             "entry_fee": round(entry_fee, 8),
             "signal_delta": round(delta, 8),
             "entry_market_quality": market_quality,
+            "entry_fill_details": entry_fill_details,
+            "initial_mark_fill_details": initial_mark_fill_details,
             "unrealized_pnl": 0.0,
             "status": "OPEN",
         }
@@ -446,6 +471,7 @@ class PaperTrader:
         now: datetime,
         *,
         price_source: str = "gamma_outcome_price_fallback",
+        fill_details: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         position = self._state["positions"].pop(key)
         exit_price = observed_price * (1.0 - self.config.simulated_slippage)
@@ -475,6 +501,7 @@ class PaperTrader:
             "exit_observed_price": round(observed_price, 8),
             "exit_price_source": price_source,
             "exit_price_after_slippage": round(exit_price, 8),
+            "exit_fill_details": fill_details,
             "shares": position["shares"],
             "gross_cost": position["gross_cost"],
             "entry_fee": position["entry_fee"],

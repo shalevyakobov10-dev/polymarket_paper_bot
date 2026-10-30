@@ -47,11 +47,12 @@ def normalize_gdelt_articles(payload: dict[str, Any], fetched_at: str | None = N
             continue
         title = " ".join(str(article.get("title") or "").split())[:400]
         url = str(article.get("url") or "").strip()[:2000]
-        if not title or not url.startswith("https://") or url in seen:
+        canonical_url = url.split("#", 1)[0]
+        if not title or not canonical_url.startswith("https://") or canonical_url in seen:
             continue
-        seen.add(url)
+        seen.add(canonical_url)
         records.append({
-            "id": hashlib.sha256(url.split("#", 1)[0].encode("utf-8")).hexdigest(),
+            "id": hashlib.sha256(canonical_url.encode("utf-8")).hexdigest(),
             "source": str(article.get("domain") or "GDELT indexed source")[:100],
             "source_type": "gdelt_doc_api",
             "source_country": str(article.get("sourcecountry") or "")[:10],

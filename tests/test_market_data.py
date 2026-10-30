@@ -16,6 +16,8 @@ class OrderBookTests(unittest.TestCase):
         self.assertAlmostEqual(result["ask_depth_usd_top5"], 62.8)
         self.assertAlmostEqual(result["depth_imbalance_top5"], (71.5 - 62.8) / 134.3, places=5)
         self.assertTrue(result["book_usable"])
+        self.assertEqual(result["bids_top5"], [{"price": 0.48, "size": 100.0}, {"price": 0.47, "size": 50.0}])
+        self.assertEqual(result["asks_top5"], [{"price": 0.52, "size": 80.0}, {"price": 0.53, "size": 40.0}])
         self.assertEqual(result["execution"], "none")
 
     def test_rejects_crossed_book_for_midpoint(self):

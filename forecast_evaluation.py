@@ -257,6 +257,88 @@ def score_binary_forecasts(
     }
 
 
+def chronological_holdout_evaluation(
+    samples: list[dict[str, Any]],
+    *,
+    train_fraction: float = 0.7,
+    minimum_train: int = 20,
+    minimum_test: int = 10,
+) -> dict[str, Any]:
+    """Evaluate the market-price baseline on later resolved markets only.
+
+    The empirical Yes base rate is estimated exclusively from the earlier
+    training period, then frozen before scoring the chronological test period.
+    """
+    if not 0.5 <= train_fraction <= 0.9:
+        raise ValueError("train_fraction must be between 0.5 and 0.9")
+    if minimum_train < 1 or minimum_test < 1:
+        raise ValueError("minimum sample sizes must be positive")
+
+    eligible = []
+    for sample in samples:
+        if not isinstance(sample, dict):
+            continue
+        probability = _number(sample.get("predicted_probability_yes"))
+        outcome = sample.get("outcome_yes")
+        resolved_at = _timestamp(sample.get("resolved_at"))
+        if (
+            probability is None or not 0.0 <= probability <= 1.0
+            or outcome not in (0, 1, False, True)
+            or resolved_at is None
+        ):
+            continue
+        eligible.append((resolved_at, probability, int(bool(outcome))))
+    eligible.sort(key=lambda row: row[0])
+
+    split_index = int(len(eligible) * train_fraction)
+    train = eligible[:split_index]
+    test = eligible[split_index:]
+    result = {
+        "method": "chronological_market_holdout",
+        "train_fraction": train_fraction,
+        "train_n": len(train),
+        "test_n": len(test),
+        "research_only": True,
+        "execution": "none",
+    }
+    if len(train) < minimum_train or len(test) < minimum_test:
+        return {
+            **result,
+            "status": "insufficient_data",
+            "train_base_rate_yes": None,
+            "test_brier_score": None,
+            "test_log_loss": None,
+            "test_brier_skill_vs_train_base_rate": None,
+            "warning": (
+                f"Need at least {minimum_train} earlier resolved markets and "
+                f"{minimum_test} later resolved markets for a chronological holdout."
+            ),
+        }
+
+    train_base_rate = sum(row[2] for row in train) / len(train)
+    test_brier = sum((p - y) ** 2 for _, p, y in test) / len(test)
+    eps = 1e-15
+    test_log_loss = -sum(
+        y * math.log(max(eps, p)) + (1 - y) * math.log(max(eps, 1.0 - p))
+        for _, p, y in test
+    ) / len(test)
+    baseline_brier = sum((train_base_rate - y) ** 2 for _, _, y in test) / len(test)
+    skill = 1.0 - test_brier / baseline_brier if baseline_brier > 0 else None
+    return {
+        **result,
+        "status": "scored",
+        "train_base_rate_yes": round(train_base_rate, 8),
+        "test_brier_score": round(test_brier, 8),
+        "test_log_loss": round(test_log_loss, 8),
+        "test_brier_skill_vs_train_base_rate": round(skill, 8) if skill is not None else None,
+        "warning": (
+            "Exploratory holdout only; small test samples remain uncertain."
+            if len(test) < 50 else
+            "Historical holdout is not a profitability test and may not represent future markets."
+        ),
+    }
+
+
 def load_jsonl(paths: list[str | Path]) -> list[dict[str, Any]]:
     """Load valid JSON objects from one or more append-only JSONL files."""
     output: list[dict[str, Any]] = []
@@ -293,6 +375,7 @@ def evaluate_jsonl_files(
         tolerance_hours=tolerance_hours,
     )
     scores = score_binary_forecasts(samples)
+    holdout = chronological_holdout_evaluation(samples)
     return {
         "mode": "RESOLVED_MARKET_FORECAST_EVALUATION",
         "horizon_hours": horizon_hours,
@@ -301,6 +384,7 @@ def evaluate_jsonl_files(
         "resolutions_loaded": len(resolutions),
         "eligible_samples": len(samples),
         "metrics": scores,
+        "chronological_holdout": holdout,
         "sample_preview": samples[-10:],
         "limitations": [
             "Only binary Yes/No markets with decisive resolved outcomes are currently scored.",

@@ -20,12 +20,15 @@ class RiskDecision:
         return asdict(self)
 
 
-def _finite_nonnegative(value: float) -> bool:
+def _finite(value: float) -> bool:
     try:
-        number = float(value)
+        return math.isfinite(float(value))
     except (TypeError, ValueError, OverflowError):
         return False
-    return math.isfinite(number) and number >= 0.0
+
+
+def _finite_nonnegative(value: float) -> bool:
+    return _finite(value) and float(value) >= 0.0
 
 
 def evaluate_paper_entry(
@@ -51,12 +54,13 @@ def evaluate_paper_entry(
 
     if not _finite_nonnegative(price) or not 0.01 < float(price) < 0.99:
         return reject("price_outside_entry_range")
-    numeric_values = (
+    nonnegative_values = (
         requested_notional, cash, open_exposure, max_position_usd,
         max_open_exposure_usd, daily_loss_limit_usd, fee_rate,
-        daily_realized_pnl, open_unrealized_pnl,
     )
-    if not all(_finite_nonnegative(v) for v in numeric_values):
+    if not all(_finite_nonnegative(v) for v in nonnegative_values):
+        return reject("invalid_risk_input")
+    if not _finite(daily_realized_pnl) or not _finite(open_unrealized_pnl):
         return reject("invalid_risk_input")
     if not isinstance(open_positions, int) or not isinstance(max_open_positions, int):
         return reject("invalid_position_count")

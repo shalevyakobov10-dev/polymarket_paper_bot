@@ -199,6 +199,13 @@ def summarize_feature_rows(rows: list[dict[str, Any]]) -> dict[str, Any]:
         "markets_with_quality_eligible_book": sum(row.get("clob_book_quality_eligible") is True for row in rows),
         "markets_with_24h_news_matches": sum((row.get("news_match_count_24h") or 0) > 0 for row in rows),
         "news_matches_24h_total": sum(int(row.get("news_match_count_24h") or 0) for row in rows),
+        "markets_with_known_fee_schedule": sum(_finite_nonnegative(row.get("fee_schedule_rate")) is not None for row in rows),
+        "markets_marked_fee_free": sum(row.get("fees_enabled") is False for row in rows),
+        "markets_fee_enabled_without_schedule": sum(
+            row.get("fees_enabled") is True
+            and _finite_nonnegative(row.get("fee_schedule_rate")) is None
+            for row in rows
+        ),
         "mean_observed_spread_bps": _mean(spreads),
         "mean_visible_top5_depth_usd_both_sides": _mean(depths),
         "interpretation": "descriptive_data_coverage_only_not_a_probability_forecast_or_trading_edge",

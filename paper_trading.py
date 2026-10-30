@@ -11,6 +11,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from risk_manager import evaluate_paper_entry
+
 
 def utc_now() -> datetime:
     return datetime.now(timezone.utc)
@@ -271,27 +273,38 @@ class PaperTrader:
 
     def _try_open(self, key: str, row: dict[str, Any], observed_price: float, now: datetime, delta: float) -> tuple[dict[str, Any] | None, str]:
         positions: dict[str, dict[str, Any]] = self._state["positions"]
-        if len(positions) >= self.config.max_open_positions:
-            return None, "max_open_positions_reached"
         exposure = sum(float(position.get("gross_cost", 0.0)) for position in positions.values())
-        if exposure + 1e-9 >= self.config.max_open_exposure_usd:
-            return None, "max_open_exposure_reached"
-        if self._state["daily_realized_pnl"] <= -self.config.daily_loss_limit_usd:
-            return None, "daily_loss_limit_reached"
-        if observed_price <= 0.01 or observed_price >= 0.99:
-            return None, "price_outside_entry_range"
         entry_price = observed_price * (1.0 + self.config.simulated_slippage)
         if entry_price >= 1.0:
             return None, "slippage_makes_entry_price_invalid"
         available_cash = float(self._state["cash"])
-        spend = min(self.config.max_position_usd, self.config.max_open_exposure_usd - exposure,
-                    available_cash / (1.0 + self.config.fee_rate))
-        if spend <= 0:
-            return None, "insufficient_simulated_cash"
+        spend = min(
+            self.config.max_position_usd,
+            max(0.0, self.config.max_open_exposure_usd - exposure),
+            available_cash / (1.0 + self.config.fee_rate),
+        )
+        open_unrealized_pnl = sum(
+            float(position.get("unrealized_pnl", 0.0)) for position in positions.values()
+        )
+        decision = evaluate_paper_entry(
+            price=observed_price,
+            requested_notional=spend,
+            cash=available_cash,
+            open_exposure=exposure,
+            open_positions=len(positions),
+            max_position_usd=self.config.max_position_usd,
+            max_open_exposure_usd=self.config.max_open_exposure_usd,
+            max_open_positions=self.config.max_open_positions,
+            daily_realized_pnl=float(self._state["daily_realized_pnl"]),
+            open_unrealized_pnl=open_unrealized_pnl,
+            daily_loss_limit_usd=self.config.daily_loss_limit_usd,
+            fee_rate=self.config.fee_rate,
+        )
+        if not decision.approved:
+            return None, decision.reason
+        spend = decision.approved_notional
         shares = spend / entry_price
         entry_fee = spend * self.config.fee_rate
-        if spend + entry_fee > available_cash + 1e-9:
-            return None, "insufficient_simulated_cash_after_fee"
         position = {
             "token_id": key,
             "market_id": str(row.get("market_id") or ""),

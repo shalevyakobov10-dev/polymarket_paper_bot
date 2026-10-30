@@ -19,7 +19,7 @@ class OrderBookQualityTests(unittest.TestCase):
             "crossed_book": False,
         }
 
-    def evaluate(self, book=None, **overrides):
+    def evaluate(self, book="default", **overrides):
         settings = {
             "now": self.now,
             "max_age_seconds": 180,
@@ -28,9 +28,8 @@ class OrderBookQualityTests(unittest.TestCase):
             "require_orderbook": True,
         }
         settings.update(overrides)
-        return evaluate_order_book_quality(
-            self.book if book is None else book, **settings
-        )
+        payload = self.book if book == "default" else book
+        return evaluate_order_book_quality(payload, **settings)
 
     def test_accepts_fresh_two_sided_book_with_sufficient_depth(self):
         result = self.evaluate()

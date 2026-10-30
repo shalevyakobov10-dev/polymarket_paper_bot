@@ -210,6 +210,55 @@ class PaperTraderTests(unittest.TestCase):
         self.assertEqual(len(result["opened"]), 1)
         self.assertEqual(result["opened"][0]["entry_market_quality"]["reason"], "approved_market_quality")
 
+    def test_uses_ask_for_entry_and_bid_for_mark_and_exit(self):
+        cfg = PaperConfig(**{**self.config.__dict__, "require_orderbook": True})
+        bot = PaperTrader(Path(self.temp.name) / "bid_ask_fills_state.json", cfg)
+        bot.process_snapshot([self.row(0.50)], self.now)
+        entry_book = {
+            "token_id": "token-1",
+            "observed_at": (self.now + timedelta(minutes=5)).isoformat(),
+            "best_bid": 0.53,
+            "best_ask": 0.55,
+            "spread_bps": 370.37,
+            "bid_depth_usd_top5": 20.0,
+            "ask_depth_usd_top5": 18.0,
+            "book_usable": True,
+            "crossed_book": False,
+        }
+        opened_result = bot.process_snapshot(
+            [{**self.row(0.54), "orderbook": entry_book}],
+            self.now + timedelta(minutes=5),
+        )
+        self.assertEqual(len(opened_result["opened"]), 1)
+        opened = opened_result["opened"][0]
+        self.assertEqual(opened["entry_price_source"], "clob_best_ask")
+        self.assertAlmostEqual(opened["entry_reference_price"], 0.55)
+        self.assertAlmostEqual(opened["entry_price"], 0.55 * 1.005)
+        self.assertAlmostEqual(opened["mark_price"], 0.53)
+        self.assertEqual(opened["mark_source"], "clob_best_bid")
+        self.assertLess(opened["unrealized_pnl"], 0)
+
+        exit_book = {
+            "token_id": "token-1",
+            "observed_at": (self.now + timedelta(minutes=10)).isoformat(),
+            "best_bid": 0.61,
+            "best_ask": 0.62,
+            "spread_bps": 162.6,
+            "bid_depth_usd_top5": 25.0,
+            "ask_depth_usd_top5": 21.0,
+            "book_usable": True,
+            "crossed_book": False,
+        }
+        closed_result = bot.process_snapshot(
+            [{**self.row(0.65), "orderbook": exit_book}],
+            self.now + timedelta(minutes=10),
+        )
+        self.assertEqual(len(closed_result["closed"]), 1)
+        closed = closed_result["closed"][0]
+        self.assertEqual(closed["reason"], "simulated_take_profit")
+        self.assertEqual(closed["exit_price_source"], "clob_best_bid")
+        self.assertAlmostEqual(closed["exit_observed_price"], 0.61)
+
     def test_orderbook_gate_rejects_stale_or_wide_book(self):
         cfg = PaperConfig(**{**self.config.__dict__, "require_orderbook": True})
         bot = PaperTrader(Path(self.temp.name) / "quality_stale_state.json", cfg)

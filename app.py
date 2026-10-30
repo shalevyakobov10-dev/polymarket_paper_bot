@@ -463,7 +463,12 @@ class Handler(BaseHTTPRequestHandler):
                 self._send(200, get_paper_trader().snapshot())
             elif self.path == "/news":
                 with _news_lock:
-                    news_snapshot = {**_news_state, "items": list(_news_items_cache), "freshness": summarize_news_freshness(_news_items_cache)}
+                    news_snapshot = {
+                        **_news_state,
+                        "items": list(_news_items_cache),
+                        "freshness": summarize_news_freshness(_news_items_cache),
+                        "gdelt": dict(_gdelt_state),
+                    }
                 self._send(200, news_snapshot)
             elif self.path == "/matches":
                 with _news_lock:
@@ -483,6 +488,7 @@ class Handler(BaseHTTPRequestHandler):
                     news_snapshot = dict(_news_state)
                     news_snapshot["feed_errors"] = list(_news_state["feed_errors"])
                     news_snapshot["freshness"] = summarize_news_freshness(_news_items_cache)
+                    news_snapshot["gdelt"] = dict(_gdelt_state)
                 self._send(200, {"service": "Polymarket Paper Research Bot", **snapshot, "news": news_snapshot})
         else:
             self._send(404, {"error": "not_found"})

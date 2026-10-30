@@ -143,7 +143,7 @@ Run tests with `python -m unittest discover -s tests -v` (or `python -m pytest -
 
 ## Centralized paper risk gate
 
-New entries are evaluated by `risk_manager.py` before the simulator opens a position. The gate checks valid outcome prices, requested position size, aggregate exposure, concurrent position count, available simulated cash after fees, and a daily loss stop that combines realized P&L with the current unrealized P&L of open positions. Rejected candidates carry a stable reason code. These are simulation safeguards, not a guarantee against losses or a validated strategy.
+New entries are evaluated by `risk_manager.py` before the simulator opens a position. The gate checks valid outcome prices, requested position size, aggregate exposure, concurrent position count, available simulated cash after fees, a daily loss stop that combines realized P&L with current unrealized P&L, and whether an opposing outcome from the same market is already open. The simulator will not hold two different outcomes of the same market at once. Rejected candidates carry a stable reason code. These are simulation safeguards, not a guarantee against losses or a validated strategy.
 
 
 ## Public market microstructure and global news data

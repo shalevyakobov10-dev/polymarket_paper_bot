@@ -26,6 +26,7 @@ The service listens on port 8080 by default. Routes:
 - `/matches`: recent headline-to-market keyword-overlap candidates; not probabilities or trade instructions
 - `/resolutions`: health and ingestion counts for public resolved binary markets
 - `/forecast-evaluation`: Brier score, log loss, accuracy, calibration bins and Brier skill against the sample base rate for archived pre-resolution Yes prices
+- `/research-features`: latest joined point-in-time market features (Gamma Yes/No prices, public CLOB spread/depth, and timestamp-filtered lexical news matches)
 
 Environment variables for market selection:
 - `GAMMA_DISCOVERY_LIMIT` (default `400`, bounded to 20–500 active markets fetched for ranking)
@@ -66,6 +67,12 @@ News records preserve source attribution, original links, publication timestamp 
 ## Research methodology
 
 The initial worker compares the latest observed price with the previous observation for the same outcome token and records a candidate when the absolute change is at least 0.03. This is a simple exploratory signal, not a validated strategy. It does not account for fees, slippage, liquidity, or calibration. Do not interpret candidate counts as profit or portfolio P&L.
+
+## Joined market research features
+
+Each market polling cycle also writes a point-in-time row to `data/research_features.jsonl`. The feature builder joins binary Yes/No Gamma outcome prices by market ID, the public CLOB order book for the Yes token (best bid/ask, midpoint, spread and visible top-five depth), and existing lexical news-to-market candidates whose publisher timestamp falls inside the latest 24 hours. The `/research-features` endpoint returns the latest stored row per market and a coverage summary.
+
+Publication timestamps that are missing or implausibly in the future are reported separately and are not counted as fresh news. Distinct source labels are only a descriptive count: they are not proof of independent reporting, event verification, or corroboration. The feature endpoint does not generate probabilities, forecasts, rankings, or trading instructions. These inputs must be checked for timestamp integrity, coverage and out-of-sample value before any forecasting model is developed. The feature log uses the standard bounded JSONL rotation settings.
 
 ## Resolved-market forecast evaluation
 

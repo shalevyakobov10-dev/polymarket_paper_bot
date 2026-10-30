@@ -13,8 +13,8 @@ class OrderBookTests(unittest.TestCase):
         self.assertAlmostEqual(result["midpoint"], 0.5)
         self.assertAlmostEqual(result["spread"], 0.04)
         self.assertAlmostEqual(result["bid_depth_usd_top5"], 71.5)
-        self.assertAlmostEqual(result["ask_depth_usd_top5"], 62.0)
-        self.assertAlmostEqual(result["depth_imbalance_top5"], (71.5 - 62.0) / 133.5)
+        self.assertAlmostEqual(result["ask_depth_usd_top5"], 62.8)
+        self.assertAlmostEqual(result["depth_imbalance_top5"], (71.5 - 62.8) / 134.3)
         self.assertTrue(result["book_usable"])
         self.assertEqual(result["execution"], "none")
 

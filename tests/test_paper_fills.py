@@ -18,13 +18,13 @@ class PaperFillSimulationTests(unittest.TestCase):
 
     def test_buy_walks_ask_levels_and_calculates_vwap(self):
         result = simulate_orderbook_fill(
-            self.book, side="buy", target_notional_usd=2.0
+            self.book, side="buy", target_notional_usd=1.0
         )
-        expected_shares = 2.0 / 0.50
+        expected_shares = 1.0 / 0.50
         self.assertTrue(result["eligible"])
         self.assertEqual(result["levels_used"], 1)
         self.assertAlmostEqual(result["average_price"], 0.50)
-        self.assertAlmostEqual(result["filled_notional_usd"], 2.0)
+        self.assertAlmostEqual(result["filled_notional_usd"], 1.0)
         self.assertAlmostEqual(result["filled_shares"], expected_shares)
         self.assertEqual(result["reason"], "filled_visible_ask_depth")
         self.assertEqual(result["execution"], "none")

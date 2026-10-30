@@ -128,6 +128,8 @@ Railway IaC is defined in `.railway/railway.ts`; the current config pins one wor
 GitHub Actions is configured in `.github/workflows/tests.yml` to compile the application and run the unit tests on pushes and pull requests.
 
 
+The paper portfolio uses a flat `PAPER_FEE_RATE` assumption when market fee metadata is unavailable. When Gamma supplies `feesEnabled` and `feeSchedule`, the simulator uses the market-specific taker curve `fee = shares × rate × price × (1 - price)`, rounded to five decimals with the published minimum charge. A market explicitly marked fee-enabled but missing a valid schedule is blocked from new paper entries rather than silently treated as fee-free. Markets with unknown fee metadata use the configured flat fallback, which defaults to zero and must be treated as an assumption, not a verified fee quote. Fee schedules are archived in the feature snapshots for later research. Fee estimates are based on the published schedule, not proof of the exact fee applied to a real fill.
+
 ## Paper portfolio simulation
 
 The polling service now maintains a persistent **simulated-only** portfolio through `paper_trading.py`. Defaults are:

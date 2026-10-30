@@ -217,6 +217,8 @@ class PaperTraderTests(unittest.TestCase):
             "spread_bps": 377.36,
             "bid_depth_usd_top5": 20.0,
             "ask_depth_usd_top5": 18.0,
+            "bids_top5": [{"price": 0.52, "size": 100.0}],
+            "asks_top5": [{"price": 0.54, "size": 100.0}],
             "book_usable": True,
             "crossed_book": False,
         }
@@ -239,6 +241,8 @@ class PaperTraderTests(unittest.TestCase):
             "spread_bps": 370.37,
             "bid_depth_usd_top5": 20.0,
             "ask_depth_usd_top5": 18.0,
+            "bids_top5": [{"price": 0.53, "size": 100.0}],
+            "asks_top5": [{"price": 0.55, "size": 100.0}],
             "book_usable": True,
             "crossed_book": False,
         }
@@ -248,11 +252,11 @@ class PaperTraderTests(unittest.TestCase):
         )
         self.assertEqual(len(opened_result["opened"]), 1)
         opened = opened_result["opened"][0]
-        self.assertEqual(opened["entry_price_source"], "clob_best_ask")
+        self.assertEqual(opened["entry_price_source"], "clob_top5_depth_vwap")
         self.assertAlmostEqual(opened["entry_reference_price"], 0.55)
         self.assertAlmostEqual(opened["entry_price"], 0.55 * 1.005)
         self.assertAlmostEqual(opened["mark_price"], 0.53)
-        self.assertEqual(opened["mark_source"], "clob_best_bid")
+        self.assertEqual(opened["mark_source"], "clob_top5_depth_vwap")
         self.assertLess(opened["unrealized_pnl"], 0)
 
         exit_book = {
@@ -263,6 +267,8 @@ class PaperTraderTests(unittest.TestCase):
             "spread_bps": 162.6,
             "bid_depth_usd_top5": 25.0,
             "ask_depth_usd_top5": 21.0,
+            "bids_top5": [{"price": 0.61, "size": 100.0}],
+            "asks_top5": [{"price": 0.62, "size": 100.0}],
             "book_usable": True,
             "crossed_book": False,
         }
@@ -273,8 +279,10 @@ class PaperTraderTests(unittest.TestCase):
         self.assertEqual(len(closed_result["closed"]), 1)
         closed = closed_result["closed"][0]
         self.assertEqual(closed["reason"], "simulated_take_profit")
-        self.assertEqual(closed["exit_price_source"], "clob_best_bid")
+        self.assertEqual(closed["exit_price_source"], "clob_top5_depth_vwap")
         self.assertAlmostEqual(closed["exit_observed_price"], 0.61)
+        self.assertTrue(closed["exit_fill_details"]["eligible"])
+        self.assertEqual(closed["exit_fill_details"]["levels_used"], 1)
 
     def test_orderbook_gate_rejects_stale_or_wide_book(self):
         cfg = PaperConfig(**{**self.config.__dict__, "require_orderbook": True})

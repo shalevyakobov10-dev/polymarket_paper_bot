@@ -13,7 +13,7 @@ from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
 from paper_trading import PaperTrader, rotate_jsonl_file
-from news_monitor import DEFAULT_FEEDS, NewsCollector, NewsMarketMatcher
+from news_monitor import DEFAULT_FEEDS, NewsCollector, NewsMarketMatcher, summarize_market_corroboration
 
 GAMMA_URL = "https://gamma-api.polymarket.com/markets"
 POLL_SECONDS = max(15, int(os.getenv("POLL_SECONDS", "60")))
@@ -412,6 +412,7 @@ class Handler(BaseHTTPRequestHandler):
                         "last_match_check_at": _news_state["last_match_check_at"],
                         "last_match_error": _news_state["last_match_error"],
                         "items": list(_news_matches_cache),
+                        "source_corroboration": summarize_market_corroboration(_news_matches_cache),
                     }
                 self._send(200, match_snapshot)
             else:

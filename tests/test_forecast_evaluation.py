@@ -6,6 +6,7 @@ from pathlib import Path
 
 from forecast_evaluation import (
     build_binary_forecast_samples,
+    chronological_holdout_evaluation,
     evaluate_jsonl_files,
     normalize_binary_resolution,
     score_binary_forecasts,
@@ -108,6 +109,41 @@ class ForecastEvaluationTests(unittest.TestCase):
         self.assertGreater(metrics["brier_skill_vs_sample_base_rate"], 0)
         self.assertIsNotNone(metrics["expected_calibration_error"])
         self.assertTrue(metrics["calibration_bins"])
+
+    def test_chronological_holdout_uses_earlier_base_rate_on_later_markets(self):
+        samples = []
+        start = datetime(2026, 1, 1, tzinfo=timezone.utc)
+        outcomes = [1, 1, 0, 0, 1, 0, 1, 0, 1, 0] * 4
+        for index, outcome in enumerate(outcomes):
+            samples.append({
+                "resolved_at": (start + timedelta(days=index)).isoformat(),
+                "predicted_probability_yes": 0.8 if outcome else 0.2,
+                "outcome_yes": outcome,
+            })
+        result = chronological_holdout_evaluation(
+            samples, train_fraction=0.7, minimum_train=20, minimum_test=10,
+        )
+        self.assertEqual(result["status"], "scored")
+        self.assertEqual(result["train_n"], 28)
+        self.assertEqual(result["test_n"], 12)
+        self.assertIsNotNone(result["test_brier_score"])
+        self.assertIsNotNone(result["test_brier_skill_vs_train_base_rate"])
+
+    def test_chronological_holdout_refuses_small_samples(self):
+        samples = [{
+            "resolved_at": "2026-01-01T00:00:00Z",
+            "predicted_probability_yes": 0.6,
+            "outcome_yes": 1,
+        }] * 5
+        result = chronological_holdout_evaluation(samples)
+        self.assertEqual(result["status"], "insufficient_data")
+        self.assertIsNone(result["test_brier_score"])
+
+    def test_chronological_holdout_rejects_invalid_configuration(self):
+        with self.assertRaises(ValueError):
+            chronological_holdout_evaluation([], train_fraction=0.4)
+        with self.assertRaises(ValueError):
+            chronological_holdout_evaluation([], minimum_train=0)
 
     def test_empty_or_invalid_samples_return_explicit_warning(self):
         metrics = score_binary_forecasts([

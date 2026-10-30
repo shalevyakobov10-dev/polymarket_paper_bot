@@ -11,6 +11,7 @@ from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
 from forecast_evaluation import normalize_binary_resolution
+from paper_trading import rotate_jsonl_file
 
 GAMMA_MARKETS_URL = "https://gamma-api.polymarket.com/markets"
 USER_AGENT = "PolymarketPaperResearchBot/1.0"
@@ -64,21 +65,29 @@ class ResolutionCollector:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self._known_ids = self._load_known_ids()
 
+    def _rotation_paths(self) -> list[Path]:
+        backups = min(10, max(0, int(os.getenv("RESOLUTION_LOG_BACKUPS", "3"))))
+        return [
+            self.path.with_name(f"{self.path.name}.{index}")
+            for index in range(backups, 0, -1)
+        ] + [self.path]
+
     def _load_known_ids(self) -> set[str]:
         known = set()
-        if not self.path.exists():
-            return known
-        try:
-            with self.path.open("r", encoding="utf-8") as handle:
-                for line in handle:
-                    try:
-                        row = json.loads(line)
-                    except json.JSONDecodeError:
-                        continue
-                    if isinstance(row, dict) and row.get("market_id"):
-                        known.add(str(row["market_id"]))
-        except OSError:
-            return known
+        for candidate in self._rotation_paths():
+            if not candidate.exists():
+                continue
+            try:
+                with candidate.open("r", encoding="utf-8") as handle:
+                    for line in handle:
+                        try:
+                            row = json.loads(line)
+                        except json.JSONDecodeError:
+                            continue
+                        if isinstance(row, dict) and row.get("market_id"):
+                            known.add(str(row["market_id"]))
+            except OSError:
+                continue
         return known
 
     def fetch_once(self) -> dict[str, Any]:
@@ -98,6 +107,9 @@ class ResolutionCollector:
                 "collected_at": datetime.now(timezone.utc).isoformat(),
             }
             self.path.parent.mkdir(parents=True, exist_ok=True)
+            max_mb = min(50, max(1, int(os.getenv("RESOLUTION_LOG_MAX_MB", "5"))))
+            backups = min(10, max(0, int(os.getenv("RESOLUTION_LOG_BACKUPS", "3"))))
+            rotate_jsonl_file(self.path, max_mb * 1024 * 1024, backups)
             with self.path.open("a", encoding="utf-8") as handle:
                 handle.write(json.dumps(record, ensure_ascii=False, allow_nan=False) + "\n")
             self._known_ids.add(market_id)

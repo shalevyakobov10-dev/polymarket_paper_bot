@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any
 
 from risk_manager import evaluate_paper_entry
+from market_quality import evaluate_order_book_quality
 
 
 def utc_now() -> datetime:
@@ -67,10 +68,14 @@ class PaperConfig:
     simulated_slippage: float = 0.005
     fee_rate: float = 0.0
     daily_loss_limit_usd: float = 5.0
+    require_orderbook: bool = False
+    max_orderbook_age_seconds: float = 180.0
+    max_orderbook_spread_bps: float = 1000.0
+    min_orderbook_side_depth_usd: float = 5.0
 
     @classmethod
-    def from_env(cls) -> "PaperConfig":
-        """Read validated, optional simulation settings from environment."""
+    def from_env(cls, *, require_orderbook_default: bool = False) -> "PaperConfig":
+        """Read validated simulation settings; production may require a fresh CLOB book."""
         defaults = cls()
         values: dict[str, Any] = {}
         float_fields = {
@@ -84,6 +89,9 @@ class PaperConfig:
             "simulated_slippage": "PAPER_SLIPPAGE_RATE",
             "fee_rate": "PAPER_FEE_RATE",
             "daily_loss_limit_usd": "PAPER_DAILY_LOSS_LIMIT_USD",
+            "max_orderbook_age_seconds": "PAPER_MAX_ORDERBOOK_AGE_SECONDS",
+            "max_orderbook_spread_bps": "PAPER_MAX_ORDERBOOK_SPREAD_BPS",
+            "min_orderbook_side_depth_usd": "PAPER_MIN_ORDERBOOK_SIDE_DEPTH_USD",
         }
         for field, env_name in float_fields.items():
             if env_name in os.environ:
@@ -96,6 +104,14 @@ class PaperConfig:
                 values["max_open_positions"] = int(os.environ["PAPER_MAX_OPEN_POSITIONS"])
             except ValueError as exc:
                 raise ValueError("PAPER_MAX_OPEN_POSITIONS must be an integer") from exc
+        require_orderbook_raw = os.getenv("PAPER_REQUIRE_ORDERBOOK")
+        if require_orderbook_raw is None:
+            values["require_orderbook"] = require_orderbook_default
+        else:
+            normalized = require_orderbook_raw.strip().lower()
+            if normalized not in {"1", "true", "yes", "on", "0", "false", "no", "off"}:
+                raise ValueError("PAPER_REQUIRE_ORDERBOOK must be a boolean")
+            values["require_orderbook"] = normalized in {"1", "true", "yes", "on"}
         config = cls(**{**asdict(defaults), **values})
         if config.starting_cash <= 0 or config.max_position_usd <= 0:
             raise ValueError("Starting cash and position size must be positive")
@@ -109,6 +125,12 @@ class PaperConfig:
             raise ValueError("Slippage and fee rate must be in [0, 0.5)")
         if config.daily_loss_limit_usd <= 0:
             raise ValueError("Daily loss limit must be positive")
+        if (
+            config.max_orderbook_age_seconds <= 0
+            or config.max_orderbook_spread_bps <= 0
+            or config.min_orderbook_side_depth_usd < 0
+        ):
+            raise ValueError("Order-book age/spread limits must be positive and minimum depth nonnegative")
         return config
 
 
@@ -278,6 +300,16 @@ class PaperTrader:
         return result
 
     def _try_open(self, key: str, row: dict[str, Any], observed_price: float, now: datetime, delta: float) -> tuple[dict[str, Any] | None, str]:
+        market_quality = evaluate_order_book_quality(
+            row.get("orderbook"),
+            now=now,
+            max_age_seconds=self.config.max_orderbook_age_seconds,
+            max_spread_bps=self.config.max_orderbook_spread_bps,
+            min_side_depth_usd=self.config.min_orderbook_side_depth_usd,
+            require_orderbook=self.config.require_orderbook,
+        )
+        if not market_quality["eligible"]:
+            return None, str(market_quality["reason"])
         positions: dict[str, dict[str, Any]] = self._state["positions"]
         exposure = sum(float(position.get("gross_cost", 0.0)) for position in positions.values())
         entry_price = observed_price * (1.0 + self.config.simulated_slippage)
@@ -327,6 +359,7 @@ class PaperTrader:
             "gross_cost": round(spend, 8),
             "entry_fee": round(entry_fee, 8),
             "signal_delta": round(delta, 8),
+            "entry_market_quality": market_quality,
             "unrealized_pnl": 0.0,
             "status": "OPEN",
         }

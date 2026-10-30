@@ -39,6 +39,10 @@ SIGNALS = DATA_DIR / "candidate_signals.jsonl"
 ORDERBOOK_SNAPSHOTS = DATA_DIR / "orderbook_snapshots.jsonl"
 RESOLUTIONS = DATA_DIR / "resolved_markets.jsonl"
 RESEARCH_FEATURES = DATA_DIR / "research_features.jsonl"
+try:
+    RESEARCH_FEATURES_SNAPSHOT_SECONDS = min(3600, max(60, int(os.getenv("RESEARCH_FEATURES_SNAPSHOT_SECONDS", "900"))))
+except (ValueError, TypeError):
+    RESEARCH_FEATURES_SNAPSHOT_SECONDS = 900
 _lock = threading.RLock()
 _state = {
     "started_at": datetime.now(timezone.utc).isoformat(),
@@ -111,6 +115,8 @@ _gdelt_state = {
     "query_window": "last_1_hour",
 }
 _latest_market_questions: list[dict] = []
+_research_feature_last_written: dict[str, float] = {}
+_research_feature_schedule_loaded = False
 _resolution_collector: ResolutionCollector | None = None
 _resolution_state = {
     "enabled": True,
@@ -147,6 +153,41 @@ def _bounded_int_env(name: str, default: int, minimum: int, maximum: int) -> int
     except (ValueError, TypeError):
         value = default
     return min(maximum, max(minimum, value))
+
+
+def _research_feature_rotation_paths() -> list[Path]:
+    backups = _bounded_int_env("RESEARCH_FEATURES_LOG_BACKUPS", 5, 1, 10)
+    return [
+        RESEARCH_FEATURES.with_name(f"{RESEARCH_FEATURES.name}.{index}")
+        for index in range(backups, 0, -1)
+    ] + [RESEARCH_FEATURES]
+
+
+def _read_feature_timestamp(value: object) -> float | None:
+    try:
+        parsed = datetime.fromisoformat(str(value or "").replace("Z", "+00:00"))
+    except (TypeError, ValueError, OverflowError):
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc).timestamp()
+
+
+def load_research_feature_schedule() -> None:
+    """Load recent per-market timestamps once so restarts do not bypass sampling cadence."""
+    global _research_feature_schedule_loaded
+    if _research_feature_schedule_loaded:
+        return
+    newest_first = list(reversed(_research_feature_rotation_paths()))
+    records = read_recent_jsonl(newest_first, limit=5000)
+    for record in records:
+        market_id = str(record.get("market_id") or "").strip()
+        stamp = _read_feature_timestamp(record.get("observed_at"))
+        if market_id and stamp is not None:
+            _research_feature_last_written[market_id] = max(
+                stamp, _research_feature_last_written.get(market_id, 0.0)
+            )
+    _research_feature_schedule_loaded = True
 
 
 def _volume_value(market: dict) -> float:
@@ -232,6 +273,9 @@ def append_jsonl(path: Path, record: dict) -> None:
     elif path == SIGNALS:
         max_mb = max(1, int(os.getenv("SIGNAL_LOG_MAX_MB", "5")))
         backups = max(0, int(os.getenv("SIGNAL_LOG_BACKUPS", "3")))
+    elif path == RESEARCH_FEATURES:
+        max_mb = _bounded_int_env("RESEARCH_FEATURES_LOG_MAX_MB", 50, 10, 500)
+        backups = _bounded_int_env("RESEARCH_FEATURES_LOG_BACKUPS", 5, 1, 10)
     else:
         max_mb = max(1, int(os.getenv("JSONL_LOG_MAX_MB", "5")))
         backups = max(0, int(os.getenv("JSONL_LOG_BACKUPS", "3")))
@@ -346,20 +390,40 @@ def poll_once() -> dict:
         with _news_lock:
             _news_state["last_match_error"] = f"Unexpected {type(exc).__name__}: {str(exc)[:240]}"
     feature_rows = []
+    feature_rows_written = 0
     feature_error = None
     try:
+        load_research_feature_schedule()
         feature_rows = build_market_feature_rows(rows, match_result.get("latest", []))
         for feature_row in feature_rows:
-            append_jsonl(RESEARCH_FEATURES, feature_row)
+            market_id = str(feature_row.get("market_id") or "").strip()
+            observed_stamp = _read_feature_timestamp(feature_row.get("observed_at"))
+            if not market_id or observed_stamp is None:
+                continue
+            previous_stamp = _research_feature_last_written.get(market_id)
+            if (
+                previous_stamp is None
+                or observed_stamp - previous_stamp >= RESEARCH_FEATURES_SNAPSHOT_SECONDS
+            ):
+                append_jsonl(RESEARCH_FEATURES, feature_row)
+                _research_feature_last_written[market_id] = observed_stamp
+                feature_rows_written += 1
+        if len(_research_feature_last_written) > 20000:
+            recent = sorted(
+                _research_feature_last_written.items(), key=lambda item: item[1], reverse=True
+            )[:10000]
+            _research_feature_last_written.clear()
+            _research_feature_last_written.update(recent)
     except Exception as exc:
         feature_error = f"Unexpected {type(exc).__name__}: {str(exc)[:240]}"
     with _lock:
-        _state["research_features_written_last_poll"] = len(feature_rows)
+        _state["research_features_written_last_poll"] = feature_rows_written
         _state["research_features_error"] = feature_error
     return {
         "markets": len(markets),
         "outcomes": len(rows),
-        "research_features_written": len(feature_rows),
+        "research_features_prepared": len(feature_rows),
+        "research_features_written": feature_rows_written,
         "research_features_error": feature_error,
         "orderbooks": len(books),
         "orderbooks_usable": usable_books,
@@ -400,11 +464,8 @@ def forecast_evaluation_payload() -> dict:
 
 def research_features_payload() -> dict:
     """Return the latest point-in-time joined market/news feature row per market."""
-    paths = [RESEARCH_FEATURES] + [
-        RESEARCH_FEATURES.with_name(f"{RESEARCH_FEATURES.name}.{index}")
-        for index in range(1, 4)
-    ]
-    records = read_recent_jsonl(paths, limit=2000)
+    paths = list(reversed(_research_feature_rotation_paths()))
+    records = read_recent_jsonl(paths, limit=10000)
     latest_by_market = {}
     for record in records:
         market_id = str(record.get("market_id") or "").strip()
@@ -439,10 +500,7 @@ def research_features_payload() -> dict:
 
 def independent_model_evaluation_payload() -> dict:
     """Compare a feature model with market prices on a purged chronological holdout."""
-    feature_paths = [
-        RESEARCH_FEATURES.with_name(f"{RESEARCH_FEATURES.name}.{index}")
-        for index in range(3, 0, -1)
-    ] + [RESEARCH_FEATURES]
+    feature_paths = _research_feature_rotation_paths()
     return evaluate_feature_files(
         feature_paths,
         get_resolution_collector()._rotation_paths(),

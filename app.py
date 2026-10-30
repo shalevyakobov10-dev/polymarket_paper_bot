@@ -261,6 +261,9 @@ def parse_outcomes(markets: list[dict]) -> list[dict]:
                 "outcome": str(outcomes[index]) if index < len(outcomes) else f"Outcome {index + 1}",
                 "observed_price": observed_price,
                 "volume_24h": market.get("volume24hr"),
+                "fees_enabled": market.get("feesEnabled"),
+                "fee_schedule": market.get("feeSchedule"),
+                "fee_type": market.get("feeType"),
             })
     return rows
 

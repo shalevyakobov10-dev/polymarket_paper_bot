@@ -51,6 +51,9 @@ def summarize_order_book(payload: dict[str, Any], *, token_id: str, observed_at:
     bid_depth = sum(price * size for price, size in bids[:5])
     ask_depth = sum(price * size for price, size in asks[:5])
     total_depth = bid_depth + ask_depth
+    # Persist only the five best visible levels needed for conservative paper fills.
+    bids_top5 = [{"price": price, "size": size} for price, size in bids[:5]]
+    asks_top5 = [{"price": price, "size": size} for price, size in asks[:5]]
     return {
         "token_id": str(token_id),
         "observed_at": observed_at,
@@ -64,6 +67,8 @@ def summarize_order_book(payload: dict[str, Any], *, token_id: str, observed_at:
         "depth_imbalance_top5": round((bid_depth - ask_depth) / total_depth, 6) if total_depth > 0 else None,
         "bid_levels": len(bids),
         "ask_levels": len(asks),
+        "bids_top5": bids_top5,
+        "asks_top5": asks_top5,
         "crossed_book": crossed,
         "book_usable": bool(midpoint is not None and not crossed),
         "source": "public_clob_orderbook",

@@ -62,6 +62,11 @@ def evaluate_paper_entry(
         return reject("invalid_risk_input")
     if not _finite(daily_realized_pnl) or not _finite(open_unrealized_pnl):
         return reject("invalid_risk_input")
+    # The daily stop takes priority over capacity checks and includes both
+    # closed P&L and currently marked open P&L.
+    daily_pnl = float(daily_realized_pnl) + float(open_unrealized_pnl)
+    if daily_pnl <= -float(daily_loss_limit_usd):
+        return reject("daily_loss_limit_reached")
     if not isinstance(open_positions, int) or not isinstance(max_open_positions, int):
         return reject("invalid_position_count")
     if open_positions < 0 or max_open_positions < 1:
@@ -70,10 +75,6 @@ def evaluate_paper_entry(
         return reject("max_open_positions_reached")
     if open_exposure >= max_open_exposure_usd - 1e-9:
         return reject("max_open_exposure_reached")
-    # The daily stop includes both closed P&L and currently marked open P&L.
-    daily_pnl = float(daily_realized_pnl) + float(open_unrealized_pnl)
-    if daily_pnl <= -float(daily_loss_limit_usd):
-        return reject("daily_loss_limit_reached")
     if requested <= 0.0:
         return reject("insufficient_simulated_cash")
     if requested > max_position_usd + 1e-9:

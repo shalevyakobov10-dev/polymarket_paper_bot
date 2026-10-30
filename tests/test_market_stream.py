@@ -15,7 +15,7 @@ class MarketStreamTests(unittest.TestCase):
         }, "2026-10-30T12:00:00+00:00")
         self.assertEqual(len(rows), 1)
         self.assertEqual(rows[0]["midpoint"], 0.5)
-        self.assertEqual(rows[0]["spread"], 0.04)
+        self.assertAlmostEqual(rows[0]["spread"], 0.04)
         self.assertEqual(rows[0]["execution"], "none")
 
         crossed = market_stream.normalize_market_message({
@@ -37,7 +37,7 @@ class MarketStreamTests(unittest.TestCase):
             ],
         })
         self.assertEqual(len(rows), 2)
-        self.assertEqual(rows[0]["spread"], 0.02)
+        self.assertAlmostEqual(rows[0]["spread"], 0.02)
         self.assertEqual(rows[1]["token_id"], "token-b")
 
     def test_ignores_malformed_and_unknown_messages(self):

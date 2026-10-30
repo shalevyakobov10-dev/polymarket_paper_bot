@@ -24,6 +24,8 @@ The service listens on port 8080 by default. Routes:
 - `/paper`: simulated portfolio and performance metrics
 - `/news`: recent attributed news headlines, source links, feed health, and collection status
 - `/matches`: recent headline-to-market keyword-overlap candidates; not probabilities or trade instructions
+- `/resolutions`: health and ingestion counts for public resolved binary markets
+- `/forecast-evaluation`: Brier score, log loss, accuracy, calibration bins and Brier skill against the sample base rate for archived pre-resolution Yes prices
 
 Environment variables for market selection:
 - `GAMMA_DISCOVERY_LIMIT` (default `400`, bounded to 20–500 active markets fetched for ranking)
@@ -38,6 +40,11 @@ Environment variables:
 - `NEWS_POLL_SECONDS` (default `300`, bounded to 60–3600 seconds)
 - `ORDERBOOK_TOKENS_PER_POLL` (default `20`, bounded to 0–100; set to `0` to disable CLOB order-book polling)
 - `GDELT_QUERY` (optional override for the GDELT DOC global-news topic query)
+- `RESOLUTION_POLL_SECONDS` (default `900`, bounded to 300–3600 seconds)
+- `RESOLUTION_MARKETS_PER_POLL` (default `100`, bounded to 1–100 closed markets per page)
+- `RESOLUTION_PAGES` (default `2`, bounded to 1–10 pages)
+- `RESOLUTION_LOG_MAX_MB` (default `5`, maximum size before log rotation)
+- `RESOLUTION_LOG_BACKUPS` (default `3`, retained rotated resolution logs)
 - `PAPER_REQUIRE_ORDERBOOK` (default `true` in the live worker; new paper entries require a valid public CLOB book)
 - `PAPER_MAX_ORDERBOOK_AGE_SECONDS` (default `180`; rejects older snapshots)
 - `PAPER_MAX_ORDERBOOK_SPREAD_BPS` (default `1000`; rejects wider bid/ask spreads)
@@ -59,6 +66,14 @@ News records preserve source attribution, original links, publication timestamp 
 ## Research methodology
 
 The initial worker compares the latest observed price with the previous observation for the same outcome token and records a candidate when the absolute change is at least 0.03. This is a simple exploratory signal, not a validated strategy. It does not account for fees, slippage, liquidity, or calibration. Do not interpret candidate counts as profit or portfolio P&L.
+
+## Resolved-market forecast evaluation
+
+The resolution worker polls the public Gamma API for recently closed markets and archives only decisive binary Yes/No outcomes in `data/resolved_markets.jsonl`. The `/forecast-evaluation` endpoint joins those outcomes to archived `market_snapshots.jsonl` observations by market condition ID. It currently selects one Yes-token probability observation closest to 24 hours before resolution, within a 12-hour tolerance band, and never uses a snapshot taken after resolution. Only markets with a decisive 1/0 outcome-price pair and a usable pre-resolution Yes observation are included.
+
+The scorecard reports Brier score, log loss, 50% threshold accuracy, calibration bins, expected calibration error, and Brier skill versus the empirical base-rate forecast. Lower Brier and log loss are better; positive Brier skill means the archived market prices beat the simple base-rate reference on this same sample. The endpoint explicitly warns when there are too few resolved samples.
+
+**Important:** this first evaluation stage measures the historical calibration of Polymarket's own implied Yes prices. It is not an independent news/sentiment model, it is not evidence of a profitable strategy, and it does not estimate executable trading returns. It currently supports binary Yes/No markets only. Historical samples accumulate only while the research worker is collecting snapshots; resolved markets that were never observed before resolution are excluded. This separation is intentional: first establish a reliable, leak-free baseline before attempting to train or evaluate an independent model.
 
 ## Historical backtest
 

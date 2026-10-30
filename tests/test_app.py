@@ -328,5 +328,36 @@ class ParserTests(unittest.TestCase):
                 app.RESOLUTIONS = old_resolutions
                 app._resolution_collector = old_collector
 
+
+    def test_feature_snapshot_schedule_restores_latest_timestamps_after_restart(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            old_path = app.RESEARCH_FEATURES
+            old_timestamps = dict(app._research_feature_last_written)
+            old_loaded = app._research_feature_schedule_loaded
+            try:
+                app.RESEARCH_FEATURES = root / "research_features.jsonl"
+                older = datetime(2026, 10, 30, 10, tzinfo=timezone.utc)
+                newer = datetime(2026, 10, 30, 11, tzinfo=timezone.utc)
+                rotated = app.RESEARCH_FEATURES.with_name("research_features.jsonl.1")
+                rotated.write_text(json.dumps({
+                    "market_id": "m1", "observed_at": older.isoformat(),
+                }) + "\n", encoding="utf-8")
+                app.RESEARCH_FEATURES.write_text(
+                    json.dumps({"market_id": "m1", "observed_at": newer.isoformat()}) + "\n"
+                    + "{malformed json}\n",
+                    encoding="utf-8",
+                )
+                app._research_feature_last_written.clear()
+                app._research_feature_schedule_loaded = False
+                app.load_research_feature_schedule()
+                self.assertTrue(app._research_feature_schedule_loaded)
+                self.assertEqual(app._research_feature_last_written["m1"], newer.timestamp())
+            finally:
+                app.RESEARCH_FEATURES = old_path
+                app._research_feature_last_written.clear()
+                app._research_feature_last_written.update(old_timestamps)
+                app._research_feature_schedule_loaded = old_loaded
+
 if __name__ == "__main__":
     unittest.main()

@@ -43,6 +43,7 @@ jobs:
           curl --silent --show-error --fail http://127.0.0.1:18080/status > /tmp/paper-status.json
           curl --silent --show-error --fail http://127.0.0.1:18080/paper > /tmp/paper-portfolio.json
           curl --silent --show-error --fail http://127.0.0.1:18080/matches > /tmp/paper-matches.json
+          curl --silent --show-error --fail http://127.0.0.1:18080/market-stream > /tmp/paper-market-stream.json
           python - <<'PY'
           import json
           from pathlib import Path
@@ -51,11 +52,14 @@ jobs:
           status = json.loads(Path("/tmp/paper-status.json").read_text())
           paper = json.loads(Path("/tmp/paper-portfolio.json").read_text())
           matches = json.loads(Path("/tmp/paper-matches.json").read_text())
+          market_stream = json.loads(Path("/tmp/paper-market-stream.json").read_text())
           assert "items" in news and "feeds_configured" in news, "news endpoint schema mismatch"
           assert status.get("mode") == "paper_only", "service must stay paper-only"
           assert isinstance(status.get("news"), dict), "status must include news health"
           assert isinstance(paper.get("metrics"), dict), "paper endpoint metrics missing"
           assert matches.get("research_only") is True and matches.get("execution") == "none", "news match endpoint must remain research-only"
           assert isinstance(matches.get("items"), list), "match candidates must be a list"
-          print("Container smoke check passed: /news, /status, /paper and /matches returned valid JSON.")
+          assert market_stream.get("enabled") is True, "public market stream health endpoint missing"
+          assert market_stream.get("worker_running") is True, "market stream worker did not start"
+          print("Container smoke check passed: /news, /status, /paper, /matches and /market-stream returned valid JSON.")
           PY

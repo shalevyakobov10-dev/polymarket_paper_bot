@@ -5,6 +5,7 @@ import json
 import math
 import os
 import time
+from datetime import datetime, timezone
 from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
@@ -85,7 +86,7 @@ def fetch_order_book(token_id: str, *, timeout: float = 8.0) -> dict[str, Any]:
             raise RuntimeError(f"CLOB book API returned HTTP {response.status}")
         payload = json.loads(response.read().decode("utf-8"))
     result = summarize_order_book(payload, token_id=token)
-    result["observed_at"] = __import__("datetime").datetime.now(__import__("datetime").timezone.utc).isoformat()
+    result["observed_at"] = datetime.now(timezone.utc).isoformat()
     return result
 
 
@@ -96,6 +97,8 @@ def fetch_order_books(rows: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
     except (TypeError, ValueError):
         limit = 20
     limit = min(100, max(0, limit))
+    if limit == 0:
+        return {}
     tokens = []
     seen = set()
     for row in rows:

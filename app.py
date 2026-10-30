@@ -14,6 +14,7 @@ from urllib.request import Request, urlopen
 
 from paper_trading import PaperTrader, rotate_jsonl_file
 from market_data import fetch_order_books
+from global_news import GDELTCollector
 from news_monitor import DEFAULT_FEEDS, NewsCollector, NewsMarketMatcher, summarize_market_corroboration, summarize_news_freshness
 
 GAMMA_URL = "https://gamma-api.polymarket.com/markets"
@@ -71,6 +72,15 @@ _news_state = {
 _news_items_cache: list[dict] = []
 _news_matches_cache: list[dict] = []
 _news_matcher: NewsMarketMatcher | None = None
+_gdelt_collector: GDELTCollector | None = None
+_gdelt_state = {
+    "enabled": True,
+    "last_success_at": None,
+    "last_error": None,
+    "items_added_last_poll": 0,
+    "items_total_recent": 0,
+    "query_window": "last_1_hour",
+}
 _latest_market_questions: list[dict] = []
 
 
@@ -346,6 +356,14 @@ def get_news_matcher() -> NewsMarketMatcher:
         return _news_matcher
 
 
+def get_gdelt_collector() -> GDELTCollector:
+    global _gdelt_collector
+    with _news_lock:
+        if _gdelt_collector is None:
+            _gdelt_collector = GDELTCollector(DATA_DIR / "gdelt_news.jsonl")
+        return _gdelt_collector
+
+
 def match_recent_news() -> dict:
     """Link recent headlines to tracked market questions as non-trading research candidates."""
     with _lock:
@@ -394,6 +412,24 @@ def news_worker_loop() -> None:
                     _news_state["last_error"] = None
                 else:
                     _news_state["last_error"] = "All configured news feeds failed"
+            try:
+                gdelt_result = get_gdelt_collector().fetch_once()
+                with _news_lock:
+                    _gdelt_state.update({
+                        "last_success_at": utc_now(),
+                        "last_error": None,
+                        "items_added_last_poll": gdelt_result["items_added"],
+                        "items_total_recent": gdelt_result["items_total_recent"],
+                        "query_window": gdelt_result["query_window"],
+                    })
+                    combined = gdelt_result["latest_items"] + list(_news_items_cache)
+                    unique = {}
+                    for item in combined:
+                        unique.setdefault(str(item.get("id") or item.get("url") or ""), item)
+                    _news_items_cache[:] = list(unique.values())[:100]
+            except Exception as exc:
+                with _news_lock:
+                    _gdelt_state["last_error"] = f"Unexpected {type(exc).__name__}: {str(exc)[:240]}"
             try:
                 match_recent_news()
             except Exception as exc:

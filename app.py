@@ -13,7 +13,7 @@ from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
 from paper_trading import PaperTrader, rotate_jsonl_file
-from news_monitor import DEFAULT_FEEDS, NewsCollector, NewsMarketMatcher, summarize_market_corroboration
+from news_monitor import DEFAULT_FEEDS, NewsCollector, NewsMarketMatcher, summarize_market_corroboration, summarize_news_freshness
 
 GAMMA_URL = "https://gamma-api.polymarket.com/markets"
 POLL_SECONDS = max(15, int(os.getenv("POLL_SECONDS", "60")))
@@ -400,7 +400,7 @@ class Handler(BaseHTTPRequestHandler):
                 self._send(200, get_paper_trader().snapshot())
             elif self.path == "/news":
                 with _news_lock:
-                    news_snapshot = {**_news_state, "items": list(_news_items_cache)}
+                    news_snapshot = {**_news_state, "items": list(_news_items_cache), "freshness": summarize_news_freshness(_news_items_cache)}
                 self._send(200, news_snapshot)
             elif self.path == "/matches":
                 with _news_lock:
@@ -419,6 +419,7 @@ class Handler(BaseHTTPRequestHandler):
                 with _news_lock:
                     news_snapshot = dict(_news_state)
                     news_snapshot["feed_errors"] = list(_news_state["feed_errors"])
+                    news_snapshot["freshness"] = summarize_news_freshness(_news_items_cache)
                 self._send(200, {"service": "Polymarket Paper Research Bot", **snapshot, "news": news_snapshot})
         else:
             self._send(404, {"error": "not_found"})

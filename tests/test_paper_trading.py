@@ -284,6 +284,90 @@ class PaperTraderTests(unittest.TestCase):
         self.assertTrue(closed["exit_fill_details"]["eligible"])
         self.assertEqual(closed["exit_fill_details"]["levels_used"], 1)
 
+    def test_uses_gamma_market_fee_schedule_for_entry_and_exit(self):
+        cfg = PaperConfig(**{**self.config.__dict__, "require_orderbook": True, "fee_rate": 0.0})
+        bot = PaperTrader(Path(self.temp.name) / "market_fee_state.json", cfg)
+        bot.process_snapshot([self.row(0.50)], self.now)
+        market_fee = {
+            **self.row(0.54),
+            "fees_enabled": True,
+            "fee_schedule": {"rate": 0.07, "exponent": 1, "takerOnly": True},
+            "orderbook": {
+                "token_id": "token-1",
+                "observed_at": (self.now + timedelta(minutes=5)).isoformat(),
+                "best_bid": 0.52,
+                "best_ask": 0.54,
+                "spread_bps": 377.36,
+                "bid_depth_usd_top5": 20.0,
+                "ask_depth_usd_top5": 18.0,
+                "bids_top5": [{"price": 0.52, "size": 100.0}],
+                "asks_top5": [{"price": 0.54, "size": 100.0}],
+                "book_usable": True,
+                "crossed_book": False,
+            },
+        }
+        opened = bot.process_snapshot(
+            [market_fee], self.now + timedelta(minutes=5)
+        )["opened"][0]
+        expected_entry_fee = round(
+            opened["shares"] * 0.07 * opened["entry_price"] * (1.0 - opened["entry_price"]),
+            5,
+        )
+        self.assertEqual(opened["fee_model"]["mode"], "polymarket_taker_curve")
+        self.assertAlmostEqual(opened["entry_fee"], expected_entry_fee, places=8)
+        self.assertEqual(opened["entry_fee_details"]["source"], "gamma_fee_schedule")
+
+        exit_book = {
+            "token_id": "token-1",
+            "observed_at": (self.now + timedelta(minutes=10)).isoformat(),
+            "best_bid": 0.61,
+            "best_ask": 0.62,
+            "spread_bps": 162.6,
+            "bid_depth_usd_top5": 25.0,
+            "ask_depth_usd_top5": 21.0,
+            "bids_top5": [{"price": 0.61, "size": 100.0}],
+            "asks_top5": [{"price": 0.62, "size": 100.0}],
+            "book_usable": True,
+            "crossed_book": False,
+        }
+        closed = bot.process_snapshot(
+            [{**self.row(0.65), "orderbook": exit_book}],
+            self.now + timedelta(minutes=10),
+        )["closed"][0]
+        expected_exit_price = 0.61 * (1.0 - cfg.simulated_slippage)
+        expected_exit_fee = round(
+            closed["shares"] * 0.07 * expected_exit_price * (1.0 - expected_exit_price),
+            5,
+        )
+        self.assertAlmostEqual(closed["exit_fee"], expected_exit_fee, places=8)
+        self.assertEqual(closed["exit_fee_details"]["mode"], "polymarket_taker_curve")
+
+    def test_fee_enabled_market_without_schedule_is_blocked_for_paper_entry(self):
+        cfg = PaperConfig(**{**self.config.__dict__, "require_orderbook": False})
+        bot = PaperTrader(Path(self.temp.name) / "missing_fee_schedule_state.json", cfg)
+        bot.process_snapshot([self.row(0.50)], self.now)
+        result = bot.process_snapshot(
+            [{**self.row(0.54), "fees_enabled": True}],
+            self.now + timedelta(minutes=5),
+        )
+        self.assertEqual(result["opened"], [])
+        self.assertEqual(
+            result["candidates"][0]["skip_reason"],
+            "fees_enabled_but_fee_schedule_missing",
+        )
+
+    def test_explicitly_fee_free_market_overrides_legacy_fallback(self):
+        cfg = PaperConfig(**{**self.config.__dict__, "fee_rate": 0.02})
+        bot = PaperTrader(Path(self.temp.name) / "fee_free_state.json", cfg)
+        bot.process_snapshot([self.row(0.50)], self.now)
+        opened = bot.process_snapshot(
+            [{**self.row(0.54), "fees_enabled": False}],
+            self.now + timedelta(minutes=5),
+        )["opened"][0]
+        self.assertEqual(opened["fee_model"]["mode"], "fee_free")
+        self.assertEqual(opened["entry_fee"], 0.0)
+        self.assertEqual(opened["entry_fee_details"]["fee"], 0.0)
+
     def test_orderbook_gate_rejects_stale_or_wide_book(self):
         cfg = PaperConfig(**{**self.config.__dict__, "require_orderbook": True})
         bot = PaperTrader(Path(self.temp.name) / "quality_stale_state.json", cfg)

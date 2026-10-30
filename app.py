@@ -13,6 +13,7 @@ from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
 from paper_trading import PaperTrader, rotate_jsonl_file
+from market_data import fetch_order_books
 from news_monitor import DEFAULT_FEEDS, NewsCollector, NewsMarketMatcher, summarize_market_corroboration, summarize_news_freshness
 
 GAMMA_URL = "https://gamma-api.polymarket.com/markets"
@@ -24,6 +25,7 @@ except (ValueError, TypeError):
 DATA_DIR = Path(os.getenv("DATA_DIR", "data"))
 SNAPSHOTS = DATA_DIR / "market_snapshots.jsonl"
 SIGNALS = DATA_DIR / "candidate_signals.jsonl"
+ORDERBOOK_SNAPSHOTS = DATA_DIR / "orderbook_snapshots.jsonl"
 _lock = threading.RLock()
 _state = {
     "started_at": datetime.now(timezone.utc).isoformat(),
@@ -33,6 +35,10 @@ _state = {
     "markets_seen": 0,
     "markets_discovered": 0,
     "outcomes_seen": 0,
+    "orderbooks_seen": 0,
+    "orderbooks_usable": 0,
+    "orderbooks_failed": 0,
+    "orderbook_last_success_at": None,
     "signals_total": 0,
     "mode": "paper_only",
     "worker_running": False,
@@ -208,6 +214,20 @@ def poll_once() -> dict:
             if (market.get("conditionId") or market.get("id")) and market.get("question")
         ]
     rows = parse_outcomes(markets)
+    # Read-only top-of-book snapshots enrich research data; Gamma prices remain
+    # the paper simulator's existing input until a separately validated model exists.
+    books = fetch_order_books(rows)
+    usable_books = 0
+    failed_books = 0
+    for row in rows:
+        book = books.get(row.get("token_id"))
+        if book:
+            row["orderbook"] = book
+            append_jsonl(ORDERBOOK_SNAPSHOTS, book)
+            if book.get("book_usable"):
+                usable_books += 1
+            elif book.get("error"):
+                failed_books += 1
     trader = get_paper_trader()
     paper_result = trader.process_snapshot(rows)
     signal_delta = trader.config.signal_delta
@@ -238,6 +258,10 @@ def poll_once() -> dict:
             "markets_seen": len(markets),
             "markets_discovered": _state["markets_discovered"],
             "outcomes_seen": len(rows),
+            "orderbooks_seen": len(books),
+            "orderbooks_usable": usable_books,
+            "orderbooks_failed": failed_books,
+            "orderbook_last_success_at": utc_now() if usable_books else _state.get("orderbook_last_success_at"),
             "signals_total": _state["signals_total"] + len(found),
             "paper_trading": paper_status,
         })
@@ -250,6 +274,9 @@ def poll_once() -> dict:
     return {
         "markets": len(markets),
         "outcomes": len(rows),
+        "orderbooks": len(books),
+        "orderbooks_usable": usable_books,
+        "orderbooks_failed": failed_books,
         "candidates": len(found),
         "news_market_matches": len(match_result.get("added", [])),
         "paper": paper_result,

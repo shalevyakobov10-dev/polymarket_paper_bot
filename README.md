@@ -38,6 +38,10 @@ Environment variables:
 - `NEWS_POLL_SECONDS` (default `300`, bounded to 60–3600 seconds)
 - `ORDERBOOK_TOKENS_PER_POLL` (default `20`, bounded to 0–100; set to `0` to disable CLOB order-book polling)
 - `GDELT_QUERY` (optional override for the GDELT DOC global-news topic query)
+- `PAPER_REQUIRE_ORDERBOOK` (default `true` in the live worker; new paper entries require a valid public CLOB book)
+- `PAPER_MAX_ORDERBOOK_AGE_SECONDS` (default `180`; rejects older snapshots)
+- `PAPER_MAX_ORDERBOOK_SPREAD_BPS` (default `1000`; rejects wider bid/ask spreads)
+- `PAPER_MIN_ORDERBOOK_SIDE_DEPTH_USD` (default `5`; minimum visible notional on each side of the top five levels)
 
 The market worker saves observed public market snapshots to `data/market_snapshots.jsonl`, bounded public CLOB order-book metrics to `data/orderbook_snapshots.jsonl`, and experimental price-change candidates to `data/candidate_signals.jsonl`. Order-book fields include best bid/ask, midpoint, spread, top-five-level depth and depth imbalance. These are point-in-time public snapshots, not guaranteed executable prices or historical depth. The collector requests a bounded number of unique outcome tokens per polling cycle and isolates failures per token. The separate news worker saves new, de-duplicated headlines to `data/news_events.jsonl` and supplements the RSS feeds with GDELT DOC 2.0 article metadata from a rolling one-hour search window in `data/gdelt_news.jsonl`. GDELT is an aggregation/indexing layer over media coverage, not a primary source or proof that an event occurred; it may contain duplicates, omissions, and publication/indexing delays. Logs are rotated with bounded size. News-feed failures are tracked separately and do not stop the market-data worker. The RSS sources plus GDELT broaden coverage, but they do not cover every language, country, or breaking event and do not constitute a complete real-time view of the world. The 15 default RSS sources cover BBC top stories/World/Business/Technology/Science & Environment; The Guardian World/US/Business/Technology/Science; Al Jazeera English; NPR Top Stories; Deutsche Welle Top Stories; Sky News World; and France 24 English. Feed availability and publication latency vary; this is not a comprehensive feed of every world event.
 
@@ -120,6 +124,10 @@ Optional environment variables:
 - `PAPER_SLIPPAGE_RATE`
 - `PAPER_FEE_RATE`
 - `PAPER_DAILY_LOSS_LIMIT_USD`
+- `PAPER_REQUIRE_ORDERBOOK` (overrides the live-worker default when explicitly set to true/false)
+- `PAPER_MAX_ORDERBOOK_AGE_SECONDS`
+- `PAPER_MAX_ORDERBOOK_SPREAD_BPS`
+- `PAPER_MIN_ORDERBOOK_SIDE_DEPTH_USD`
 
 Log files are bounded with automatic rotation to avoid unlimited disk growth:
 - Snapshots: `SNAPSHOT_MAX_MB=25`, `SNAPSHOT_BACKUPS=4`
@@ -150,6 +158,12 @@ Official public-data references: [Polymarket market-data research guide](https:/
 
 
 ## Public CLOB WebSocket observer
+
+### Conservative paper-entry market-quality gate
+
+The live worker requires a fresh, valid, two-sided CLOB book before opening a new simulated position. It rejects missing/failed books, invalid timestamps, snapshots older than 180 seconds, future timestamps beyond a small clock-skew allowance, crossed or incomplete books, spreads above 1,000 basis points, and less than $5 of visible top-five-level notional on either side. The limits are configurable through the environment variables above. Rejected candidates remain in the audit trail with stable reason codes such as `missing_orderbook`, `stale_orderbook`, `spread_too_wide`, and `insufficient_ask_depth`.
+
+This gate checks displayed public liquidity; it does not prove that the displayed size would remain available, model market impact, or provide executable fills. The current simulator still uses Gamma outcome prices for its experimental signal and position marks, with a fixed slippage assumption for paper P&L. This release improves entry filtering, not execution realism. Historical backtests remain compatible with price-only data unless order-book requirements are explicitly enabled, because historical depth snapshots are not currently available in the price-history dataset.
 
 The service also opens a read-only connection to Polymarket's public CLOB market channel. It subscribes to a bounded set of outcome token IDs selected from the tracked active markets, handles the application-level `PING` heartbeat, reconnects between bounded sessions, and persists normalized book, price-change and trade-price events to `market_stream_events.jsonl`. The current cap is controlled by `MARKET_WS_MAX_TOKENS` (default 80, maximum 200). The `/market-stream` endpoint reports connection and ingestion health.
 

@@ -36,8 +36,10 @@ Environment variables:
 - `POLL_SECONDS` (default `60`, minimum `15`)
 - `DATA_DIR` (default `data`)
 - `NEWS_POLL_SECONDS` (default `300`, bounded to 60–3600 seconds)
+- `ORDERBOOK_TOKENS_PER_POLL` (default `20`, bounded to 0–100; set to `0` to disable CLOB order-book polling)
+- `GDELT_QUERY` (optional override for the GDELT DOC global-news topic query)
 
-The market worker saves observed public market snapshots to `data/market_snapshots.jsonl` and experimental price-change candidates to `data/candidate_signals.jsonl`. The separate news worker saves new, de-duplicated headlines to `data/news_events.jsonl`. Logs are rotated with bounded size. News-feed failures are tracked separately and do not stop the market-data worker. The 15 default sources cover BBC top stories/World/Business/Technology/Science & Environment; The Guardian World/US/Business/Technology/Science; Al Jazeera English; NPR Top Stories; Deutsche Welle Top Stories; Sky News World; and France 24 English. Feed availability and publication latency vary; this is not a comprehensive feed of every world event.
+The market worker saves observed public market snapshots to `data/market_snapshots.jsonl`, bounded public CLOB order-book metrics to `data/orderbook_snapshots.jsonl`, and experimental price-change candidates to `data/candidate_signals.jsonl`. Order-book fields include best bid/ask, midpoint, spread, top-five-level depth and depth imbalance. These are point-in-time public snapshots, not guaranteed executable prices or historical depth. The collector requests a bounded number of unique outcome tokens per polling cycle and isolates failures per token. The separate news worker saves new, de-duplicated headlines to `data/news_events.jsonl` and supplements the RSS feeds with GDELT DOC 2.0 article metadata from a rolling one-hour search window in `data/gdelt_news.jsonl`. GDELT is an aggregation/indexing layer over media coverage, not a primary source or proof that an event occurred; it may contain duplicates, omissions, and publication/indexing delays. Logs are rotated with bounded size. News-feed failures are tracked separately and do not stop the market-data worker. The RSS sources plus GDELT broaden coverage, but they do not cover every language, country, or breaking event and do not constitute a complete real-time view of the world. The 15 default RSS sources cover BBC top stories/World/Business/Technology/Science & Environment; The Guardian World/US/Business/Technology/Science; Al Jazeera English; NPR Top Stories; Deutsche Welle Top Stories; Sky News World; and France 24 English. Feed availability and publication latency vary; this is not a comprehensive feed of every world event.
 
 ## Run with Docker
 
@@ -134,3 +136,14 @@ Run tests with `python -m unittest discover -s tests -v` (or `python -m pytest -
 ## Centralized paper risk gate
 
 New entries are evaluated by `risk_manager.py` before the simulator opens a position. The gate checks valid outcome prices, requested position size, aggregate exposure, concurrent position count, available simulated cash after fees, and a daily loss stop that combines realized P&L with the current unrealized P&L of open positions. Rejected candidates carry a stable reason code. These are simulation safeguards, not a guarantee against losses or a validated strategy.
+
+
+## Public market microstructure and global news data
+
+The read-only data layer now combines:
+- Gamma market discovery and outcome metadata.
+- CLOB public order-book snapshots for a bounded set of unique outcome tokens.
+- Spread, midpoint, bid/ask depth and depth-imbalance features from the top five visible price levels.
+- Attributed RSS/Atom headlines plus GDELT DOC 2.0 article metadata, including source domain, source country and publication time where supplied.
+
+Official public-data references: [Polymarket market-data research guide](https://institute.polymarket.com/data), [Gamma API schema](https://gamma-api.polymarket.com/docs), and [GDELT DOC 2.0 API documentation](https://blog.gdeltproject.org/gdelt-doc-2-0-api-debuts/). All ingestion is read-only. News volume and keyword matches are not probabilities, independent corroboration, or trading signals.

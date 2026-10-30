@@ -16,6 +16,8 @@ from paper_trading import PaperConfig, PaperTrader, rotate_jsonl_file
 from market_data import fetch_order_books
 from market_quality import evaluate_order_book_quality
 from market_stream import MarketStreamCollector
+from forecast_evaluation import evaluate_jsonl_files
+from resolution_tracker import ResolutionCollector
 from global_news import GDELTCollector
 from news_monitor import DEFAULT_FEEDS, NewsCollector, NewsMarketMatcher, summarize_market_corroboration, summarize_news_freshness
 
@@ -25,10 +27,15 @@ try:
     NEWS_POLL_SECONDS = min(3600, max(60, int(os.getenv("NEWS_POLL_SECONDS", "300"))))
 except (ValueError, TypeError):
     NEWS_POLL_SECONDS = 300
+try:
+    RESOLUTION_POLL_SECONDS = min(3600, max(300, int(os.getenv("RESOLUTION_POLL_SECONDS", "900"))))
+except (ValueError, TypeError):
+    RESOLUTION_POLL_SECONDS = 900
 DATA_DIR = Path(os.getenv("DATA_DIR", "data"))
 SNAPSHOTS = DATA_DIR / "market_snapshots.jsonl"
 SIGNALS = DATA_DIR / "candidate_signals.jsonl"
 ORDERBOOK_SNAPSHOTS = DATA_DIR / "orderbook_snapshots.jsonl"
+RESOLUTIONS = DATA_DIR / "resolved_markets.jsonl"
 _lock = threading.RLock()
 _state = {
     "started_at": datetime.now(timezone.utc).isoformat(),
@@ -99,6 +106,18 @@ _gdelt_state = {
     "query_window": "last_1_hour",
 }
 _latest_market_questions: list[dict] = []
+_resolution_collector: ResolutionCollector | None = None
+_resolution_state = {
+    "enabled": True,
+    "worker_running": False,
+    "last_poll_at": None,
+    "last_success_at": None,
+    "last_error": None,
+    "markets_checked_last_poll": 0,
+    "resolutions_added_last_poll": 0,
+    "resolutions_total_seen": 0,
+    "poll_interval_seconds": RESOLUTION_POLL_SECONDS,
+}
 
 
 def utc_now() -> str:
@@ -337,6 +356,53 @@ def poll_once() -> dict:
 
 
 
+def get_resolution_collector() -> ResolutionCollector:
+    global _resolution_collector
+    with _lock:
+        if _resolution_collector is None:
+            _resolution_collector = ResolutionCollector(RESOLUTIONS)
+        return _resolution_collector
+
+
+def forecast_evaluation_payload() -> dict:
+    """Score stored pre-resolution Yes-price observations against resolved outcomes."""
+    def rotated_paths(path: Path, backups: int = 4) -> list[Path]:
+        return [
+            path.with_name(f"{path.name}.{index}")
+            for index in range(backups, 0, -1)
+        ] + [path]
+
+    return evaluate_jsonl_files(
+        rotated_paths(SNAPSHOTS),
+        get_resolution_collector()._rotation_paths(),
+        horizon_hours=24.0,
+        tolerance_hours=12.0,
+    )
+
+
+def resolution_worker_loop() -> None:
+    """Collect public decisive binary resolutions for the forecast evaluation scorecard."""
+    with _lock:
+        _resolution_state["worker_running"] = True
+    while True:
+        with _lock:
+            _resolution_state["last_poll_at"] = utc_now()
+        try:
+            result = get_resolution_collector().fetch_once()
+            with _lock:
+                _resolution_state.update({
+                    "last_success_at": result.get("last_success_at"),
+                    "last_error": None,
+                    "markets_checked_last_poll": int(result.get("markets_checked") or 0),
+                    "resolutions_added_last_poll": int(result.get("resolutions_added") or 0),
+                    "resolutions_total_seen": int(result.get("resolutions_total_seen") or 0),
+                })
+        except Exception as exc:
+            with _lock:
+                _resolution_state["last_error"] = f"Unexpected {type(exc).__name__}: {str(exc)[:300]}"
+        time.sleep(RESOLUTION_POLL_SECONDS)
+
+
 def get_market_stream_collector() -> MarketStreamCollector:
     global _market_stream_collector
     with _lock:
@@ -528,7 +594,7 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def do_GET(self):
-        if self.path in ("/", "/status", "/health", "/paper", "/news", "/matches", "/market-stream"):
+        if self.path in ("/", "/status", "/health", "/paper", "/news", "/matches", "/market-stream", "/resolutions", "/forecast-evaluation"):
             with _lock:
                 snapshot = dict(_state)
             if self.path == "/health":
@@ -549,6 +615,24 @@ class Handler(BaseHTTPRequestHandler):
                 with _lock:
                     stream_snapshot = dict(_market_stream_state)
                 self._send(200, stream_snapshot)
+            elif self.path == "/resolutions":
+                with _lock:
+                    resolution_snapshot = dict(_resolution_state)
+                self._send(200, {
+                    **resolution_snapshot,
+                    "research_only": True,
+                    "execution": "none",
+                })
+            elif self.path == "/forecast-evaluation":
+                try:
+                    self._send(200, forecast_evaluation_payload())
+                except Exception as exc:
+                    self._send(503, {
+                        "mode": "RESOLVED_MARKET_FORECAST_EVALUATION",
+                        "error": f"{type(exc).__name__}: {str(exc)[:300]}",
+                        "research_only": True,
+                        "execution": "none",
+                    })
             elif self.path == "/matches":
                 with _news_lock:
                     match_snapshot = {
@@ -582,6 +666,7 @@ def main() -> None:
     threading.Thread(target=worker_loop, daemon=True, name="market-poller").start()
     threading.Thread(target=news_worker_loop, daemon=True, name="global-news-poller").start()
     threading.Thread(target=market_stream_worker_loop, daemon=True, name="market-stream-poller").start()
+    threading.Thread(target=resolution_worker_loop, daemon=True, name="resolution-poller").start()
     port = int(os.getenv("PORT", "8080"))
     server = ThreadingHTTPServer(("0.0.0.0", port), Handler)
     print(f"Paper research worker listening on port {port}; polling every {POLL_SECONDS}s")

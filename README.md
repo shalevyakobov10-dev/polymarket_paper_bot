@@ -129,3 +129,8 @@ Backups use suffixes such as `.1`, `.2`. Rotated logs are for diagnostics and au
 
 
 Run tests with `python -m unittest discover -s tests -v` (or `python -m pytest -q` when pytest is installed). The CI workflow checks compilation and the unit tests. A passing test suite does not verify live public API connectivity or cloud deployment.
+
+
+## Centralized paper risk gate
+
+New entries are evaluated by `risk_manager.py` before the simulator opens a position. The gate checks valid outcome prices, requested position size, aggregate exposure, concurrent position count, available simulated cash after fees, and a daily loss stop that combines realized P&L with the current unrealized P&L of open positions. Rejected candidates carry a stable reason code. These are simulation safeguards, not a guarantee against losses or a validated strategy.

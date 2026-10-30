@@ -38,6 +38,49 @@ class ParserTests(unittest.TestCase):
         self.assertEqual(query["active"], ["true"])
         self.assertEqual(query["closed"], ["false"])
 
+
+    def test_fetch_markets_paginates_and_deduplicates_market_ids(self):
+        first_page = [
+            {"id": f"market-{i}", "volume24hr": str(i)}
+            for i in range(20)
+        ]
+        second_page = [
+            {"id": "market-19", "volume24hr": "19"},
+            {"id": "market-20", "volume24hr": "100"},
+        ]
+
+        class FakeResponse:
+            status = 200
+            def __init__(self, payload):
+                self.payload = payload
+            def __enter__(self):
+                return self
+            def __exit__(self, *args):
+                return False
+            def read(self):
+                return json.dumps(self.payload).encode("utf-8")
+
+        with patch.dict(os.environ, {
+            "GAMMA_DISCOVERY_LIMIT": "20",
+            "GAMMA_DISCOVERY_PAGES": "2",
+            "MARKETS_TO_TRACK": "100",
+        }):
+            with patch.object(
+                app, "urlopen",
+                side_effect=[FakeResponse(first_page), FakeResponse(second_page)],
+            ) as mocked:
+                markets = app.fetch_markets()
+
+        self.assertEqual(mocked.call_count, 2)
+        offsets = [
+            parse_qs(urlparse(call.args[0].full_url).query)["offset"][0]
+            for call in mocked.call_args_list
+        ]
+        self.assertEqual(offsets, ["0", "20"])
+        self.assertEqual(len(markets), 21)
+        self.assertEqual(markets[0]["id"], "market-20")
+        self.assertEqual(sum(m["id"] == "market-19" for m in markets), 1)
+
     def test_parses_gamma_outcome_prices(self):
         markets = [{
             "id": "123",

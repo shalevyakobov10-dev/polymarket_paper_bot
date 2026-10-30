@@ -180,6 +180,58 @@ class PaperTraderTests(unittest.TestCase):
         self.assertEqual(len(result["closed"]), 1)
         self.assertEqual(result["closed"][0]["reason"], "simulated_time_limit")
 
+    def test_orderbook_gate_blocks_entries_without_a_book(self):
+        cfg = PaperConfig(**{**self.config.__dict__, "require_orderbook": True})
+        bot = PaperTrader(Path(self.temp.name) / "quality_missing_state.json", cfg)
+        bot.process_snapshot([self.row(0.50)], self.now)
+        result = bot.process_snapshot([self.row(0.54)], self.now + timedelta(minutes=5))
+        self.assertEqual(result["opened"], [])
+        self.assertEqual(result["candidates"][0]["skip_reason"], "missing_orderbook")
+
+    def test_orderbook_gate_accepts_fresh_liquid_book(self):
+        cfg = PaperConfig(**{**self.config.__dict__, "require_orderbook": True})
+        bot = PaperTrader(Path(self.temp.name) / "quality_valid_state.json", cfg)
+        bot.process_snapshot([self.row(0.50)], self.now)
+        good_book = {
+            "token_id": "token-1",
+            "observed_at": (self.now + timedelta(minutes=5)).isoformat(),
+            "best_bid": 0.52,
+            "best_ask": 0.54,
+            "spread_bps": 377.36,
+            "bid_depth_usd_top5": 20.0,
+            "ask_depth_usd_top5": 18.0,
+            "book_usable": True,
+            "crossed_book": False,
+        }
+        result = bot.process_snapshot(
+            [{**self.row(0.54), "orderbook": good_book}],
+            self.now + timedelta(minutes=5),
+        )
+        self.assertEqual(len(result["opened"]), 1)
+        self.assertEqual(result["opened"][0]["entry_market_quality"]["reason"], "approved_market_quality")
+
+    def test_orderbook_gate_rejects_stale_or_wide_book(self):
+        cfg = PaperConfig(**{**self.config.__dict__, "require_orderbook": True})
+        bot = PaperTrader(Path(self.temp.name) / "quality_stale_state.json", cfg)
+        bot.process_snapshot([self.row(0.50)], self.now)
+        old_book = {
+            "token_id": "token-1",
+            "observed_at": (self.now - timedelta(hours=1)).isoformat(),
+            "best_bid": 0.52,
+            "best_ask": 0.53,
+            "spread_bps": 190.48,
+            "bid_depth_usd_top5": 20.0,
+            "ask_depth_usd_top5": 18.0,
+            "book_usable": True,
+            "crossed_book": False,
+        }
+        result = bot.process_snapshot(
+            [{**self.row(0.54), "orderbook": old_book}],
+            self.now + timedelta(minutes=5),
+        )
+        self.assertEqual(result["opened"], [])
+        self.assertEqual(result["candidates"][0]["skip_reason"], "stale_orderbook")
+
     def test_corrupt_state_refuses_to_reset_account_silently(self):
         self.state_path.write_text("{not json", encoding="utf-8")
         with self.assertRaises(ValueError):

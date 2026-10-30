@@ -200,6 +200,46 @@ def match_news_to_markets(
     return candidates[:max(1, min(10, int(max_matches)))]
 
 
+def summarize_market_corroboration(matches: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Count distinct publishers linked to each market; this is not event verification."""
+    grouped: dict[str, dict[str, Any]] = {}
+    for match in matches:
+        market_id = str(match.get("market_id") or "").strip()
+        source = str(match.get("source") or "").strip()
+        if not market_id or not source:
+            continue
+        # Multiple sections of one publisher (e.g. BBC World and BBC Business)
+        # are one source, not independent corroboration.
+        publisher = source.split(" - ", 1)[0].strip()[:100]
+        row = grouped.setdefault(market_id, {
+            "market_id": market_id,
+            "market_question": str(match.get("market_question") or "")[:500],
+            "publishers": set(),
+            "headline_count": 0,
+        })
+        row["publishers"].add(publisher)
+        row["headline_count"] += 1
+
+    summaries = []
+    for row in grouped.values():
+        publishers = sorted(row["publishers"])
+        summaries.append({
+            "market_id": row["market_id"],
+            "market_question": row["market_question"],
+            "distinct_publisher_count": len(publishers),
+            "publishers": publishers,
+            "matched_headline_count": row["headline_count"],
+            "interpretation": "source_diversity_only_not_independent_event_verification",
+            "research_only": True,
+            "execution": "none",
+        })
+    summaries.sort(
+        key=lambda row: (row["distinct_publisher_count"], row["matched_headline_count"]),
+        reverse=True,
+    )
+    return summaries
+
+
 class NewsMarketMatcher:
     """Persist de-duplicated news-to-market keyword links for research review."""
 

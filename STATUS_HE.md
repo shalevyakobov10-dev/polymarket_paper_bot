@@ -1,4 +1,4 @@
-# מצב הפרויקט — 25 באוקטובר 2026
+# מצב הפרויקט — 30 באוקטובר 2026
 
 ## מה נמצא במאגר
 - שירות Python לקריאת נתונים ציבוריים מ-Gamma; נקודות HTTP: `/`, `/status`, `/health`, `/paper`, `/news`, `/matches`.
@@ -9,6 +9,14 @@
 - כלי `backtest.py`: היסטוריית CLOB ציבורית, split כרונולוגי, ארבעה ספי רגישות, ותשואות קדימה של שעה/6 שעות/24 שעות מול baseline.
 - תצורת Railway Infrastructure as Code ב-`.railway/railway.ts`: שירות יחיד ב-`main`, Volume מתמשך 1GB אל `/app/data`, בדיקת חיות ומשתני סביבה של Paper Trading.
 - GitHub Actions לבדיקות Python + Docker + בדיקת HTTP בתוך הקונטיינר, בדיקת Gamma ציבורי, בדיקת RSS מתוזמנת, backtest היסטורי ואימות תצורת Railway.
+
+## עדכון אחרון — 30 באוקטובר 2026
+- [CI #111](https://github.com/shalevyakobov10-dev/polymarket_paper_bot/actions/runs/41047539325): **הצליח** — קומפילציה, בדיקות יחידה, בניית Docker ובדיקת HTTP לקונטיינר.
+- [CI #112](https://github.com/shalevyakobov10-dev/polymarket_paper_bot/actions/runs/41048019756): **הצליח** על commit `3727df8` — 45 בדיקות יחידה, קומפילציה, בניית Docker ובדיקת HTTP של `/news`, `/status`, `/paper` ו-`/matches`.
+- גילוי השווקים ב-Gamma עבר לעימוד מוגבל: עד 5 עמודים כברירת מחדל, הסרת כפילויות לפי מזהה שוק, דירוג לפי נפח 24 שעות ומעקב אחרי 20 שווקים מובילים כברירת מחדל. ניתן לכוונן דרך `GAMMA_DISCOVERY_LIMIT`, `GAMMA_DISCOVERY_PAGES` ו-`MARKETS_TO_TRACK`.
+- נקודת `/matches` מציגה כעת סיכום גיוון מקורות לכל שוק: מספר מפרסמים שונים, שמות מפרסמים ומספר כותרות מותאמות. מדורי חדשות של אותו מפרסם מאוחדים תחת שם מפרסם אחד. זהו מדד לגיוון מקורות בלבד, לא אימות אירוע ולא הסתברות.
+- נוספו בדיקות ל-pagination/deduplication ולסיכום גיוון המפרסמים. בדיקות ה-RSS הציבוריות עברו בריצה [#41048010816](https://github.com/shalevyakobov10-dev/polymarket_paper_bot/actions/runs/41048010816).
+- ריצות CI כפולות נוצרו משום שכל קובץ עודכן ב-commit נפרד; ריצת הבדיקה של ה-commit האחרון עברה.
 
 ## עדכון אחרון — 25 באוקטובר 2026
 - [CI #107](https://github.com/shalevyakobov10-dev/polymarket_paper_bot/actions/runs/40184898249): **הצליח** — קומפילציה, 42 בדיקות יחידה, בניית Docker, והרצת קונטיינר שבדקה את `/news`, `/status`, `/paper` ו-`/matches`.

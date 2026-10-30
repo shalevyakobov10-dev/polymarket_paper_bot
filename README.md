@@ -41,6 +41,9 @@ Environment variables:
 - `DATA_DIR` (default `data`)
 - `NEWS_POLL_SECONDS` (default `300`, bounded to 60–3600 seconds)
 - `ORDERBOOK_TOKENS_PER_POLL` (default `20`, bounded to 0–100; set to `0` to disable CLOB order-book polling)
+- `RESEARCH_FEATURES_SNAPSHOT_SECONDS` (default `900`, bounded to 60–3600; at most one persisted feature snapshot per market per interval)
+- `RESEARCH_FEATURES_LOG_MAX_MB` (default `50`, bounded to 10–500 MB per file)
+- `RESEARCH_FEATURES_LOG_BACKUPS` (default `5`, bounded to 1–10 rotated backups)
 - `GDELT_QUERY` (optional override for the GDELT DOC global-news topic query)
 - `RESOLUTION_POLL_SECONDS` (default `900`, bounded to 300–3600 seconds)
 - `RESOLUTION_MARKETS_PER_POLL` (default `100`, bounded to 1–100 closed markets per page)
@@ -73,7 +76,7 @@ The initial worker compares the latest observed price with the previous observat
 
 Each market polling cycle also writes a point-in-time row to `data/research_features.jsonl`. The feature builder joins binary Yes/No Gamma outcome prices by market ID, the public CLOB order book for the Yes token (best bid/ask, midpoint, spread and visible top-five depth), and existing lexical news-to-market candidates whose publisher timestamp falls inside the latest 24 hours. The `/research-features` endpoint returns the latest stored row per market and a coverage summary.
 
-Publication timestamps that are missing or implausibly in the future are reported separately and are not counted as fresh news. Distinct source labels are only a descriptive count: they are not proof of independent reporting, event verification, or corroboration. The feature endpoint does not generate probabilities, forecasts, rankings, or trading instructions. These inputs must be checked for timestamp integrity, coverage and out-of-sample value before any forecasting model is developed. The feature log uses the standard bounded JSONL rotation settings.
+Publication timestamps that are missing or implausibly in the future are reported separately and are not counted as fresh news. Distinct source labels are only a descriptive count: they are not proof of independent reporting, event verification, or corroboration. The feature endpoint does not generate probabilities, forecasts, rankings, or trading instructions. These inputs must be checked for timestamp integrity, coverage and out-of-sample value before any forecasting model is developed. The feature collector persists at most one snapshot per market every 15 minutes by default (`RESEARCH_FEATURES_SNAPSHOT_SECONDS`), which is sufficiently granular for the 24-hour evaluation horizon while reducing duplicate records. The dedicated log keeps 50 MB per file and five rotated backups by default; these settings are configurable and should be sized to the persistent volume. Recent per-market timestamps are restored from the retained log after restart, so restarts do not normally bypass the sampling cadence. The feature log retention is separate from the shorter generic JSONL rotation settings.
 
 ## Resolved-market forecast evaluation
 

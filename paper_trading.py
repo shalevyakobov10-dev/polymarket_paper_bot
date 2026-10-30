@@ -253,12 +253,30 @@ class PaperTrader:
 
                 if had_position:
                     position = self._state["positions"][key]
-                    position["mark_price"] = price
+                    mark_price = price
+                    mark_source = "gamma_outcome_price_fallback"
+                    book_quality = evaluate_order_book_quality(
+                        row.get("orderbook"),
+                        now=current_time,
+                        max_age_seconds=self.config.max_orderbook_age_seconds,
+                        max_spread_bps=self.config.max_orderbook_spread_bps,
+                        min_side_depth_usd=self.config.min_orderbook_side_depth_usd,
+                        require_orderbook=False,
+                    )
+                    if book_quality.get("reason") == "approved_market_quality":
+                        bid = finite_float((row.get("orderbook") or {}).get("best_bid"))
+                        if bid is not None and 0.0 < bid < 1.0:
+                            mark_price = bid
+                            mark_source = "clob_best_bid"
+                    position["mark_price"] = mark_price
+                    position["mark_source"] = mark_source
                     position["mark_updated_at"] = iso_time(current_time)
-                    position["unrealized_pnl"] = round(self._position_unrealized(position, price), 8)
-                    reason = self._exit_reason(position, price, current_time)
+                    position["unrealized_pnl"] = round(self._position_unrealized(position, mark_price), 8)
+                    reason = self._exit_reason(position, mark_price, current_time)
                     if reason:
-                        closed = self._close_position(key, price, reason, current_time)
+                        closed = self._close_position(
+                            key, mark_price, reason, current_time, price_source=mark_source
+                        )
                         result["closed"].append(closed)
                         events.append(closed)
                 elif old_price is not None:
@@ -312,7 +330,21 @@ class PaperTrader:
             return None, str(market_quality["reason"])
         positions: dict[str, dict[str, Any]] = self._state["positions"]
         exposure = sum(float(position.get("gross_cost", 0.0)) for position in positions.values())
-        entry_price = observed_price * (1.0 + self.config.simulated_slippage)
+        entry_reference_price = observed_price
+        entry_price_source = "gamma_outcome_price_fallback"
+        initial_mark_price = observed_price
+        initial_mark_source = "gamma_outcome_price_fallback"
+        if market_quality.get("reason") == "approved_market_quality":
+            orderbook = row.get("orderbook") or {}
+            ask = finite_float(orderbook.get("best_ask"))
+            bid = finite_float(orderbook.get("best_bid"))
+            if ask is not None and 0.0 < ask < 1.0:
+                entry_reference_price = ask
+                entry_price_source = "clob_best_ask"
+            if bid is not None and 0.0 < bid < 1.0:
+                initial_mark_price = bid
+                initial_mark_source = "clob_best_bid"
+        entry_price = entry_reference_price * (1.0 + self.config.simulated_slippage)
         if entry_price >= 1.0:
             return None, "slippage_makes_entry_price_invalid"
         available_cash = float(self._state["cash"])
@@ -353,8 +385,11 @@ class PaperTrader:
             "outcome": str(row.get("outcome") or "Unknown outcome")[:100],
             "opened_at": iso_time(now),
             "entry_signal_price": round(observed_price, 8),
+            "entry_reference_price": round(entry_reference_price, 8),
+            "entry_price_source": entry_price_source,
             "entry_price": round(entry_price, 8),
-            "mark_price": round(observed_price, 8),
+            "mark_price": round(initial_mark_price, 8),
+            "mark_source": initial_mark_source,
             "shares": round(shares, 12),
             "gross_cost": round(spend, 8),
             "entry_fee": round(entry_fee, 8),
@@ -363,6 +398,9 @@ class PaperTrader:
             "unrealized_pnl": 0.0,
             "status": "OPEN",
         }
+        position["unrealized_pnl"] = round(
+            self._position_unrealized(position, initial_mark_price), 8
+        )
         self._state["cash"] = round(available_cash - spend - entry_fee, 8)
         self._state["total_fees"] = round(self._state["total_fees"] + entry_fee, 8)
         positions[key] = position
@@ -387,7 +425,15 @@ class PaperTrader:
         net_proceeds = float(position["shares"]) * exit_price * (1.0 - self.config.fee_rate)
         return net_proceeds - float(position["gross_cost"]) - float(position["entry_fee"])
 
-    def _close_position(self, key: str, observed_price: float, reason: str, now: datetime) -> dict[str, Any]:
+    def _close_position(
+        self,
+        key: str,
+        observed_price: float,
+        reason: str,
+        now: datetime,
+        *,
+        price_source: str = "gamma_outcome_price_fallback",
+    ) -> dict[str, Any]:
         position = self._state["positions"].pop(key)
         exit_price = observed_price * (1.0 - self.config.simulated_slippage)
         gross_proceeds = float(position["shares"]) * exit_price
@@ -414,6 +460,7 @@ class PaperTrader:
             "closed_at": iso_time(now),
             "entry_price": position["entry_price"],
             "exit_observed_price": round(observed_price, 8),
+            "exit_price_source": price_source,
             "exit_price_after_slippage": round(exit_price, 8),
             "shares": position["shares"],
             "gross_cost": position["gross_cost"],

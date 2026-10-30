@@ -195,6 +195,25 @@ class NewsMonitorTests(unittest.TestCase):
         self.assertEqual(result["latest_items"][0]["title"], "Newer event")
 
 
+    def test_news_freshness_reports_publish_and_fetch_age_separately(self):
+        now = news_monitor.datetime(2026, 10, 30, 12, 0, tzinfo=news_monitor.timezone.utc)
+        items = [
+            {"published_at": "Fri, 30 Oct 2026 11:00:00 GMT", "fetched_at": "2026-10-30T11:59:00Z"},
+            {"published_at": "invalid", "fetched_at": "2026-10-30T11:58:00+00:00"},
+        ]
+        summary = news_monitor.summarize_news_freshness(items, now)
+        self.assertEqual(summary["items_considered"], 2)
+        self.assertEqual(summary["items_with_publish_time"], 1)
+        self.assertEqual(summary["seconds_since_latest_publish"], 3600.0)
+        self.assertEqual(summary["seconds_since_latest_fetch"], 60.0)
+        self.assertIn("not_event_verification", summary["interpretation"])
+
+    def test_news_freshness_handles_empty_and_invalid_timestamps(self):
+        summary = news_monitor.summarize_news_freshness([{"published_at": "bad", "fetched_at": "bad"}])
+        self.assertEqual(summary["items_considered"], 1)
+        self.assertIsNone(summary["seconds_since_latest_publish"])
+        self.assertIsNone(summary["seconds_since_latest_fetch"])
+
     def test_corroboration_counts_distinct_publishers_not_feed_sections(self):
         matches = [
             {"market_id": "m1", "market_question": "Question", "source": "BBC News - World"},

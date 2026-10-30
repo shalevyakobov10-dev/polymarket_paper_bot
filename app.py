@@ -21,6 +21,7 @@ from resolution_tracker import ResolutionCollector
 from global_news import GDELTCollector
 from news_monitor import DEFAULT_FEEDS, NewsCollector, NewsMarketMatcher, summarize_market_corroboration, summarize_news_freshness
 from research_features import build_market_feature_rows, read_recent_jsonl, summarize_feature_rows
+from independent_model_evaluation import evaluate_feature_files
 
 GAMMA_URL = "https://gamma-api.polymarket.com/markets"
 POLL_SECONDS = max(15, int(os.getenv("POLL_SECONDS", "60")))
@@ -436,6 +437,20 @@ def research_features_payload() -> dict:
     }
 
 
+def independent_model_evaluation_payload() -> dict:
+    """Compare a feature model with market prices on a purged chronological holdout."""
+    feature_paths = [
+        RESEARCH_FEATURES.with_name(f"{RESEARCH_FEATURES.name}.{index}")
+        for index in range(3, 0, -1)
+    ] + [RESEARCH_FEATURES]
+    return evaluate_feature_files(
+        feature_paths,
+        get_resolution_collector()._rotation_paths(),
+        horizon_hours=24.0,
+        tolerance_hours=12.0,
+    )
+
+
 def resolution_worker_loop() -> None:
     """Collect public decisive binary resolutions for the forecast evaluation scorecard."""
     with _lock:
@@ -650,7 +665,7 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def do_GET(self):
-        if self.path in ("/", "/status", "/health", "/paper", "/news", "/matches", "/market-stream", "/resolutions", "/forecast-evaluation", "/research-features"):
+        if self.path in ("/", "/status", "/health", "/paper", "/news", "/matches", "/market-stream", "/resolutions", "/forecast-evaluation", "/research-features", "/independent-model-evaluation"):
             with _lock:
                 snapshot = dict(_state)
             if self.path == "/health":
@@ -687,6 +702,17 @@ class Handler(BaseHTTPRequestHandler):
                         "mode": "RESEARCH_FEATURES_V1",
                         "error": f"{type(exc).__name__}: {str(exc)[:300]}",
                         "research_only": True,
+                        "execution": "none",
+                    })
+            elif self.path == "/independent-model-evaluation":
+                try:
+                    self._send(200, independent_model_evaluation_payload())
+                except Exception as exc:
+                    self._send(503, {
+                        "mode": "INDEPENDENT_FEATURE_MODEL_EVALUATION_V1",
+                        "error": f"{type(exc).__name__}: {str(exc)[:300]}",
+                        "research_only": True,
+                        "forecast": None,
                         "execution": "none",
                     })
             elif self.path == "/forecast-evaluation":

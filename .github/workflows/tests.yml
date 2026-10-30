@@ -15,8 +15,10 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+      - name: Install runtime dependencies
+        run: python -m pip install -r requirements.txt
       - name: Compile
-        run: python -m py_compile app.py paper_trading.py news_monitor.py market_data.py global_news.py risk_manager.py backtest.py
+        run: python -m py_compile app.py paper_trading.py news_monitor.py market_data.py market_stream.py global_news.py risk_manager.py backtest.py
       - name: Unit tests
         run: python -m unittest discover -s tests -v
       - name: Build Docker image

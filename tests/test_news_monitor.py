@@ -195,5 +195,33 @@ class NewsMonitorTests(unittest.TestCase):
         self.assertEqual(result["latest_items"][0]["title"], "Newer event")
 
 
+    def test_corroboration_counts_distinct_publishers_not_feed_sections(self):
+        matches = [
+            {"market_id": "m1", "market_question": "Question", "source": "BBC News - World"},
+            {"market_id": "m1", "market_question": "Question", "source": "BBC News - Business"},
+            {"market_id": "m1", "market_question": "Question", "source": "The Guardian - World"},
+            {"market_id": "m1", "market_question": "Question", "source": "NPR - Top Stories"},
+        ]
+        summary = news_monitor.summarize_market_corroboration(matches)
+        self.assertEqual(len(summary), 1)
+        self.assertEqual(summary[0]["distinct_publisher_count"], 3)
+        self.assertEqual(summary[0]["matched_headline_count"], 4)
+        self.assertEqual(summary[0]["publishers"], ["BBC News", "NPR", "The Guardian"])
+        self.assertEqual(
+            summary[0]["interpretation"],
+            "source_diversity_only_not_independent_event_verification",
+        )
+        self.assertEqual(summary[0]["execution"], "none")
+
+    def test_corroboration_ignores_missing_market_or_source(self):
+        matches = [
+            {"market_id": "", "source": "BBC News"},
+            {"market_id": "m1", "source": ""},
+            {"market_id": "m2", "source": "NPR"},
+        ]
+        summary = news_monitor.summarize_market_corroboration(matches)
+        self.assertEqual([row["market_id"] for row in summary], ["m2"])
+
+
 if __name__ == "__main__":
     unittest.main()

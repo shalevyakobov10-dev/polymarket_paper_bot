@@ -95,15 +95,20 @@ class ResearchFeatureTests(unittest.TestCase):
         rows = [
             {"clob_book_usable": True, "clob_book_quality_eligible": True,
              "clob_spread_bps": 100, "clob_bid_depth_usd_top5": 10,
-             "clob_ask_depth_usd_top5": 20, "news_match_count_24h": 2},
+             "clob_ask_depth_usd_top5": 20, "news_match_count_24h": 2,
+             "fees_enabled": True, "fee_schedule_rate": 0.05},
             {"clob_book_usable": False, "clob_book_quality_eligible": False,
-             "clob_spread_bps": None, "news_match_count_24h": 0},
+             "clob_spread_bps": None, "news_match_count_24h": 0,
+             "fees_enabled": True, "fee_schedule_rate": None},
         ]
         result = research_features.summarize_feature_rows(rows)
         self.assertEqual(result["markets_in_snapshot"], 2)
         self.assertEqual(result["markets_with_usable_clob_book"], 1)
         self.assertEqual(result["news_matches_24h_total"], 2)
         self.assertEqual(result["mean_observed_spread_bps"], 100)
+        self.assertEqual(result["markets_with_known_fee_schedule"], 1)
+        self.assertEqual(result["markets_fee_enabled_without_schedule"], 1)
+        self.assertEqual(result["markets_marked_fee_free"], 0)
         self.assertIsNone(result.get("forecast"))
         self.assertIn("not_a_probability_forecast", result["interpretation"])
 

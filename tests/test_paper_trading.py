@@ -109,6 +109,31 @@ class PaperTraderTests(unittest.TestCase):
         self.assertEqual(result["opened"], [])
         self.assertEqual(result["candidates"][0]["skip_reason"], "daily_loss_limit_reached")
 
+    def test_daily_unrealized_baseline_resets_at_utc_day_rollover(self):
+        cfg = PaperConfig(**{
+            **self.config.__dict__,
+            "max_open_exposure_usd": 10.0,
+            "daily_loss_limit_usd": 0.5,
+        })
+        bot = PaperTrader(Path(self.temp.name) / "daily_rollover_state.json", cfg)
+        tokens = [f"rollover-{index}" for index in range(5)]
+        bot.process_snapshot([self.row(0.50, token) for token in tokens], self.now)
+        bot.process_snapshot(
+            [self.row(0.54, token) for token in tokens[:4]] + [self.row(0.50, tokens[4])],
+            self.now + timedelta(minutes=5),
+        )
+        bot.process_snapshot(
+            [self.row(0.50, token) for token in tokens],
+            self.now + timedelta(minutes=10),
+        )
+        next_day = self.now + timedelta(days=1)
+        result = bot.process_snapshot(
+            [self.row(0.50, token) for token in tokens[:4]] + [self.row(0.54, tokens[4])],
+            next_day,
+        )
+        self.assertEqual(len(result["opened"]), 1)
+        self.assertNotEqual(result["candidates"][0].get("skip_reason"), "daily_loss_limit_reached")
+
     def test_fee_assumption_is_applied_on_entry_and_exit(self):
         cfg = PaperConfig(**{**self.config.__dict__, "fee_rate": 0.01})
         bot = PaperTrader(Path(self.temp.name) / "fee_state.json", cfg)

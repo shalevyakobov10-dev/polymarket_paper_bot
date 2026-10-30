@@ -18,7 +18,7 @@ jobs:
       - name: Install runtime dependencies
         run: python -m pip install -r requirements.txt
       - name: Compile
-        run: python -m py_compile app.py paper_trading.py news_monitor.py market_data.py market_quality.py market_stream.py global_news.py risk_manager.py backtest.py forecast_evaluation.py resolution_tracker.py
+        run: python -m py_compile app.py paper_trading.py news_monitor.py market_data.py market_quality.py market_stream.py global_news.py risk_manager.py backtest.py forecast_evaluation.py resolution_tracker.py research_features.py
       - name: Unit tests
         run: python -m unittest discover -s tests -v
       - name: Build Docker image
@@ -46,6 +46,7 @@ jobs:
           curl --silent --show-error --fail http://127.0.0.1:18080/market-stream > /tmp/paper-market-stream.json
           curl --silent --show-error --fail http://127.0.0.1:18080/resolutions > /tmp/paper-resolutions.json
           curl --silent --show-error --fail http://127.0.0.1:18080/forecast-evaluation > /tmp/paper-forecast-evaluation.json
+          curl --silent --show-error --fail http://127.0.0.1:18080/research-features > /tmp/paper-research-features.json
           python - <<'PY'
           import json
           from pathlib import Path
@@ -57,6 +58,7 @@ jobs:
           market_stream = json.loads(Path("/tmp/paper-market-stream.json").read_text())
           resolutions = json.loads(Path("/tmp/paper-resolutions.json").read_text())
           forecast = json.loads(Path("/tmp/paper-forecast-evaluation.json").read_text())
+          features = json.loads(Path("/tmp/paper-research-features.json").read_text())
           assert "items" in news and "feeds_configured" in news, "news endpoint schema mismatch"
           assert status.get("mode") == "paper_only", "service must stay paper-only"
           assert isinstance(status.get("news"), dict), "status must include news health"
@@ -68,5 +70,8 @@ jobs:
           assert resolutions.get("research_only") is True and resolutions.get("execution") == "none", "resolution collector must remain research-only"
           assert forecast.get("mode") == "RESOLVED_MARKET_FORECAST_EVALUATION", "forecast evaluation endpoint mode mismatch"
           assert isinstance(forecast.get("metrics"), dict), "forecast evaluation metrics missing"
-          print("Container smoke check passed: /news, /status, /paper, /matches, /market-stream, /resolutions and /forecast-evaluation returned valid JSON.")
+          assert features.get("mode") == "RESEARCH_FEATURES_V1", "research features endpoint mode mismatch"
+          assert isinstance(features.get("summary"), dict), "research features summary missing"
+          assert features.get("research_only") is True and features.get("execution") == "none", "research features must remain non-executable"
+          print("Container smoke check passed: /news, /status, /paper, /matches, /market-stream, /resolutions, /forecast-evaluation and /research-features returned valid JSON.")
           PY

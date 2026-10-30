@@ -20,6 +20,7 @@ from forecast_evaluation import evaluate_jsonl_files
 from resolution_tracker import ResolutionCollector
 from global_news import GDELTCollector
 from news_monitor import DEFAULT_FEEDS, NewsCollector, NewsMarketMatcher, summarize_market_corroboration, summarize_news_freshness
+from research_features import build_market_feature_rows, read_recent_jsonl, summarize_feature_rows
 
 GAMMA_URL = "https://gamma-api.polymarket.com/markets"
 POLL_SECONDS = max(15, int(os.getenv("POLL_SECONDS", "60")))
@@ -36,6 +37,7 @@ SNAPSHOTS = DATA_DIR / "market_snapshots.jsonl"
 SIGNALS = DATA_DIR / "candidate_signals.jsonl"
 ORDERBOOK_SNAPSHOTS = DATA_DIR / "orderbook_snapshots.jsonl"
 RESOLUTIONS = DATA_DIR / "resolved_markets.jsonl"
+RESEARCH_FEATURES = DATA_DIR / "research_features.jsonl"
 _lock = threading.RLock()
 _state = {
     "started_at": datetime.now(timezone.utc).isoformat(),
@@ -52,6 +54,8 @@ _state = {
     "orderbooks_quality_rejected": 0,
     "orderbook_last_success_at": None,
     "signals_total": 0,
+    "research_features_written_last_poll": 0,
+    "research_features_error": None,
     "mode": "paper_only",
     "worker_running": False,
     "paper_trading": None,
@@ -340,9 +344,22 @@ def poll_once() -> dict:
     except Exception as exc:
         with _news_lock:
             _news_state["last_match_error"] = f"Unexpected {type(exc).__name__}: {str(exc)[:240]}"
+    feature_rows = []
+    feature_error = None
+    try:
+        feature_rows = build_market_feature_rows(rows, match_result.get("latest", []))
+        for feature_row in feature_rows:
+            append_jsonl(RESEARCH_FEATURES, feature_row)
+    except Exception as exc:
+        feature_error = f"Unexpected {type(exc).__name__}: {str(exc)[:240]}"
+    with _lock:
+        _state["research_features_written_last_poll"] = len(feature_rows)
+        _state["research_features_error"] = feature_error
     return {
         "markets": len(markets),
         "outcomes": len(rows),
+        "research_features_written": len(feature_rows),
+        "research_features_error": feature_error,
         "orderbooks": len(books),
         "orderbooks_usable": usable_books,
         "orderbooks_failed": failed_books,
@@ -378,6 +395,45 @@ def forecast_evaluation_payload() -> dict:
         horizon_hours=24.0,
         tolerance_hours=12.0,
     )
+
+
+def research_features_payload() -> dict:
+    """Return the latest point-in-time joined market/news feature row per market."""
+    paths = [RESEARCH_FEATURES] + [
+        RESEARCH_FEATURES.with_name(f"{RESEARCH_FEATURES.name}.{index}")
+        for index in range(1, 4)
+    ]
+    records = read_recent_jsonl(paths, limit=2000)
+    latest_by_market = {}
+    for record in records:
+        market_id = str(record.get("market_id") or "").strip()
+        if not market_id:
+            continue
+        previous = latest_by_market.get(market_id)
+        if previous is None or str(record.get("observed_at") or "") >= str(previous.get("observed_at") or ""):
+            latest_by_market[market_id] = record
+    items = sorted(
+        latest_by_market.values(),
+        key=lambda row: str(row.get("observed_at") or ""),
+        reverse=True,
+    )[:100]
+    return {
+        "mode": "RESEARCH_FEATURES_V1",
+        "generated_at": utc_now(),
+        "markets_with_latest_features": len(items),
+        "summary": summarize_feature_rows(items),
+        "items": items,
+        "methodology": {
+            "market_price_source": "Gamma outcomePrices; Yes and No joined by market ID",
+            "book_source": "public CLOB order-book snapshot for the Yes token",
+            "news_source": "existing lexical news-to-market candidate matches, publication time filtered to 24h",
+            "news_corroboration_caveat": "unique source labels are not verified independent reporting",
+            "prediction": "none; features are descriptive inputs only",
+        },
+        "research_only": True,
+        "forecast": None,
+        "execution": "none",
+    }
 
 
 def resolution_worker_loop() -> None:
@@ -594,7 +650,7 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def do_GET(self):
-        if self.path in ("/", "/status", "/health", "/paper", "/news", "/matches", "/market-stream", "/resolutions", "/forecast-evaluation"):
+        if self.path in ("/", "/status", "/health", "/paper", "/news", "/matches", "/market-stream", "/resolutions", "/forecast-evaluation", "/research-features"):
             with _lock:
                 snapshot = dict(_state)
             if self.path == "/health":
@@ -623,6 +679,16 @@ class Handler(BaseHTTPRequestHandler):
                     "research_only": True,
                     "execution": "none",
                 })
+            elif self.path == "/research-features":
+                try:
+                    self._send(200, research_features_payload())
+                except Exception as exc:
+                    self._send(503, {
+                        "mode": "RESEARCH_FEATURES_V1",
+                        "error": f"{type(exc).__name__}: {str(exc)[:300]}",
+                        "research_only": True,
+                        "execution": "none",
+                    })
             elif self.path == "/forecast-evaluation":
                 try:
                     self._send(200, forecast_evaluation_payload())

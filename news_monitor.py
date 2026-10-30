@@ -52,6 +52,47 @@ def utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def summarize_news_freshness(
+    items: list[dict[str, Any]],
+    now: datetime | None = None,
+) -> dict[str, Any]:
+    """Summarize observed publication/ingestion times without implying event freshness."""
+    current = now or datetime.now(timezone.utc)
+    if current.tzinfo is None:
+        current = current.replace(tzinfo=timezone.utc)
+
+    def parse_time(value: Any) -> datetime | None:
+        raw = str(value or "").strip()
+        if not raw:
+            return None
+        try:
+            parsed = parsedate_to_datetime(raw)
+        except (TypeError, ValueError, OverflowError):
+            try:
+                parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+            except (TypeError, ValueError, OverflowError):
+                return None
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return parsed.astimezone(timezone.utc)
+
+    published = [parse_time(item.get("published_at")) for item in items]
+    fetched = [parse_time(item.get("fetched_at")) for item in items]
+    published = [value for value in published if value is not None]
+    fetched = [value for value in fetched if value is not None]
+    latest_published = max(published) if published else None
+    latest_fetched = max(fetched) if fetched else None
+    return {
+        "items_considered": len(items),
+        "items_with_publish_time": len(published),
+        "latest_published_at": latest_published.isoformat() if latest_published else None,
+        "seconds_since_latest_publish": round(max(0.0, (current - latest_published).total_seconds()), 1) if latest_published else None,
+        "latest_fetched_at": latest_fetched.isoformat() if latest_fetched else None,
+        "seconds_since_latest_fetch": round(max(0.0, (current - latest_fetched).total_seconds()), 1) if latest_fetched else None,
+        "interpretation": "feed_item_timestamps_only_not_event_verification_or_market_signal",
+    }
+
+
 def _local_name(tag: str) -> str:
     return str(tag).rsplit("}", 1)[-1].lower()
 

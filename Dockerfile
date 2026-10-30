@@ -1,7 +1,9 @@
 FROM python:3.12-slim
 ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 PORT=8080 DATA_DIR=/app/data
 WORKDIR /app
-COPY app.py paper_trading.py news_monitor.py /app/
+# The service is intentionally dependency-light; copy every first-party module
+# imported by app.py (risk, CLOB market data, RSS and GDELT collectors included).
+COPY *.py /app/
 RUN useradd --create-home --uid 10001 appuser && mkdir -p /app/data && chown -R appuser:appuser /app
 USER appuser
 EXPOSE 8080

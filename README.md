@@ -128,9 +128,9 @@ Railway IaC is defined in `.railway/railway.ts`; the current config pins one wor
 GitHub Actions is configured in `.github/workflows/tests.yml` to compile the application and run the unit tests on pushes and pull requests.
 
 
-The paper portfolio uses a flat `PAPER_FEE_RATE` assumption when market fee metadata is unavailable. When Gamma supplies `feesEnabled` and `feeSchedule`, the simulator uses the market-specific taker curve `fee = shares × rate × price × (1 - price)`, rounded to five decimals with the published minimum charge. A market explicitly marked fee-enabled but missing a valid schedule is blocked from new paper entries rather than silently treated as fee-free. Markets with unknown fee metadata use the configured flat fallback, which defaults to zero and must be treated as an assumption, not a verified fee quote. Fee schedules are archived in the feature snapshots for later research. Fee estimates are based on the published schedule, not proof of the exact fee applied to a real fill.
-
 ## Paper portfolio simulation
+
+The paper portfolio uses a flat `PAPER_FEE_RATE` assumption when market fee metadata is unavailable. When Gamma supplies `feesEnabled` and `feeSchedule`, the simulator uses the market-specific taker curve `fee = shares × rate × price × (1 - price)`, rounded to five decimals with the published minimum charge. A market explicitly marked fee-enabled but missing a valid schedule is blocked from new paper entries rather than silently treated as fee-free. Markets with unknown fee metadata use the configured flat fallback, which defaults to zero and must be treated as an assumption, not a verified fee quote. Fee schedules are archived in the feature snapshots for later research. Fee estimates are based on the published schedule, not proof of the exact fee applied to a real fill. See the [Polymarket trading-fee documentation](https://help.polymarket.com/en/articles/13364478-trading-fees) for the published formula and market-specific fee rates.
 
 The polling service now maintains a persistent **simulated-only** portfolio through `paper_trading.py`. Defaults are:
 - Starting cash: $100
@@ -141,7 +141,7 @@ The polling service now maintains a persistent **simulated-only** portfolio thro
 - Simulated take-profit / stop-loss: +10% / -10% from the simulated entry price
 - Maximum holding time: 24 hours
 - Simulated slippage: 0.5% each side
-- Fee assumption: 0 by default because applicable fees have not been verified; set `PAPER_FEE_RATE` to model a fee scenario
+- Fee estimate: use the market's Gamma `feeSchedule` when present; otherwise use the explicitly labelled `PAPER_FEE_RATE` fallback (default `0.0`, not a verified quote)
 - Daily realized-loss guard: $5
 
 These values are risk controls and research assumptions, not evidence of profitability. The signal uses a change between observations, not a validated predictive model. The service does not short outcomes, submit orders, or connect to an account.

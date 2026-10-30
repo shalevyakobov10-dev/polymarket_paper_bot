@@ -180,6 +180,23 @@ class PaperTraderTests(unittest.TestCase):
         self.assertEqual(len(result["closed"]), 1)
         self.assertEqual(result["closed"][0]["reason"], "simulated_time_limit")
 
+    def test_prevents_opposing_outcomes_from_opening_in_same_market(self):
+        bot = PaperTrader(Path(self.temp.name) / "same_market_state.json", self.config)
+        yes = {**self.row(0.50, "yes-token"), "outcome": "Yes"}
+        no = {**self.row(0.50, "no-token"), "outcome": "No"}
+        bot.process_snapshot([yes, no], self.now)
+        opened = bot.process_snapshot(
+            [{**yes, "observed_price": 0.54}, no],
+            self.now + timedelta(minutes=5),
+        )
+        self.assertEqual(len(opened["opened"]), 1)
+        blocked = bot.process_snapshot(
+            [{**yes, "observed_price": 0.54}, {**no, "observed_price": 0.54}],
+            self.now + timedelta(minutes=10),
+        )
+        self.assertEqual(blocked["opened"], [])
+        self.assertEqual(blocked["candidates"][0]["skip_reason"], "opposing_outcome_already_open")
+
     def test_orderbook_gate_blocks_entries_without_a_book(self):
         cfg = PaperConfig(**{**self.config.__dict__, "require_orderbook": True})
         bot = PaperTrader(Path(self.temp.name) / "quality_missing_state.json", cfg)

@@ -131,7 +131,8 @@ class ParserTests(unittest.TestCase):
                 with patch.object(app, "DATA_DIR", root), \
                      patch.object(app, "SNAPSHOTS", root / "snapshots.jsonl"), \
                      patch.object(app, "SIGNALS", root / "signals.jsonl"), \
-                     patch.object(app, "fetch_markets", side_effect=[[markets[0]], [markets[1]]]):
+                     patch.object(app, "fetch_markets", side_effect=[[markets[0]], [markets[1]]]), \
+                     patch.object(app, "fetch_order_books", return_value={}):
                     first = app.poll_once()
                     second = app.poll_once()
                 self.assertEqual(first["candidates"], 0)

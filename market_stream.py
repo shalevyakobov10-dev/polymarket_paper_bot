@@ -154,10 +154,9 @@ class MarketStreamCollector:
         self.events_persisted += len(records)
 
     def run_session(self, token_ids: list[str], max_seconds: int = 45) -> dict[str, Any]:
-        tokens = list(dict.fromkeys(str(token).strip() for token in token_ids if str(token).strip()))
+        tokens = self.select_tokens([{"token_id": token} for token in token_ids])
         if not tokens:
             return {"connected": False, "reason": "no_tokens", "events_persisted": 0}
-        tokens = tokens[:200]
         started = time.monotonic()
         session_events = 0
         connection = None

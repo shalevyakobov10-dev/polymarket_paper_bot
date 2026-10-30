@@ -359,6 +359,18 @@ class PaperTrader:
         open_unrealized_pnl = (
             open_unrealized_total - float(self._state.get("daily_unrealized_baseline", 0.0))
         )
+        market_id = str(row.get("market_id") or "").strip()
+        outcome = str(row.get("outcome") or "").strip()
+        opposing_market_outcome_open = bool(
+            market_id
+            and outcome
+            and any(
+                str(position.get("market_id") or "").strip() == market_id
+                and str(position.get("outcome") or "").strip()
+                and str(position.get("outcome") or "").strip() != outcome
+                for position in positions.values()
+            )
+        )
         decision = evaluate_paper_entry(
             price=observed_price,
             requested_notional=spend,
@@ -372,6 +384,7 @@ class PaperTrader:
             open_unrealized_pnl=open_unrealized_pnl,
             daily_loss_limit_usd=self.config.daily_loss_limit_usd,
             fee_rate=self.config.fee_rate,
+            opposing_market_outcome_open=opposing_market_outcome_open,
         )
         if not decision.approved:
             return None, decision.reason

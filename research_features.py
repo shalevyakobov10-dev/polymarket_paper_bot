@@ -133,6 +133,9 @@ def build_market_feature_rows(
                 "shared_term_count": int(_finite_nonnegative(match.get("shared_term_count")) or 0),
             })
 
+        fee_schedule = yes.get("fee_schedule") if isinstance(yes.get("fee_schedule"), dict) else {}
+        fee_rate = _finite_nonnegative(fee_schedule.get("rate"))
+        fee_exponent = _finite_nonnegative(fee_schedule.get("exponent"))
         output.append({
             "schema_version": 1,
             "observed_at": current.isoformat(),
@@ -144,6 +147,11 @@ def build_market_feature_rows(
             "gamma_no_probability": round(no_price, 8) if no_price is not None else None,
             "gamma_binary_sum": round(yes_price + no_price, 8) if no_price is not None else None,
             "volume_24h": _finite_nonnegative(yes.get("volume_24h")),
+            "fees_enabled": yes.get("fees_enabled"),
+            "fee_type": str(yes.get("fee_type") or "")[:80] or None,
+            "fee_schedule_rate": fee_rate,
+            "fee_schedule_exponent": fee_exponent,
+            "fee_schedule_source": "gamma_fee_schedule" if fee_rate is not None else None,
             "clob_book_present": bool(book),
             "clob_book_usable": bool(book.get("book_usable")),
             "clob_book_quality_eligible": quality.get("eligible"),

@@ -17,6 +17,9 @@ class ResearchFeatureTests(unittest.TestCase):
                     "bid_depth_usd_top5": 50, "ask_depth_usd_top5": 40, "depth_imbalance_top5": 0.111111,
                 },
                 "market_quality": {"eligible": True, "reason": "approved_market_quality"},
+                "fees_enabled": True,
+                "fee_type": "general_fees",
+                "fee_schedule": {"rate": 0.05, "exponent": 1, "takerOnly": True},
             },
             {"market_id": "market-1", "token_id": "no-token", "outcome": "No", "observed_price": 0.38},
             {"market_id": "market-2", "token_id": "maybe", "outcome": "Maybe", "observed_price": 0.5},
@@ -49,6 +52,10 @@ class ResearchFeatureTests(unittest.TestCase):
         self.assertEqual(item["gamma_no_probability"], 0.38)
         self.assertEqual(item["gamma_binary_sum"], 1.0)
         self.assertEqual(item["volume_24h"], 12000.0)
+        self.assertTrue(item["fees_enabled"])
+        self.assertEqual(item["fee_type"], "general_fees")
+        self.assertEqual(item["fee_schedule_rate"], 0.05)
+        self.assertEqual(item["fee_schedule_exponent"], 1.0)
         self.assertEqual(item["clob_spread_bps"], 322.58)
         self.assertEqual(item["clob_book_age_seconds"], 60.0)
         self.assertTrue(item["clob_book_quality_eligible"])

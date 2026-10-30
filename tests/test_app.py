@@ -147,6 +147,25 @@ class ParserTests(unittest.TestCase):
                 app._state["signals_total"] = old_total
 
 
+    def test_forecast_evaluation_endpoint_is_available_without_resolved_samples(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            old_snapshots = app.SNAPSHOTS
+            old_resolutions = app.RESOLUTIONS
+            old_collector = app._resolution_collector
+            try:
+                app.SNAPSHOTS = root / "market_snapshots.jsonl"
+                app.RESOLUTIONS = root / "resolved_markets.jsonl"
+                app._resolution_collector = None
+                report = app.forecast_evaluation_payload()
+                self.assertEqual(report["mode"], "RESOLVED_MARKET_FORECAST_EVALUATION")
+                self.assertEqual(report["eligible_samples"], 0)
+                self.assertIsNone(report["metrics"]["brier_score"])
+            finally:
+                app.SNAPSHOTS = old_snapshots
+                app.RESOLUTIONS = old_resolutions
+                app._resolution_collector = old_collector
+
     def test_health_requires_worker_and_recent_success(self):
         now = datetime(2026, 10, 25, 12, tzinfo=timezone.utc)
         fresh = {

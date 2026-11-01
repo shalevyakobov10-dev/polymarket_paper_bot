@@ -123,5 +123,60 @@ class FeatureModelEvaluationTests(unittest.TestCase):
             model_eval.evaluate_feature_model([], l2=-1)
 
 
+
+    def test_walk_forward_validation_requires_consistent_multi_fold_improvement(self):
+        result = model_eval.evaluate_feature_model_walk_forward(synthetic_samples())
+        self.assertEqual(result["status"], "scored")
+        self.assertEqual(result["folds_scored"], 3)
+        self.assertEqual(result["brier_improved_folds"], 3)
+        self.assertEqual(result["log_loss_improved_folds"], 3)
+        self.assertTrue(result["promotion_gate_passed"])
+        self.assertEqual(result["preliminary_consistency_check"], "improved_across_all_folds")
+        self.assertFalse(result["live_execution_enabled"])
+        for fold in result["folds"]:
+            self.assertEqual(fold["status"], "scored")
+            self.assertLess(
+                datetime.fromisoformat(fold["latest_training_label_available_at"]),
+                datetime.fromisoformat(fold["test_forecast_start"]),
+            )
+
+    def test_walk_forward_purges_training_labels_not_known_at_fold_start(self):
+        samples = synthetic_samples()
+        warmup_n = int(len(samples) * 0.6)
+        test_start = datetime.fromisoformat(samples[warmup_n]["forecast_timestamp"])
+        samples[warmup_n - 1]["resolved_at"] = (test_start + timedelta(days=5)).isoformat()
+        result = model_eval.evaluate_feature_model_walk_forward(samples)
+        self.assertEqual(result["status"], "scored")
+        first_fold = result["folds"][0]
+        self.assertGreaterEqual(first_fold["purged_train_n"], 1)
+        self.assertLess(
+            datetime.fromisoformat(first_fold["latest_training_label_available_at"]),
+            datetime.fromisoformat(first_fold["test_forecast_start"]),
+        )
+
+    def test_walk_forward_withholds_all_folds_when_sample_is_too_small(self):
+        result = model_eval.evaluate_feature_model_walk_forward(synthetic_samples(100))
+        self.assertEqual(result["status"], "insufficient_data")
+        self.assertEqual(result["folds"], [])
+        self.assertFalse(result["promotion_gate_passed"] if "promotion_gate_passed" in result else False)
+
+    def test_walk_forward_withholds_fold_when_training_has_one_class(self):
+        samples = synthetic_samples()
+        warmup_n = int(len(samples) * 0.6)
+        for row in samples[:warmup_n]:
+            row["outcome_yes"] = 1
+        result = model_eval.evaluate_feature_model_walk_forward(samples)
+        self.assertEqual(result["status"], "insufficient_fold_coverage")
+        self.assertEqual(result["folds"][0]["status"], "insufficient_class_diversity")
+        self.assertFalse(result["live_execution_enabled"])
+
+    def test_walk_forward_rejects_invalid_configuration(self):
+        with self.assertRaises(ValueError):
+            model_eval.evaluate_feature_model_walk_forward([], folds=2)
+        with self.assertRaises(ValueError):
+            model_eval.evaluate_feature_model_walk_forward([], warmup_fraction=0.9)
+        with self.assertRaises(ValueError):
+            model_eval.evaluate_feature_model_walk_forward([], l2=-0.1)
+
 if __name__ == "__main__":
     unittest.main()

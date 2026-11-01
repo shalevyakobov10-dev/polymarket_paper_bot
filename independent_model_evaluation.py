@@ -513,6 +513,7 @@ def evaluate_feature_model_walk_forward(
         "research_only": True,
         "forecast": None,
         "live_execution_enabled": False,
+        "real_money_execution": "not_implemented",
         "execution": "none",
         "folds": [],
     }
@@ -635,8 +636,9 @@ def evaluate_feature_model_walk_forward(
         "preliminary_consistency_check": (
             "improved_across_all_folds" if consistent else "consistent_edge_not_demonstrated"
         ),
-        "promotion_gate_passed": bool(consistent),
+        "multi_fold_consistency_gate_passed": bool(consistent),
         "live_execution_enabled": False,
+        "real_money_execution": "not_implemented",
         "warning": (
             "A multi-fold improvement is still exploratory, not proof of statistical "
             "significance, profitability, or future performance. It does not enable live execution."
@@ -695,12 +697,17 @@ def evaluate_feature_files(
             "training_labels_known_before_test_forecasts": True,
             "minimum_training_markets": 80,
             "minimum_test_markets": 20,
+            "walk_forward_folds": 3,
+            "walk_forward_minimum_test_markets_per_fold": 20,
+            "walk_forward_warmup_fraction": 0.6,
         },
         "limitations": [
             "This evaluates prediction scores, not fills, fees, slippage, or P&L.",
-            "The single holdout is exploratory and can be noisy or regime-specific.",
+            "The single holdout and multi-fold walk-forward are exploratory and can be noisy or regime-specific.",
             "News inputs are lexical matches and do not establish event truth or source independence.",
             "Only the latest retained JSONL rotations are available; missing historical snapshots cannot be reconstructed.",
+            "The walk-forward consistency gate is a research promotion check, not a live-trading authorization.",
+            "Real-money order execution, wallet connection and signing are not implemented.",
             "Model features and preprocessing are fixed; this is not an automatically optimized trading strategy.",
         ],
     }

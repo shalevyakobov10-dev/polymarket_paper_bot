@@ -691,6 +691,8 @@ def evaluate_feature_files(
         "feature_rows_loaded": len(feature_rows),
         "resolutions_loaded": len(resolutions),
         "samples_selected": len(samples),
+        "real_money_execution": "not_implemented",
+        "live_execution_enabled": False,
         "data_requirements": {
             "one_near_horizon_snapshot_per_resolved_binary_market": True,
             "features_timestamped_before_resolution": True,

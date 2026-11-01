@@ -329,6 +329,10 @@ class ParserTests(unittest.TestCase):
                 self.assertTrue(report["research_only"])
                 self.assertIsNone(report["forecast"])
                 self.assertEqual(report["execution"], "none")
+                self.assertEqual(report["real_money_execution"], "not_implemented")
+                self.assertEqual(report["walk_forward_validation"]["status"], "insufficient_data")
+                self.assertFalse(report["walk_forward_validation"]["live_execution_enabled"])
+                self.assertEqual(report["execution"], "none")
             finally:
                 app.RESEARCH_FEATURES = old_features
                 app.RESOLUTIONS = old_resolutions

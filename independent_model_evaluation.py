@@ -431,6 +431,219 @@ def evaluate_feature_model(
     }
 
 
+
+def evaluate_feature_model_walk_forward(
+    samples: list[dict[str, Any]],
+    *,
+    folds: int = 3,
+    warmup_fraction: float = 0.6,
+    minimum_train: int = 80,
+    minimum_test: int = 20,
+    l2: float = 0.25,
+) -> dict[str, Any]:
+    """Run expanding-window model comparisons across multiple purged time folds.
+
+    Each fold trains only on earlier forecast observations whose outcomes had
+    already resolved before that fold's first test forecast. Imputation and
+    scaling are fitted independently inside each fold.
+    """
+    if not 3 <= folds <= 5:
+        raise ValueError("folds must be between 3 and 5")
+    if not 0.5 <= warmup_fraction <= 0.8:
+        raise ValueError("warmup_fraction must be between 0.5 and 0.8")
+    if minimum_train < 2 or minimum_test < 1:
+        raise ValueError("minimum sample sizes are too small")
+    if not math.isfinite(l2) or l2 < 0:
+        raise ValueError("l2 must be finite and nonnegative")
+
+    eligible = []
+    seen_market_ids: set[str] = set()
+    for sample in samples:
+        if not isinstance(sample, dict):
+            continue
+        market_id = str(sample.get("market_id") or "").strip()
+        forecast_stamp = _timestamp(sample.get("forecast_timestamp"))
+        resolved_stamp = _timestamp(sample.get("resolved_at"))
+        outcome = sample.get("outcome_yes")
+        market_probability = _number(sample.get("market_probability_yes"))
+        features = sample.get("features")
+        if (
+            not market_id or market_id in seen_market_ids
+            or forecast_stamp is None or resolved_stamp is None
+            or forecast_stamp >= resolved_stamp
+            or outcome not in (0, 1, False, True)
+            or market_probability is None or not 0.0 <= market_probability <= 1.0
+            or not isinstance(features, dict)
+        ):
+            continue
+        clipped_market = min(0.99, max(0.01, market_probability))
+        vector: dict[str, float | None] = {}
+        for name in FEATURE_NAMES:
+            value = _number(features.get(name))
+            vector[name] = value
+        vector["logit_market_probability"] = math.log(
+            clipped_market / (1.0 - clipped_market)
+        )
+        eligible.append({
+            **sample,
+            "market_id": market_id,
+            "forecast_timestamp": _iso(forecast_stamp),
+            "resolved_at": _iso(resolved_stamp),
+            "features": vector,
+            "market_probability_yes": float(market_probability),
+            "outcome_yes": int(bool(outcome)),
+            "_forecast_stamp": forecast_stamp,
+            "_resolved_stamp": resolved_stamp,
+        })
+        seen_market_ids.add(market_id)
+
+    eligible.sort(key=lambda row: (row["_forecast_stamp"], row["market_id"]))
+    n = len(eligible)
+    warmup_n = int(n * warmup_fraction)
+    remaining_n = n - warmup_n
+    base_result = {
+        "mode": "PURGED_WALK_FORWARD_MODEL_VALIDATION_V1",
+        "status": "insufficient_data",
+        "eligible_unique_markets": n,
+        "warmup_fraction": warmup_fraction,
+        "warmup_n": warmup_n,
+        "requested_folds": folds,
+        "minimum_train_per_fold": minimum_train,
+        "minimum_test_per_fold": minimum_test,
+        "research_only": True,
+        "forecast": None,
+        "live_execution_enabled": False,
+        "execution": "none",
+        "folds": [],
+    }
+    if remaining_n < folds * minimum_test or warmup_n < minimum_train:
+        return {
+            **base_result,
+            "warning": (
+                "Not enough unique resolved markets for the configured warm-up "
+                "and all chronological test folds. No fold model was fitted."
+            ),
+        }
+
+    fold_reports = []
+    brier_improvements: list[float] = []
+    log_loss_changes: list[float] = []
+    insufficient_folds = []
+    for fold_index in range(folds):
+        start_index = warmup_n + (remaining_n * fold_index // folds)
+        end_index = warmup_n + (remaining_n * (fold_index + 1) // folds)
+        test = eligible[start_index:end_index]
+        if not test:
+            insufficient_folds.append(fold_index + 1)
+            fold_reports.append({
+                "fold": fold_index + 1,
+                "status": "insufficient_test_data",
+                "train_n": 0,
+                "test_n": 0,
+            })
+            continue
+        test_start = test[0]["_forecast_stamp"]
+        candidate_train = eligible[:start_index]
+        train = [
+            row for row in candidate_train
+            if row["_resolved_stamp"] < test_start
+        ]
+        train.sort(key=lambda row: row["_forecast_stamp"])
+        fold_report: dict[str, Any] = {
+            "fold": fold_index + 1,
+            "status": "pending",
+            "train_n": len(train),
+            "purged_train_n": len(candidate_train) - len(train),
+            "test_n": len(test),
+            "test_forecast_start": _iso(test_start),
+            "latest_training_label_available_at": (
+                _iso(max(row["_resolved_stamp"] for row in train)) if train else None
+            ),
+        }
+        if len(train) < minimum_train or len(test) < minimum_test:
+            fold_report.update({
+                "status": "insufficient_data",
+                "warning": "Fold minimum training or test sample requirement not met.",
+            })
+            insufficient_folds.append(fold_index + 1)
+            fold_reports.append(fold_report)
+            continue
+        if len({row["outcome_yes"] for row in train}) < 2:
+            fold_report.update({
+                "status": "insufficient_class_diversity",
+                "warning": "Training window contains only one outcome class; fold model withheld.",
+            })
+            insufficient_folds.append(fold_index + 1)
+            fold_reports.append(fold_report)
+            continue
+        if max(row["_resolved_stamp"] for row in train) >= test_start:
+            raise RuntimeError("walk-forward purge invariant violated")
+
+        train_labels = [row["outcome_yes"] for row in train]
+        test_labels = [row["outcome_yes"] for row in test]
+        train_matrix, test_matrix, transform_metadata = _prepare_matrices(train, test)
+        intercept, weights, iterations = _fit_logistic(
+            train_matrix, train_labels, l2=l2
+        )
+        model_probabilities = _probabilities(test_matrix, intercept, weights)
+        market_probabilities = [row["market_probability_yes"] for row in test]
+        model_metrics = _score(model_probabilities, test_labels)
+        market_metrics = _score(market_probabilities, test_labels)
+        brier_improvement = market_metrics["brier_score"] - model_metrics["brier_score"]
+        log_loss_change = model_metrics["log_loss"] - market_metrics["log_loss"]
+        brier_improvements.append(brier_improvement)
+        log_loss_changes.append(log_loss_change)
+        fold_report.update({
+            "status": "scored",
+            "market_baseline": market_metrics,
+            "feature_model": model_metrics,
+            "brier_improvement_vs_market": round(brier_improvement, 8),
+            "log_loss_change_vs_market": round(log_loss_change, 8),
+            "model_iterations": iterations,
+            "preprocessing": transform_metadata,
+            "label_availability_check": "all training outcomes resolved before first test forecast",
+        })
+        fold_reports.append(fold_report)
+
+    if insufficient_folds or len(brier_improvements) != folds:
+        return {
+            **base_result,
+            "status": "insufficient_fold_coverage",
+            "folds": fold_reports,
+            "folds_scored": len(brier_improvements),
+            "folds_withheld": insufficient_folds,
+            "warning": "Every configured fold must meet minimum data and class-diversity requirements.",
+        }
+
+    brier_improved_folds = sum(value > 0 for value in brier_improvements)
+    log_loss_improved_folds = sum(value < 0 for value in log_loss_changes)
+    mean_brier_improvement = sum(brier_improvements) / folds
+    mean_log_loss_change = sum(log_loss_changes) / folds
+    consistent = (
+        brier_improved_folds == folds
+        and log_loss_improved_folds >= math.ceil(folds * 0.75)
+    )
+    return {
+        **base_result,
+        "status": "scored",
+        "folds": fold_reports,
+        "folds_scored": folds,
+        "mean_brier_improvement_vs_market": round(mean_brier_improvement, 8),
+        "mean_log_loss_change_vs_market": round(mean_log_loss_change, 8),
+        "brier_improved_folds": brier_improved_folds,
+        "log_loss_improved_folds": log_loss_improved_folds,
+        "preliminary_consistency_check": (
+            "improved_across_all_folds" if consistent else "consistent_edge_not_demonstrated"
+        ),
+        "promotion_gate_passed": bool(consistent),
+        "live_execution_enabled": False,
+        "warning": (
+            "A multi-fold improvement is still exploratory, not proof of statistical "
+            "significance, profitability, or future performance. It does not enable live execution."
+        ),
+    }
+
+
 def _load_jsonl(paths: Iterable[str | Path]) -> list[dict[str, Any]]:
     output: list[dict[str, Any]] = []
     for path in paths:
@@ -467,8 +680,10 @@ def evaluate_feature_files(
         tolerance_hours=tolerance_hours,
     )
     evaluation = evaluate_feature_model(samples)
+    walk_forward = evaluate_feature_model_walk_forward(samples)
     return {
         **evaluation,
+        "walk_forward_validation": walk_forward,
         "horizon_hours": horizon_hours,
         "tolerance_hours": tolerance_hours,
         "feature_rows_loaded": len(feature_rows),

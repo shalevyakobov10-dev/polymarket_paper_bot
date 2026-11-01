@@ -130,9 +130,10 @@ class FeatureModelEvaluationTests(unittest.TestCase):
         self.assertEqual(result["folds_scored"], 3)
         self.assertEqual(result["brier_improved_folds"], 3)
         self.assertEqual(result["log_loss_improved_folds"], 3)
-        self.assertTrue(result["promotion_gate_passed"])
+        self.assertTrue(result["multi_fold_consistency_gate_passed"])
         self.assertEqual(result["preliminary_consistency_check"], "improved_across_all_folds")
         self.assertFalse(result["live_execution_enabled"])
+        self.assertEqual(result["real_money_execution"], "not_implemented")
         for fold in result["folds"]:
             self.assertEqual(fold["status"], "scored")
             self.assertLess(
@@ -158,7 +159,7 @@ class FeatureModelEvaluationTests(unittest.TestCase):
         result = model_eval.evaluate_feature_model_walk_forward(synthetic_samples(100))
         self.assertEqual(result["status"], "insufficient_data")
         self.assertEqual(result["folds"], [])
-        self.assertFalse(result["promotion_gate_passed"] if "promotion_gate_passed" in result else False)
+        self.assertEqual(result["status"], "insufficient_data")
 
     def test_walk_forward_withholds_fold_when_training_has_one_class(self):
         samples = synthetic_samples()

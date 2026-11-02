@@ -176,10 +176,16 @@ class PaperTrader:
     def _load_or_initialize(self) -> dict[str, Any]:
         if not self.state_path.exists():
             return self._new_state()
+        def reject_nonstandard_constant(value: str):
+            raise ValueError(f"Non-standard JSON numeric constant: {value}")
+
         try:
-            loaded = json.loads(self.state_path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError) as exc:
-            # Do not silently reset state after a corrupted file.
+            loaded = json.loads(
+                self.state_path.read_text(encoding="utf-8"),
+                parse_constant=reject_nonstandard_constant,
+            )
+        except (OSError, json.JSONDecodeError, ValueError) as exc:
+            # Do not silently reset state after a corrupted or non-standard file.
             raise ValueError(f"Could not read paper state file {self.state_path}: {exc}") from exc
         if not isinstance(loaded, dict) or loaded.get("schema_version") != 1:
             raise ValueError("Paper state file has an unsupported or malformed schema")
@@ -197,6 +203,69 @@ class PaperTrader:
         loaded.setdefault("daily_realized_pnl", 0.0)
         loaded.setdefault("daily_unrealized_baseline", 0.0)
         loaded.setdefault("recent_events", [])
+
+        if loaded["mode"] != "PAPER_ONLY":
+            raise ValueError("Persisted portfolio mode is not PAPER_ONLY; refusing to load it")
+
+        def checked_number(field: str, *, minimum: float | None = None, maximum: float | None = None) -> float:
+            raw = loaded.get(field)
+            if isinstance(raw, bool) or not isinstance(raw, (int, float)):
+                raise ValueError(f"Paper state field {field} must be numeric")
+            parsed = float(raw)
+            if not math.isfinite(parsed):
+                raise ValueError(f"Paper state field {field} must be finite")
+            if minimum is not None and parsed < minimum:
+                raise ValueError(f"Paper state field {field} is below its allowed minimum")
+            if maximum is not None and parsed > maximum:
+                raise ValueError(f"Paper state field {field} is above its allowed maximum")
+            return parsed
+
+        checked_number("cash", minimum=0.0)
+        checked_number("starting_cash", minimum=1e-12)
+        checked_number("realized_pnl")
+        checked_number("total_fees", minimum=0.0)
+        checked_number("daily_realized_pnl")
+        checked_number("daily_unrealized_baseline")
+        if not isinstance(loaded["recent_events"], list):
+            raise ValueError("Paper state recent_events must be a list")
+
+        for counter in ("closed_trades", "winning_trades", "losing_trades"):
+            value = loaded[counter]
+            if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+                raise ValueError(f"Paper state counter {counter} must be a nonnegative integer")
+        if loaded["winning_trades"] + loaded["losing_trades"] > loaded["closed_trades"]:
+            raise ValueError("Paper state win/loss counters exceed the number of closed trades")
+
+        for token_id, price in loaded["last_prices"].items():
+            if not isinstance(token_id, str) or not token_id.strip():
+                raise ValueError("Paper state contains an invalid last-price token key")
+            if isinstance(price, bool) or not isinstance(price, (int, float)):
+                raise ValueError("Paper state contains a non-numeric last price")
+            if not math.isfinite(float(price)) or not 0.0 < float(price) < 1.0:
+                raise ValueError("Paper state contains a last price outside the open interval (0, 1)")
+
+        required_position_numbers = ("shares", "gross_cost", "entry_fee", "entry_price", "mark_price")
+        for token_id, position in loaded["positions"].items():
+            if not isinstance(token_id, str) or not token_id.strip() or not isinstance(position, dict):
+                raise ValueError("Paper state contains a malformed open position")
+            for field in required_position_numbers:
+                raw = position.get(field)
+                if isinstance(raw, bool) or not isinstance(raw, (int, float)) or not math.isfinite(float(raw)):
+                    raise ValueError(f"Paper position {token_id} has an invalid {field}")
+            if float(position["shares"]) <= 0.0 or float(position["gross_cost"]) < 0.0 or float(position["entry_fee"]) < 0.0:
+                raise ValueError(f"Paper position {token_id} has a negative or zero quantity/cost")
+            if not 0.0 < float(position["entry_price"]) < 1.0 or not 0.0 < float(position["mark_price"]) < 1.0:
+                raise ValueError(f"Paper position {token_id} has a price outside the open interval (0, 1)")
+            if "unrealized_pnl" in position and (
+                isinstance(position["unrealized_pnl"], bool)
+                or not isinstance(position["unrealized_pnl"], (int, float))
+                or not math.isfinite(float(position["unrealized_pnl"]))
+            ):
+                raise ValueError(f"Paper position {token_id} has invalid unrealized P&L")
+            try:
+                parse_time(str(position.get("opened_at") or ""))
+            except (TypeError, ValueError, OverflowError) as exc:
+                raise ValueError(f"Paper position {token_id} has an invalid opened_at timestamp") from exc
         return loaded
 
     def _save(self) -> None:

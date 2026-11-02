@@ -582,31 +582,130 @@ def worker_loop() -> None:
         time.sleep(POLL_SECONDS)
 
 
-def health_payload(snapshot: dict, now: datetime | None = None) -> tuple[bool, dict]:
-    """Report unhealthy when the worker has not produced a recent successful poll."""
+def _health_component(
+    *,
+    name: str,
+    worker_running: bool,
+    last_success_at: object,
+    stale_after_seconds: int,
+    now: datetime,
+    last_error: object = None,
+) -> dict:
+    """Describe one collector without allowing optional feeds to mask core health."""
+    if not worker_running:
+        status = "stopped"
+        age_seconds = None
+    elif not last_success_at:
+        status = "starting"
+        age_seconds = None
+    else:
+        try:
+            parsed = datetime.fromisoformat(str(last_success_at).replace("Z", "+00:00"))
+            if parsed.tzinfo is None:
+                parsed = parsed.replace(tzinfo=timezone.utc)
+            age_seconds = (now - parsed.astimezone(timezone.utc)).total_seconds()
+            if age_seconds < -5.0:
+                status = "future_timestamp"
+            elif age_seconds > stale_after_seconds:
+                status = "stale"
+            else:
+                status = "healthy"
+                age_seconds = max(0.0, age_seconds)
+        except (TypeError, ValueError, OverflowError):
+            status = "invalid_timestamp"
+            age_seconds = None
+    return {
+        "name": name,
+        "status": status,
+        "worker_running": bool(worker_running),
+        "last_success_at": last_success_at,
+        "seconds_since_success": round(age_seconds, 1) if age_seconds is not None else None,
+        "stale_after_seconds": stale_after_seconds,
+        "last_error": str(last_error)[:300] if last_error else None,
+    }
+
+
+def health_payload(
+    snapshot: dict,
+    now: datetime | None = None,
+    *,
+    news_snapshot: dict | None = None,
+    stream_snapshot: dict | None = None,
+    resolution_snapshot: dict | None = None,
+) -> tuple[bool, dict]:
+    """Report core market readiness and separately expose optional collector degradation."""
     current = now or datetime.now(timezone.utc)
     if current.tzinfo is None:
         current = current.replace(tzinfo=timezone.utc)
-    last_success = snapshot.get("last_success_at")
-    age_seconds = None
-    if last_success:
-        try:
-            parsed = datetime.fromisoformat(str(last_success).replace("Z", "+00:00"))
-            if parsed.tzinfo is None:
-                parsed = parsed.replace(tzinfo=timezone.utc)
-            age_seconds = max(0.0, (current - parsed.astimezone(timezone.utc)).total_seconds())
-        except (TypeError, ValueError, OverflowError):
-            age_seconds = None
-    stale_after = max(180, POLL_SECONDS * 3)
-    healthy = bool(snapshot.get("worker_running")) and age_seconds is not None and age_seconds <= stale_after
+    current = current.astimezone(timezone.utc)
+
+    market_stale_after = max(180, POLL_SECONDS * 3)
+    news_stale_after = max(900, NEWS_POLL_SECONDS * 3)
+    resolution_stale_after = max(1800, RESOLUTION_POLL_SECONDS * 3)
+    stream_stale_after = max(180, POLL_SECONDS * 3)
+
+    market_component = _health_component(
+        name="market_data",
+        worker_running=bool(snapshot.get("worker_running")),
+        last_success_at=snapshot.get("last_success_at"),
+        stale_after_seconds=market_stale_after,
+        now=current,
+        last_error=snapshot.get("last_error"),
+    )
+    components = {"market_data": market_component}
+
+    if news_snapshot is not None:
+        components["news"] = _health_component(
+            name="news",
+            worker_running=bool(news_snapshot.get("worker_running")),
+            last_success_at=news_snapshot.get("last_success_at"),
+            stale_after_seconds=news_stale_after,
+            now=current,
+            last_error=news_snapshot.get("last_error"),
+        )
+
+    if resolution_snapshot is not None:
+        components["resolutions"] = _health_component(
+            name="resolutions",
+            worker_running=bool(resolution_snapshot.get("worker_running")),
+            last_success_at=resolution_snapshot.get("last_success_at"),
+            stale_after_seconds=resolution_stale_after,
+            now=current,
+            last_error=resolution_snapshot.get("last_error"),
+        )
+
+    if stream_snapshot is not None:
+        stream_worker_running = bool(stream_snapshot.get("worker_running"))
+        stream_last_connect = stream_snapshot.get("last_connect_at")
+        stream_component = _health_component(
+            name="market_stream",
+            worker_running=stream_worker_running and bool(stream_snapshot.get("connected")),
+            last_success_at=stream_last_connect,
+            stale_after_seconds=stream_stale_after,
+            now=current,
+            last_error=stream_snapshot.get("last_error"),
+        )
+        if stream_worker_running and not stream_snapshot.get("connected"):
+            stream_component["status"] = "disconnected" if stream_last_connect else "starting"
+        stream_component["last_message_at"] = stream_snapshot.get("last_message_at")
+        components["market_stream"] = stream_component
+
+    healthy = market_component["status"] == "healthy"
+    degraded = [
+        name for name, component in components.items()
+        if name != "market_data" and component["status"] != "healthy"
+    ]
     payload = {
         "ok": healthy,
         "mode": "paper_only",
         "worker_running": bool(snapshot.get("worker_running")),
-        "last_success_at": last_success,
-        "seconds_since_success": round(age_seconds, 1) if age_seconds is not None else None,
-        "stale_after_seconds": stale_after,
+        "last_success_at": snapshot.get("last_success_at"),
+        "seconds_since_success": market_component["seconds_since_success"],
+        "stale_after_seconds": market_stale_after,
         "last_error": snapshot.get("last_error"),
+        "components": components,
+        "degraded_components": degraded,
+        "health_policy": "market_data_is_required; news_resolution_and_stream_are_reported_as_optional_degraded_components",
     }
     if not healthy and not payload["last_error"]:
         payload["last_error"] = "No recent successful market poll"
@@ -730,7 +829,17 @@ class Handler(BaseHTTPRequestHandler):
             with _lock:
                 snapshot = dict(_state)
             if self.path == "/health":
-                healthy, payload = health_payload(snapshot)
+                with _news_lock:
+                    news_snapshot = dict(_news_state)
+                with _lock:
+                    stream_snapshot = dict(_market_stream_state)
+                    resolution_snapshot = dict(_resolution_state)
+                healthy, payload = health_payload(
+                    snapshot,
+                    news_snapshot=news_snapshot,
+                    stream_snapshot=stream_snapshot,
+                    resolution_snapshot=resolution_snapshot,
+                )
                 self._send(200 if healthy else 503, payload)
             elif self.path == "/paper":
                 self._send(200, get_paper_trader().snapshot())

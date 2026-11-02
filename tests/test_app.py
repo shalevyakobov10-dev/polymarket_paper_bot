@@ -501,6 +501,34 @@ class ParserTests(unittest.TestCase):
         self.assertEqual(result["skipped"]["conflicting_persisted_resolution"], 1)
         self.assertEqual(result["conflicting_market_ids"], ["market-conflict"])
 
+
+    def test_resolution_settlement_diagnostics_are_visible_in_resolution_endpoint(self):
+        from app import _resolution_state, Handler
+        original = dict(_resolution_state)
+        try:
+            _resolution_state.update({
+                "paper_positions_settled_last_poll": 1,
+                "paper_settlements_total_reported": 4,
+                "paper_settlement_skipped_last_poll": {
+                    "conflicting_persisted_resolution": 1,
+                    "invalid_resolution": 0,
+                },
+                "paper_settlement_conflicts_last_poll": ["market-conflict"],
+                "paper_settlement_warning": "conflicting resolution evidence",
+            })
+            payload = {
+                **_resolution_state,
+                "research_only": True,
+                "execution": "none",
+            }
+            self.assertEqual(payload["paper_positions_settled_last_poll"], 1)
+            self.assertEqual(payload["paper_settlements_total_reported"], 4)
+            self.assertEqual(payload["paper_settlement_conflicts_last_poll"], ["market-conflict"])
+            self.assertIn("conflicting", payload["paper_settlement_warning"])
+        finally:
+            _resolution_state.clear()
+            _resolution_state.update(original)
+
     def test_settle_open_paper_positions_ignores_unrelated_resolutions(self):
         class FakeTrader:
             def snapshot(self):

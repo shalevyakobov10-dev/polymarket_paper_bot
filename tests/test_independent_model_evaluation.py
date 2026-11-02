@@ -283,7 +283,7 @@ class FeatureModelEvaluationTests(unittest.TestCase):
         self.assertEqual(result["brier_improved_folds"], 3)
         self.assertEqual(result["log_loss_improved_folds"], 3)
         self.assertTrue(result["multi_fold_consistency_gate_passed"])
-        self.assertEqual(result["pooled_out_of_sample"]["markets"], 72)
+        self.assertEqual(result["pooled_out_of_sample"]["markets"], 96)
         self.assertTrue(
             result["paired_bootstrap_uncertainty"]["both_score_improvement_intervals_above_zero"]
         )

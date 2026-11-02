@@ -635,6 +635,13 @@ def run_walk_forward_backtest(
         "strategy_fixed_across_folds": True,
         "test_windows_non_overlapping": True,
         "portfolio_reset_each_fold": True,
+        "data": {
+            "unique_timestamps": len(stamps),
+            "price_observations": len(cleaned),
+            "unique_tokens": len({str(row.get("token_id") or "") for row in cleaned}),
+            "initial_train_timestamps": initial_train_count,
+            "out_of_sample_timestamps": remaining_count,
+        },
         "folds": results,
         "aggregate_out_of_sample": {
             "folds_with_return_metric": len(returns),

@@ -252,6 +252,30 @@ class FeatureModelEvaluationTests(unittest.TestCase):
 
 
 
+    def test_paired_bootstrap_is_deterministic_and_reports_improvement_intervals(self):
+        labels = [1, 0, 1, 0] * 15
+        market = [0.5] * len(labels)
+        model_probabilities = [0.9 if label else 0.1 for label in labels]
+        first = model_eval.paired_bootstrap_model_improvement(
+            labels, market, model_probabilities, replicates=500
+        )
+        second = model_eval.paired_bootstrap_model_improvement(
+            labels, market, model_probabilities, replicates=500
+        )
+        self.assertEqual(first, second)
+        self.assertGreater(first["brier_improvement_vs_market"], 0.0)
+        self.assertGreater(first["log_loss_improvement_vs_market"], 0.0)
+        self.assertTrue(first["both_score_improvement_intervals_above_zero"])
+        self.assertEqual(first["sample_n"], len(labels))
+
+    def test_paired_bootstrap_rejects_misaligned_and_invalid_samples(self):
+        with self.assertRaises(ValueError):
+            model_eval.paired_bootstrap_model_improvement([1], [0.5, 0.6], [0.7])
+        with self.assertRaises(ValueError):
+            model_eval.paired_bootstrap_model_improvement([2, 0], [0.5, 0.5], [0.6, 0.4])
+        with self.assertRaises(ValueError):
+            model_eval.paired_bootstrap_model_improvement([1, 0], [0.5, float("nan")], [0.8, 0.2])
+
     def test_walk_forward_validation_requires_consistent_multi_fold_improvement(self):
         result = model_eval.evaluate_feature_model_walk_forward(synthetic_samples())
         self.assertEqual(result["status"], "scored")
@@ -259,6 +283,10 @@ class FeatureModelEvaluationTests(unittest.TestCase):
         self.assertEqual(result["brier_improved_folds"], 3)
         self.assertEqual(result["log_loss_improved_folds"], 3)
         self.assertTrue(result["multi_fold_consistency_gate_passed"])
+        self.assertEqual(result["pooled_out_of_sample"]["markets"], 72)
+        self.assertTrue(
+            result["paired_bootstrap_uncertainty"]["both_score_improvement_intervals_above_zero"]
+        )
         self.assertEqual(result["preliminary_consistency_check"], "improved_across_all_folds")
         self.assertFalse(result["live_execution_enabled"])
         self.assertEqual(result["real_money_execution"], "not_implemented")

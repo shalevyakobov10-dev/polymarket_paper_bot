@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import math
+import random
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable
@@ -432,6 +433,113 @@ def evaluate_feature_model(
 
 
 
+def _percentile(sorted_values: list[float], quantile: float) -> float:
+    """Linearly interpolated percentile for an already sorted list."""
+    if not sorted_values:
+        raise ValueError("percentile requires at least one value")
+    position = min(1.0, max(0.0, quantile)) * (len(sorted_values) - 1)
+    lower = int(math.floor(position))
+    upper = int(math.ceil(position))
+    if lower == upper:
+        return sorted_values[lower]
+    fraction = position - lower
+    return sorted_values[lower] * (1.0 - fraction) + sorted_values[upper] * fraction
+
+
+def paired_bootstrap_model_improvement(
+    labels: list[int],
+    market_probabilities: list[float],
+    model_probabilities: list[float],
+    *,
+    replicates: int = 2000,
+    seed: int = 20261102,
+) -> dict[str, Any]:
+    """Estimate paired market-level bootstrap intervals for OOS score improvements.
+
+    Positive values mean the feature model scores better than the market baseline.
+    The resampling unit is a market, not a time block; dependence between related
+    markets or common news regimes is not represented by this simple interval.
+    """
+    if not (
+        len(labels) == len(market_probabilities) == len(model_probabilities)
+        and len(labels) >= 2
+    ):
+        raise ValueError("paired bootstrap needs at least two aligned OOS market observations")
+    if isinstance(replicates, bool) or not isinstance(replicates, int) or replicates < 200:
+        raise ValueError("bootstrap replicates must be an integer of at least 200")
+    if any(label not in (0, 1) for label in labels):
+        raise ValueError("bootstrap labels must be binary")
+    if any(
+        not math.isfinite(float(probability)) or not 0.0 <= float(probability) <= 1.0
+        for probability in market_probabilities + model_probabilities
+    ):
+        raise ValueError("bootstrap probabilities must be finite and within [0, 1]")
+
+    epsilon = 1e-12
+    brier_differences = []
+    log_loss_differences = []
+    for label, market_probability, model_probability in zip(
+        labels, market_probabilities, model_probabilities
+    ):
+        market_loss = -(
+            label * math.log(max(epsilon, market_probability))
+            + (1 - label) * math.log(max(epsilon, 1.0 - market_probability))
+        )
+        model_loss = -(
+            label * math.log(max(epsilon, model_probability))
+            + (1 - label) * math.log(max(epsilon, 1.0 - model_probability))
+        )
+        brier_differences.append(
+            (market_probability - label) ** 2 - (model_probability - label) ** 2
+        )
+        log_loss_differences.append(market_loss - model_loss)
+
+    def mean_at(indices: list[int], values: list[float]) -> float:
+        return sum(values[index] for index in indices) / len(indices)
+
+    count = len(labels)
+    brier_mean = sum(brier_differences) / count
+    log_loss_mean = sum(log_loss_differences) / count
+    rng = random.Random(seed)
+    brier_bootstrap = []
+    log_loss_bootstrap = []
+    for _ in range(replicates):
+        indices = [rng.randrange(count) for _ in range(count)]
+        brier_bootstrap.append(mean_at(indices, brier_differences))
+        log_loss_bootstrap.append(mean_at(indices, log_loss_differences))
+    brier_bootstrap.sort()
+    log_loss_bootstrap.sort()
+    brier_interval = [
+        _percentile(brier_bootstrap, 0.025),
+        _percentile(brier_bootstrap, 0.975),
+    ]
+    log_loss_interval = [
+        _percentile(log_loss_bootstrap, 0.025),
+        _percentile(log_loss_bootstrap, 0.975),
+    ]
+    return {
+        "method": "paired_market_level_nonparametric_bootstrap",
+        "replicates": replicates,
+        "seed": seed,
+        "resampling_unit": "market_observation",
+        "sample_n": count,
+        "brier_improvement_vs_market": round(brier_mean, 8),
+        "brier_improvement_ci95": [round(value, 8) for value in brier_interval],
+        "log_loss_improvement_vs_market": round(log_loss_mean, 8),
+        "log_loss_improvement_ci95": [round(value, 8) for value in log_loss_interval],
+        "brier_ci_lower_above_zero": brier_interval[0] > 0.0,
+        "log_loss_ci_lower_above_zero": log_loss_interval[0] > 0.0,
+        "both_score_improvement_intervals_above_zero": (
+            brier_interval[0] > 0.0 and log_loss_interval[0] > 0.0
+        ),
+        "limitations": [
+            "Market-level resampling assumes observations are exchangeable and does not account for dependence between correlated markets.",
+            "Common event, category, and time-regime dependence can make intervals too narrow.",
+            "This is exploratory uncertainty quantification, not a formal deployment gate or proof of profitability.",
+        ],
+    }
+
+
 def evaluate_feature_model_walk_forward(
     samples: list[dict[str, Any]],
     *,
@@ -529,6 +637,9 @@ def evaluate_feature_model_walk_forward(
     fold_reports = []
     brier_improvements: list[float] = []
     log_loss_changes: list[float] = []
+    oos_labels: list[int] = []
+    oos_market_probabilities: list[float] = []
+    oos_model_probabilities: list[float] = []
     insufficient_folds = []
     for fold_index in range(folds):
         start_index = warmup_n + (remaining_n * fold_index // folds)
@@ -588,6 +699,9 @@ def evaluate_feature_model_walk_forward(
         )
         model_probabilities = _probabilities(test_matrix, intercept, weights)
         market_probabilities = [row["market_probability_yes"] for row in test]
+        oos_labels.extend(test_labels)
+        oos_market_probabilities.extend(market_probabilities)
+        oos_model_probabilities.extend(model_probabilities)
         model_metrics = _score(model_probabilities, test_labels)
         market_metrics = _score(market_probabilities, test_labels)
         brier_improvement = market_metrics["brier_score"] - model_metrics["brier_score"]
@@ -620,6 +734,11 @@ def evaluate_feature_model_walk_forward(
     log_loss_improved_folds = sum(value < 0 for value in log_loss_changes)
     mean_brier_improvement = sum(brier_improvements) / folds
     mean_log_loss_change = sum(log_loss_changes) / folds
+    pooled_model_metrics = _score(oos_model_probabilities, oos_labels)
+    pooled_market_metrics = _score(oos_market_probabilities, oos_labels)
+    paired_uncertainty = paired_bootstrap_model_improvement(
+        oos_labels, oos_market_probabilities, oos_model_probabilities
+    )
     consistent = (
         brier_improved_folds == folds
         and log_loss_improved_folds >= math.ceil(folds * 0.75)
@@ -631,6 +750,12 @@ def evaluate_feature_model_walk_forward(
         "folds_scored": folds,
         "mean_brier_improvement_vs_market": round(mean_brier_improvement, 8),
         "mean_log_loss_change_vs_market": round(mean_log_loss_change, 8),
+        "pooled_out_of_sample": {
+            "markets": len(oos_labels),
+            "market_baseline": pooled_market_metrics,
+            "feature_model": pooled_model_metrics,
+        },
+        "paired_bootstrap_uncertainty": paired_uncertainty,
         "brier_improved_folds": brier_improved_folds,
         "log_loss_improved_folds": log_loss_improved_folds,
         "preliminary_consistency_check": (

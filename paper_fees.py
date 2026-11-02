@@ -6,6 +6,7 @@ account, signing, order, or execution capability.
 from __future__ import annotations
 
 import math
+from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from typing import Any
 
 
@@ -109,32 +110,41 @@ def estimate_taker_fee(
     For a Gamma feeSchedule with exponent 1:
       fee = shares * rate * price * (1 - price)
 
-    Fees are rounded to five decimal places with the published 0.00001 minimum
-    for a positive charge. The legacy fallback deliberately retains a flat
-    notional percentage and is labelled as an assumption.
+    Fees are rounded to five decimal places using decimal half-up rounding.
+    Values below the half-unit precision boundary round to zero, as documented
+    by Polymarket. Buy-side taker fees are denominated in shares; sell-side fees
+    are denominated in USDC. The legacy fallback is an explicit USDC assumption.
     """
+    if isinstance(shares, bool) or isinstance(price, bool) or isinstance(notional, bool):
+        raise ValueError("shares, price, and notional must not be booleans")
     quantity = _finite(shares)
     execution_price = _finite(price)
-    gross = _finite(notional)
     if quantity is None or quantity < 0 or execution_price is None or not 0.0 <= execution_price <= 1.0:
         raise ValueError("shares must be nonnegative and price must be in [0, 1]")
-    if gross is None:
+    if notional is None:
         gross = quantity * execution_price
-    if gross < 0:
-        raise ValueError("notional must be nonnegative")
+    else:
+        gross = _finite(notional)
+        if gross is None or gross < 0:
+            raise ValueError("notional must be a finite nonnegative number")
 
     mode = str((fee_model or {}).get("mode") or "unknown")
     rate = _finite((fee_model or {}).get("rate"))
-    if mode in {"fee_free"}:
-        raw_fee = 0.0
+    if mode == "fee_free":
+        raw_fee_decimal = Decimal("0")
     elif mode == "polymarket_taker_curve":
         if rate is None or not 0.0 <= rate < 0.5:
             raise ValueError("invalid taker fee rate")
-        raw_fee = quantity * rate * execution_price * (1.0 - execution_price)
+        shares_decimal = Decimal(str(quantity))
+        rate_decimal = Decimal(str(rate))
+        price_decimal = Decimal(str(execution_price))
+        raw_fee_decimal = (
+            shares_decimal * rate_decimal * price_decimal * (Decimal("1") - price_decimal)
+        )
     elif mode == "legacy_flat_rate_fallback":
         if rate is None or not 0.0 <= rate < 0.5:
             raise ValueError("invalid fallback fee rate")
-        raw_fee = gross * rate
+        raw_fee_decimal = Decimal(str(gross)) * Decimal(str(rate))
     else:
         return {
             "known": False,
@@ -146,12 +156,22 @@ def estimate_taker_fee(
             "research_only": True,
         }
 
-    rounded = round(raw_fee, 5)
-    if raw_fee > 0.0 and rounded < 0.00001:
-        rounded = 0.00001
+    try:
+        rounded_decimal = raw_fee_decimal.quantize(Decimal("0.00001"), rounding=ROUND_HALF_UP)
+    except InvalidOperation as exc:
+        raise ValueError("fee amount is outside supported decimal precision") from exc
+    raw_fee = float(raw_fee_decimal)
+    rounded = float(rounded_decimal)
+    if not math.isfinite(raw_fee) or not math.isfinite(rounded):
+        raise ValueError("fee estimate is outside supported numeric range")
+    collection_method = {
+        "polymarket_taker_curve": "shares_on_buy_usdc_on_sell",
+        "legacy_flat_rate_fallback": "usdc_assumption",
+        "fee_free": "none",
+    }.get(mode, "unknown")
     return {
         "known": True,
-        "fee": round(rounded, 5),
+        "fee": rounded,
         "raw_fee": round(raw_fee, 10),
         "mode": mode,
         "rate": rate,
@@ -159,6 +179,8 @@ def estimate_taker_fee(
         "price": execution_price,
         "shares": quantity,
         "notional": gross,
+        "fee_currency": "USDC",
+        "collection_method": collection_method,
         "execution": "none",
         "research_only": True,
     }
@@ -169,7 +191,7 @@ def conservative_fee_fraction_of_notional(
     *,
     lowest_price: float,
 ) -> float | None:
-    """Return a cash-reserve fraction; market curve is highest at lowest price."""
+    """Return the cash reserve fraction for an entry; curve fees are paid in shares."""
     price = _finite(lowest_price)
     if price is None or not 0.0 < price <= 1.0:
         return None
@@ -178,8 +200,8 @@ def conservative_fee_fraction_of_notional(
     if mode == "fee_free":
         return 0.0
     if mode == "polymarket_taker_curve" and rate is not None and 0.0 <= rate < 0.5:
-        # Fee / notional = rate * (1 - p); evaluate at lowest expected fill price.
-        return rate * (1.0 - price)
+        # The taker fee is withheld in shares on buys, not from USDC cash.
+        return 0.0
     if mode == "legacy_flat_rate_fallback" and rate is not None and 0.0 <= rate < 0.5:
         return rate
     return None

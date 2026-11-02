@@ -426,7 +426,7 @@ class PaperTraderTests(unittest.TestCase):
                 "gross_cost": 2.0,
                 "entry_fee": 0.0,
                 "entry_price": 0.5,
-                "mark_price": float("nan"),
+                "mark_price": "NaN",
                 "opened_at": self.now.isoformat(),
             }
         }

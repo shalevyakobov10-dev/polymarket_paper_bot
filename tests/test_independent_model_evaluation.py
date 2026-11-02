@@ -238,7 +238,7 @@ class FeatureModelEvaluationTests(unittest.TestCase):
                 "resolved_at": resolved_at.isoformat(),
             })
         result = model_eval.forecast_current_feature_rows(features, resolutions, now=now)
-        self.assertEqual(result["status"], "insufficient_data")
+        self.assertEqual(result["status"], "model_fitted_no_fresh_markets")
         self.assertEqual(result["training"]["eligible_unique_markets"], 80)
         self.assertEqual(result["forecasts"], [])
 

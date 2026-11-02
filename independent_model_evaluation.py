@@ -756,12 +756,12 @@ def forecast_current_feature_rows(
         if stamp > current_stamp + 60.0:
             exclusions["future_rows"] += 1
             continue
+        if market_id in resolved_before_now:
+            exclusions["already_resolved_markets"] += 1
+            continue
         age = max(0.0, current_stamp - stamp)
         if age > max_feature_age_seconds:
             exclusions["stale_rows"] += 1
-            continue
-        if market_id in resolved_before_now:
-            exclusions["already_resolved_markets"] += 1
             continue
         try:
             features = extract_model_features(row)

@@ -526,14 +526,40 @@ def settle_open_paper_positions(
     }
     retained = collector.load_resolutions(market_ids)
     merged: dict[str, dict] = {}
-    # Retained records provide restart recovery; fresh API records take precedence.
+    conflicting: set[str] = set()
+    # Retained records provide restart recovery. A newly fetched result may
+    # refresh its timestamp, but it must never silently override a different
+    # already-persisted binary outcome.
     for record in retained + list(newly_fetched_resolutions or []):
         if not isinstance(record, dict):
             continue
         market_id = str(record.get("market_id") or "").strip()
-        if market_id in market_ids:
-            merged[market_id] = record
-    return trader.settle_resolved_positions(list(merged.values()))
+        outcome = record.get("resolved_yes")
+        if (
+            market_id not in market_ids
+            or isinstance(outcome, bool)
+            or not isinstance(outcome, int)
+            or outcome not in (0, 1)
+        ):
+            continue
+        previous = merged.get(market_id)
+        if previous is not None and previous.get("resolved_yes") != outcome:
+            conflicting.add(market_id)
+            continue
+        if market_id not in conflicting:
+            previous_stamp = str(previous.get("resolved_at") or "") if previous else ""
+            current_stamp = str(record.get("resolved_at") or "")
+            if previous is None or current_stamp > previous_stamp:
+                merged[market_id] = record
+    rows_to_settle = [
+        record for market_id, record in merged.items()
+        if market_id not in conflicting
+    ]
+    result = trader.settle_resolved_positions(rows_to_settle)
+    skipped = result.setdefault("skipped", {})
+    skipped["conflicting_persisted_resolution"] = len(conflicting)
+    result["conflicting_market_ids"] = sorted(conflicting)
+    return result
 
 
 def resolution_worker_loop() -> None:

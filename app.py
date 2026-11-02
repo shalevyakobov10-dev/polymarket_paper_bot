@@ -697,6 +697,7 @@ def health_payload(
     ]
     payload = {
         "ok": healthy,
+        "status": "unhealthy" if not healthy else ("degraded" if degraded else "healthy"),
         "mode": "paper_only",
         "worker_running": bool(snapshot.get("worker_running")),
         "last_success_at": snapshot.get("last_success_at"),

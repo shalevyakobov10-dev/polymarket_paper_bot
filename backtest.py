@@ -268,6 +268,25 @@ def group_by_timestamp(rows: list[dict[str, Any]]) -> dict[int, list[dict[str, A
     return dict(sorted(result.items()))
 
 
+def clean_history_rows(histories: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Normalize valid timestamped observations and reject malformed input rows."""
+    cleaned = []
+    for row in histories:
+        if not isinstance(row, dict):
+            continue
+        price = number(row.get("observed_price"))
+        timestamp = number(row.get("timestamp"))
+        if price is None or not 0.0 < price < 1.0 or timestamp is None:
+            continue
+        if not timestamp.is_integer():
+            continue
+        normalized = {**row, "timestamp": int(timestamp), "observed_price": float(price)}
+        if normalized.get("token_id") is not None:
+            normalized["token_id"] = str(normalized["token_id"])
+        cleaned.append(normalized)
+    return cleaned
+
+
 def run_segment(
     rows: list[dict[str, Any]],
     config: PaperConfig,
@@ -282,11 +301,20 @@ def run_segment(
         trader.process_snapshot(prime_prices, prime_timestamp, persist_state=False)
     events = group_by_timestamp(rows)
     candidates = opened = closed = 0
+    equity_peak = float(config.starting_cash)
+    max_drawdown_usd = 0.0
+    max_drawdown_pct = 0.0
     for stamp, snapshot_rows in events.items():
         result = trader.process_snapshot(snapshot_rows, utc_from_timestamp(stamp), persist_state=False)
         candidates += len(result["candidates"])
         opened += len(result["opened"])
         closed += len(result["closed"])
+        equity = float(trader.snapshot()["metrics"]["equity"])
+        equity_peak = max(equity_peak, equity)
+        drawdown_usd = max(0.0, equity_peak - equity)
+        max_drawdown_usd = max(max_drawdown_usd, drawdown_usd)
+        if equity_peak > 0.0:
+            max_drawdown_pct = max(max_drawdown_pct, 100.0 * drawdown_usd / equity_peak)
     status = trader.snapshot()
     return {
         "window_start_utc": utc_from_timestamp(min(events)).isoformat() if events else None,
@@ -298,6 +326,9 @@ def run_segment(
         "positions_closed": closed,
         "metrics": status["metrics"],
         "open_positions_at_end": len(status["positions_list"]),
+        "max_drawdown_usd": round(max_drawdown_usd, 4),
+        "max_drawdown_pct": round(max_drawdown_pct, 4),
+        "drawdown_method": "snapshot-marked peak-to-trough; intraperiod drawdown may be missed",
     }
 
 
@@ -495,19 +526,7 @@ def run_walk_forward_backtest(
     if not math.isfinite(float(initial_train_ratio)) or not 0.3 <= float(initial_train_ratio) < 0.9:
         raise ValueError("initial_train_ratio must be between 0.3 and 0.9")
 
-    cleaned: list[dict[str, Any]] = []
-    for row in histories:
-        if not isinstance(row, dict):
-            continue
-        price = number(row.get("observed_price"))
-        try:
-            stamp = int(row.get("timestamp"))
-        except (TypeError, ValueError, OverflowError):
-            continue
-        if price is None or not 0.0 < price < 1.0:
-            continue
-        cleaned.append({**row, "timestamp": stamp, "observed_price": price})
-
+    cleaned = clean_history_rows(histories)
     stamps = sorted({int(row["timestamp"]) for row in cleaned})
     if len(stamps) < 8:
         raise ValueError(f"Need at least 8 unique time points; got {len(stamps)}")
@@ -515,8 +534,10 @@ def run_walk_forward_backtest(
     if initial_train_count < 4:
         raise ValueError("initial training window must contain at least 4 unique time points")
     remaining_count = len(stamps) - initial_train_count
-    if remaining_count < folds:
-        raise ValueError("not enough remaining timestamps to create all non-empty test folds")
+    if remaining_count < folds * 2:
+        raise ValueError(
+            "not enough remaining timestamps; each out-of-sample fold requires at least 2 unique timestamps"
+        )
 
     # Split the remaining timeline into consecutive, non-overlapping test blocks.
     base_size, extra = divmod(remaining_count, folds)
@@ -595,6 +616,12 @@ def run_walk_forward_backtest(
     total_closed = sum(int(fold["out_of_sample"]["positions_closed"]) for fold in results)
     total_opened = sum(int(fold["out_of_sample"]["positions_opened"]) for fold in results)
     total_observations = sum(int(fold["test_window"]["observations"]) for fold in results)
+    oos_metrics = [fold["out_of_sample"]["metrics"] for fold in results]
+    weighted_win_rate = (
+        sum(float(item["win_rate_pct"]) * int(item["closed_trades"]) for item in oos_metrics) / total_closed
+        if total_closed else None
+    )
+    fold_drawdowns = [float(fold["out_of_sample"]["max_drawdown_pct"]) for fold in results]
     warnings = []
     if total_closed == 0:
         warnings.append("No positions closed across the walk-forward test folds; return consistency is not established.")
@@ -617,6 +644,9 @@ def run_walk_forward_backtest(
             "total_test_observations": total_observations,
             "positions_opened": total_opened,
             "positions_closed": total_closed,
+            "weighted_win_rate_pct": round(weighted_win_rate, 4) if weighted_win_rate is not None else None,
+            "mean_fold_max_drawdown_pct": round(sum(fold_drawdowns) / len(fold_drawdowns), 4) if fold_drawdowns else None,
+            "worst_fold_max_drawdown_pct": round(max(fold_drawdowns), 4) if fold_drawdowns else None,
         },
         "warnings": warnings,
         "methodology": [

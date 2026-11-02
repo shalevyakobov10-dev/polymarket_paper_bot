@@ -1,8 +1,10 @@
+import tempfile
 import unittest
+from pathlib import Path
 from unittest.mock import patch
 from urllib.parse import parse_qs, urlparse
 
-from backtest import diagnose_price_changes, evaluate_forward_returns, fetch_price_history, list_field, run_backtest, run_threshold_sensitivity, run_execution_cost_sensitivity, run_walk_forward_backtest
+from backtest import diagnose_price_changes, evaluate_forward_returns, fetch_price_history, list_field, run_backtest, run_threshold_sensitivity, run_execution_cost_sensitivity, run_walk_forward_backtest, run_segment
 from paper_trading import PaperConfig
 
 
@@ -196,6 +198,52 @@ class BacktestTests(unittest.TestCase):
                     report["folds"][index - 1]["training_window"]["unique_timestamps"],
                 )
         self.assertEqual(report["aggregate_out_of_sample"]["total_test_observations"], 15)
+        self.assertIn("weighted_win_rate_pct", report["aggregate_out_of_sample"])
+        self.assertIn("worst_fold_max_drawdown_pct", report["aggregate_out_of_sample"])
+        self.assertTrue(all("max_drawdown_pct" in fold["out_of_sample"] for fold in report["folds"]))
+
+    def test_walk_forward_requires_two_timestamps_in_every_test_fold(self):
+        history = [
+            {"timestamp": 1_800_000_000 + index * 3600, "token_id": "t",
+             "observed_price": 0.5 + index * 0.001}
+            for index in range(9)
+        ]
+        with self.assertRaisesRegex(ValueError, "at least 2 unique timestamps"):
+            run_walk_forward_backtest(
+                history, PaperConfig(), folds=3, initial_train_ratio=0.5
+            )
+
+    def test_history_normalization_rejects_fractional_and_nonfinite_timestamps(self):
+        history = [
+            {"timestamp": 1_800_000_000 + index * 3600, "token_id": "t",
+             "observed_price": 0.5 + index * 0.001}
+            for index in range(16)
+        ]
+        history.extend([
+            {"timestamp": 1_800_000_000.5, "token_id": "t", "observed_price": 0.6},
+            {"timestamp": float("nan"), "token_id": "t", "observed_price": 0.6},
+            {"timestamp": 1_800_000_000, "token_id": "t", "observed_price": float("inf")},
+            None,
+        ])
+        report = run_walk_forward_backtest(
+            history, PaperConfig(), folds=3, initial_train_ratio=0.5
+        )
+        self.assertEqual(report["data"]["unique_timestamps"], 16)
+        self.assertEqual(report["data"]["price_observations"], 16)
+
+    def test_segment_reports_snapshot_marked_maximum_drawdown(self):
+        prices = [0.50, 0.54, 0.50, 0.45, 0.47, 0.50]
+        history = [
+            {"timestamp": 1_800_000_000 + index * 3600, "token_id": "drawdown-token",
+             "market_id": "drawdown-market", "question": "Drawdown test",
+             "outcome": "Yes", "observed_price": price}
+            for index, price in enumerate(prices)
+        ]
+        with tempfile.TemporaryDirectory() as temp_dir:
+            report = run_segment(history, PaperConfig(), Path(temp_dir) / "state.json")
+        self.assertGreater(report["max_drawdown_usd"], 0.0)
+        self.assertGreater(report["max_drawdown_pct"], 0.0)
+        self.assertIn("intraperiod", report["drawdown_method"])
 
     def test_walk_forward_rejects_invalid_fold_configuration_and_insufficient_history(self):
         history = [

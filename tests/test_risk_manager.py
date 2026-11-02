@@ -63,6 +63,30 @@ class PaperRiskManagerTests(unittest.TestCase):
         self.assertEqual(self.evaluate(fee_rate=0.5).reason, "invalid_risk_input")
         self.assertEqual(self.evaluate(fee_rate=float("inf")).reason, "invalid_risk_input")
 
+    def test_maximum_portfolio_drawdown_blocks_new_entries_at_limit(self):
+        self.assertEqual(
+            self.evaluate(current_drawdown_pct=4.0, max_portfolio_drawdown_pct=4.0).reason,
+            "max_portfolio_drawdown_reached",
+        )
+        self.assertEqual(
+            self.evaluate(current_drawdown_pct=4.1, max_portfolio_drawdown_pct=4.0).reason,
+            "max_portfolio_drawdown_reached",
+        )
+        self.assertTrue(
+            self.evaluate(current_drawdown_pct=3.99, max_portfolio_drawdown_pct=4.0).approved
+        )
+
+    def test_invalid_drawdown_limits_are_rejected(self):
+        self.assertEqual(
+            self.evaluate(current_drawdown_pct=float("nan")).reason, "invalid_risk_input"
+        )
+        self.assertEqual(
+            self.evaluate(max_portfolio_drawdown_pct=0.0).reason, "invalid_risk_input"
+        )
+        self.assertEqual(
+            self.evaluate(max_portfolio_drawdown_pct=101.0).reason, "invalid_risk_input"
+        )
+
     def test_rejects_boolean_position_counters(self):
         self.assertEqual(self.evaluate(open_positions=True).reason, "invalid_position_count")
         self.assertEqual(self.evaluate(max_open_positions=True).reason, "invalid_position_count")

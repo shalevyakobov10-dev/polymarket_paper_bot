@@ -70,6 +70,7 @@ class PaperConfig:
     simulated_slippage: float = 0.005
     fee_rate: float = 0.0
     daily_loss_limit_usd: float = 5.0
+    max_portfolio_drawdown_pct: float = 20.0
     require_orderbook: bool = False
     max_orderbook_age_seconds: float = 180.0
     max_orderbook_spread_bps: float = 1000.0
@@ -91,6 +92,7 @@ class PaperConfig:
             "simulated_slippage": "PAPER_SLIPPAGE_RATE",
             "fee_rate": "PAPER_FEE_RATE",
             "daily_loss_limit_usd": "PAPER_DAILY_LOSS_LIMIT_USD",
+            "max_portfolio_drawdown_pct": "PAPER_MAX_PORTFOLIO_DRAWDOWN_PCT",
             "max_orderbook_age_seconds": "PAPER_MAX_ORDERBOOK_AGE_SECONDS",
             "max_orderbook_spread_bps": "PAPER_MAX_ORDERBOOK_SPREAD_BPS",
             "min_orderbook_side_depth_usd": "PAPER_MIN_ORDERBOOK_SIDE_DEPTH_USD",
@@ -127,6 +129,8 @@ class PaperConfig:
             raise ValueError("Slippage and fee rate must be in [0, 0.5)")
         if config.daily_loss_limit_usd <= 0:
             raise ValueError("Daily loss limit must be positive")
+        if not 0.0 < config.max_portfolio_drawdown_pct <= 100.0:
+            raise ValueError("Maximum portfolio drawdown must be in (0, 100]")
         if (
             config.max_orderbook_age_seconds <= 0
             or config.max_orderbook_spread_bps <= 0
@@ -160,6 +164,9 @@ class PaperTrader:
             "updated_at": iso_time(now),
             "starting_cash": round(self.config.starting_cash, 8),
             "cash": round(self.config.starting_cash, 8),
+            "equity_peak": round(self.config.starting_cash, 8),
+            "max_drawdown_usd": 0.0,
+            "max_drawdown_pct": 0.0,
             "realized_pnl": 0.0,
             "total_fees": 0.0,
             "closed_trades": 0,
@@ -202,6 +209,9 @@ class PaperTrader:
         loaded.setdefault("daily_date_utc", utc_now().date().isoformat())
         loaded.setdefault("daily_realized_pnl", 0.0)
         loaded.setdefault("daily_unrealized_baseline", 0.0)
+        loaded.setdefault("equity_peak", loaded.get("starting_cash", self.config.starting_cash))
+        loaded.setdefault("max_drawdown_usd", 0.0)
+        loaded.setdefault("max_drawdown_pct", 0.0)
         loaded.setdefault("recent_events", [])
 
         if loaded["mode"] != "PAPER_ONLY":
@@ -226,6 +236,9 @@ class PaperTrader:
         checked_number("total_fees", minimum=0.0)
         checked_number("daily_realized_pnl")
         checked_number("daily_unrealized_baseline")
+        checked_number("equity_peak", minimum=1e-12)
+        checked_number("max_drawdown_usd", minimum=0.0)
+        checked_number("max_drawdown_pct", minimum=0.0, maximum=100.0)
         if not isinstance(loaded["recent_events"], list):
             raise ValueError("Paper state recent_events must be a list")
 
@@ -321,6 +334,24 @@ class PaperTrader:
         market = str(row.get("market_id") or "").strip()
         outcome = str(row.get("outcome") or "").strip()
         return f"{market}:{outcome}" if market and outcome else ""
+
+    def _update_drawdown_metrics(self) -> float:
+        """Persist the all-time peak equity and maximum observed mark-to-market drawdown."""
+        equity = float(self.snapshot()["metrics"]["equity"])
+        peak = max(
+            float(self._state.get("equity_peak", self._state["starting_cash"])),
+            equity,
+        )
+        drawdown_usd = max(0.0, peak - equity)
+        drawdown_pct = 100.0 * drawdown_usd / peak if peak > 0.0 else 0.0
+        self._state["equity_peak"] = round(peak, 8)
+        self._state["max_drawdown_usd"] = round(
+            max(float(self._state.get("max_drawdown_usd", 0.0)), drawdown_usd), 8
+        )
+        self._state["max_drawdown_pct"] = round(
+            max(float(self._state.get("max_drawdown_pct", 0.0)), drawdown_pct), 8
+        )
+        return drawdown_pct
 
     def _daily_rollover(self, now: datetime) -> None:
         today = now.date().isoformat()
@@ -424,6 +455,7 @@ class PaperTrader:
             # may opt out of repeated disk writes while keeping the identical in-memory
             # state transitions; they use a fresh disposable portfolio for each segment.
             self._state["recent_events"] = (self._state.get("recent_events", []) + events)[-100:]
+            self._update_drawdown_metrics()
             if persist_state:
                 self._save()
                 for event in events:
@@ -481,6 +513,7 @@ class PaperTrader:
                 for position in positions.values()
             )
         )
+        current_drawdown_pct = self._update_drawdown_metrics()
         decision = evaluate_paper_entry(
             price=observed_price,
             requested_notional=spend,
@@ -495,6 +528,8 @@ class PaperTrader:
             daily_loss_limit_usd=self.config.daily_loss_limit_usd,
             fee_rate=fee_reserve_rate,
             opposing_market_outcome_open=opposing_market_outcome_open,
+            current_drawdown_pct=current_drawdown_pct,
+            max_portfolio_drawdown_pct=self.config.max_portfolio_drawdown_pct,
         )
         if not decision.approved:
             return None, decision.reason
@@ -840,6 +875,7 @@ class PaperTrader:
                 settled.append(event)
 
             if settled:
+                self._update_drawdown_metrics()
                 self._save()
                 for event in settled:
                     self._write_event(event)
@@ -877,6 +913,20 @@ class PaperTrader:
                 unrealized += float(position.get("unrealized_pnl", 0.0))
                 exposure += float(position.get("gross_cost", 0.0))
             equity = float(state["cash"]) + marked_value
+            equity_peak = max(
+                float(state.get("equity_peak", state["starting_cash"])),
+                equity,
+            )
+            current_drawdown_usd = max(0.0, equity_peak - equity)
+            current_drawdown_pct = (
+                100.0 * current_drawdown_usd / equity_peak if equity_peak > 0.0 else 0.0
+            )
+            maximum_drawdown_usd = max(
+                float(state.get("max_drawdown_usd", 0.0)), current_drawdown_usd
+            )
+            maximum_drawdown_pct = max(
+                float(state.get("max_drawdown_pct", 0.0)), current_drawdown_pct
+            )
             state["metrics"] = {
                 "cash": round(float(state["cash"]), 8),
                 "equity": round(equity, 8),
@@ -891,6 +941,15 @@ class PaperTrader:
                 "total_fees": round(float(state["total_fees"]), 8),
                 "daily_realized_pnl": round(float(state["daily_realized_pnl"]), 8),
                 "daily_loss_limit_usd": self.config.daily_loss_limit_usd,
+                "equity_peak": round(equity_peak, 8),
+                "current_drawdown_usd": round(current_drawdown_usd, 8),
+                "current_drawdown_pct": round(current_drawdown_pct, 8),
+                "max_drawdown_usd": round(maximum_drawdown_usd, 8),
+                "max_drawdown_pct": round(maximum_drawdown_pct, 8),
+                "max_portfolio_drawdown_pct": self.config.max_portfolio_drawdown_pct,
+                "drawdown_limit_reached": (
+                    current_drawdown_pct + 1e-9 >= self.config.max_portfolio_drawdown_pct
+                ),
             }
             state["positions_list"] = positions
             # Keep detailed price history out of the public status response.

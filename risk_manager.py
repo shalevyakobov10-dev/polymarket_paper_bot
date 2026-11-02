@@ -48,6 +48,8 @@ def evaluate_paper_entry(
     daily_loss_limit_usd: float,
     fee_rate: float,
     opposing_market_outcome_open: bool = False,
+    current_drawdown_pct: float = 0.0,
+    max_portfolio_drawdown_pct: float = 20.0,
 ) -> RiskDecision:
     """Approve or reject a proposed paper entry using conservative hard limits."""
     requested = float(requested_notional) if _finite_nonnegative(requested_notional) else 0.0
@@ -65,8 +67,17 @@ def evaluate_paper_entry(
         return reject("invalid_risk_input")
     if not _finite(daily_realized_pnl) or not _finite(open_unrealized_pnl):
         return reject("invalid_risk_input")
-    if float(fee_rate) >= 0.5 or float(daily_loss_limit_usd) <= 0.0:
+    if (
+        not _finite_nonnegative(current_drawdown_pct)
+        or not _finite(max_portfolio_drawdown_pct)
+        or not 0.0 < float(max_portfolio_drawdown_pct) <= 100.0
+        or float(current_drawdown_pct) > 100.0
+        or float(fee_rate) >= 0.5
+        or float(daily_loss_limit_usd) <= 0.0
+    ):
         return reject("invalid_risk_input")
+    if float(current_drawdown_pct) + 1e-9 >= float(max_portfolio_drawdown_pct):
+        return reject("max_portfolio_drawdown_reached")
     # The daily stop takes priority over capacity checks and includes both
     # closed P&L and currently marked open P&L.
     daily_pnl = float(daily_realized_pnl) + float(open_unrealized_pnl)

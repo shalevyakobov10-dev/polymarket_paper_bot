@@ -54,6 +54,39 @@ class PaperTraderTests(unittest.TestCase):
         self.assertEqual(len(skipped), 1)
         self.assertEqual(skipped[0]["skip_reason"], "max_open_positions_reached")
 
+    def test_portfolio_drawdown_limit_blocks_new_entries_and_persists_peak(self):
+        cfg = PaperConfig(**{
+            **self.config.__dict__,
+            "max_portfolio_drawdown_pct": 4.0,
+        })
+        bot = PaperTrader(Path(self.temp.name) / "drawdown_state.json", cfg)
+        bot._state["cash"] = 95.0
+        bot._state["realized_pnl"] = -5.0
+        bot.process_snapshot([self.row(0.50)], self.now)
+        result = bot.process_snapshot(
+            [self.row(0.54)], self.now + timedelta(minutes=5)
+        )
+        state = bot.snapshot()
+        self.assertEqual(result["opened"], [])
+        self.assertEqual(result["candidates"][0]["skip_reason"], "max_portfolio_drawdown_reached")
+        self.assertAlmostEqual(state["metrics"]["current_drawdown_pct"], 5.0)
+        self.assertAlmostEqual(state["metrics"]["max_drawdown_pct"], 5.0)
+        self.assertTrue(state["metrics"]["drawdown_limit_reached"])
+        persisted = json.loads((Path(self.temp.name) / "drawdown_state.json").read_text())
+        self.assertAlmostEqual(persisted["equity_peak"], 100.0)
+        self.assertAlmostEqual(persisted["max_drawdown_pct"], 5.0)
+
+    def test_legacy_paper_state_receives_safe_drawdown_defaults(self):
+        self.bot.process_snapshot([self.row(0.50)], self.now)
+        state = json.loads(self.state_path.read_text(encoding="utf-8"))
+        state.pop("equity_peak", None)
+        state.pop("max_drawdown_usd", None)
+        state.pop("max_drawdown_pct", None)
+        self.state_path.write_text(json.dumps(state), encoding="utf-8")
+        restarted = PaperTrader(self.state_path, self.config)
+        self.assertAlmostEqual(restarted.snapshot()["metrics"]["equity_peak"], 100.0)
+        self.assertEqual(restarted.snapshot()["metrics"]["max_drawdown_pct"], 0.0)
+
     def test_take_profit_closes_position_and_records_realized_pnl(self):
         self.bot.process_snapshot([self.row(0.50)], self.now)
         self.bot.process_snapshot([self.row(0.54)], self.now + timedelta(minutes=5))

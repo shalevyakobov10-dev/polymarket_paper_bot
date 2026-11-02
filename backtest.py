@@ -335,6 +335,55 @@ def run_threshold_sensitivity(
     return results
 
 
+def run_execution_cost_sensitivity(
+    histories: list[dict[str, Any]],
+    base_config: PaperConfig,
+    train_ratio: float = 0.7,
+    *,
+    fee_rates: tuple[float, ...] = (0.0, 0.005, 0.01),
+    slippage_rates: tuple[float, ...] = (0.005, 0.01, 0.02),
+) -> list[dict[str, Any]]:
+    """Replay the same fixed strategy over a predeclared fee/slippage stress grid.
+
+    This is a robustness diagnostic, not a way to optimize costs or choose a
+    profitable setting. Each scenario reuses identical price history and the
+    same chronological split; it changes only assumed costs.
+    """
+    if not fee_rates or not slippage_rates:
+        raise ValueError("fee_rates and slippage_rates must be non-empty")
+    for rate in (*fee_rates, *slippage_rates):
+        if not math.isfinite(float(rate)) or not 0.0 <= float(rate) < 0.5:
+            raise ValueError("all fee and slippage assumptions must be finite and in [0, 0.5)")
+    results = []
+    for fee_rate in fee_rates:
+        for slippage_rate in slippage_rates:
+            scenario_config = PaperConfig(**{
+                **base_config.__dict__,
+                "fee_rate": float(fee_rate),
+                "simulated_slippage": float(slippage_rate),
+            })
+            report = run_backtest(histories, scenario_config, train_ratio)
+            results.append({
+                "fee_rate_assumption_each_side": float(fee_rate),
+                "slippage_rate_each_side": float(slippage_rate),
+                "in_sample": {
+                    "return_pct": report["in_sample"]["metrics"]["return_pct"],
+                    "closed_trades": report["in_sample"]["metrics"]["closed_trades"],
+                    "win_rate_pct": report["in_sample"]["metrics"]["win_rate_pct"],
+                },
+                "out_of_sample": {
+                    "return_pct": report["out_of_sample"]["metrics"]["return_pct"],
+                    "closed_trades": report["out_of_sample"]["metrics"]["closed_trades"],
+                    "win_rate_pct": report["out_of_sample"]["metrics"]["win_rate_pct"],
+                    "ending_equity": report["out_of_sample"]["metrics"]["equity"],
+                },
+                "same_strategy_and_history": True,
+                "execution": "none",
+                "research_only": True,
+            })
+    return results
+
+
 def run_backtest(
     histories: list[dict[str, Any]],
     config: PaperConfig,
@@ -443,6 +492,7 @@ def main() -> int:
     parser.add_argument("--slippage", type=float, default=0.005)
     parser.add_argument("--fee-rate", type=float, default=0.0)
     parser.add_argument("--sensitivity", action="store_true", help="Compare predeclared signal thresholds on the same history window")
+    parser.add_argument("--cost-sensitivity", action="store_true", help="Stress-test predeclared fee and slippage assumptions on the same history")
     args = parser.parse_args()
 
     if args.days < 1 or args.days > 365:
@@ -494,6 +544,13 @@ def main() -> int:
         thresholds = tuple(sorted({0.005, 0.01, 0.02, 0.03, args.signal_delta}))
         report["threshold_sensitivity"] = run_threshold_sensitivity(histories, config, args.train_ratio, thresholds)
         report["sensitivity_note"] = "Exploratory threshold comparison on one sample; do not choose a threshold from holdout results and treat that same holdout as untouched. Validate selected settings on a later forward paper period."
+    if args.cost_sensitivity:
+        report["execution_cost_sensitivity"] = run_execution_cost_sensitivity(histories, config, args.train_ratio)
+        report["execution_cost_sensitivity_note"] = (
+            "Predeclared fee/slippage stress grid on identical history and strategy. "
+            "These are assumptions, not measured live costs or executable fills; "
+            "do not select a scenario from the holdout and treat it as independent evidence."
+        )
     report["token_fetch_errors"] = errors
     output = Path(args.output)
     output.parent.mkdir(parents=True, exist_ok=True)

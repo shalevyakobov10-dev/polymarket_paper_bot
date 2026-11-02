@@ -126,6 +126,23 @@ class BacktestTests(unittest.TestCase):
 
 
 
+    def test_standard_backtest_ignores_malformed_history_rows(self):
+        history = [
+            {"timestamp": 1_800_000_000 + index * 3600, "token_id": "t",
+             "observed_price": 0.5 + (0.01 if index % 2 else 0.0)}
+            for index in range(12)
+        ]
+        history.extend([
+            {"timestamp": 1_800_000_000.5, "token_id": "t", "observed_price": 0.6},
+            {"timestamp": float("nan"), "token_id": "t", "observed_price": 0.6},
+            {"timestamp": 1_800_000_000, "token_id": "t", "observed_price": float("inf")},
+            None,
+        ])
+        report = run_backtest(history, PaperConfig(), train_ratio=0.7)
+        self.assertEqual(report["data"]["unique_timestamps"], 12)
+        self.assertEqual(report["data"]["price_observations"], 12)
+
+
     def test_execution_cost_sensitivity_replays_fixed_strategy_across_cost_grid(self):
         prices = [0.40, 0.44, 0.50, 0.48, 0.52, 0.46, 0.50, 0.47, 0.51, 0.48, 0.53, 0.50]
         history = [

@@ -207,6 +207,58 @@ class ParserTests(unittest.TestCase):
         self.assertFalse(healthy)
         self.assertFalse(payload["ok"])
 
+
+    def test_health_reports_optional_collector_degradation_without_hiding_core_health(self):
+        now = datetime(2026, 10, 25, 12, tzinfo=timezone.utc)
+        core = {
+            "worker_running": True,
+            "last_success_at": (now - timedelta(seconds=30)).isoformat(),
+            "last_error": None,
+        }
+        news = {
+            "worker_running": True,
+            "last_success_at": (now - timedelta(hours=2)).isoformat(),
+            "last_error": "all feeds unavailable",
+        }
+        stream = {
+            "worker_running": True,
+            "connected": False,
+            "last_connect_at": (now - timedelta(minutes=10)).isoformat(),
+            "last_message_at": None,
+            "last_error": "connection dropped",
+        }
+        resolutions = {
+            "worker_running": False,
+            "last_success_at": None,
+            "last_error": None,
+        }
+        healthy, payload = app.health_payload(
+            core, now, news_snapshot=news,
+            stream_snapshot=stream, resolution_snapshot=resolutions,
+        )
+        self.assertTrue(healthy)
+        self.assertTrue(payload["ok"])
+        self.assertEqual(payload["components"]["market_data"]["status"], "healthy")
+        self.assertEqual(payload["components"]["news"]["status"], "stale")
+        self.assertEqual(payload["components"]["market_stream"]["status"], "disconnected")
+        self.assertEqual(payload["components"]["resolutions"]["status"], "stopped")
+        self.assertEqual(payload["degraded_components"], ["news", "resolutions", "market_stream"])
+
+    def test_health_rejects_future_and_invalid_component_timestamps(self):
+        now = datetime(2026, 10, 25, 12, tzinfo=timezone.utc)
+        future = {
+            "worker_running": True,
+            "last_success_at": (now + timedelta(minutes=5)).isoformat(),
+        }
+        healthy, payload = app.health_payload(future, now)
+        self.assertFalse(healthy)
+        self.assertEqual(payload["components"]["market_data"]["status"], "future_timestamp")
+
+        invalid = {"worker_running": True, "last_success_at": "not-a-timestamp"}
+        healthy, payload = app.health_payload(invalid, now)
+        self.assertFalse(healthy)
+        self.assertEqual(payload["components"]["market_data"]["status"], "invalid_timestamp")
+
     def test_health_is_unhealthy_before_first_success_or_when_worker_stops(self):
         now = datetime(2026, 10, 25, 12, tzinfo=timezone.utc)
         healthy, payload = app.health_payload({"worker_running": True, "last_success_at": None}, now)

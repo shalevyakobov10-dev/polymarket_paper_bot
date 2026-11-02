@@ -40,6 +40,8 @@ jobs:
             sleep 1
           done
           test "$ready" -eq 1
+          health_code=$(curl --silent --show-error --output /tmp/paper-health.json --write-out "%{http_code}" http://127.0.0.1:18080/health)
+          test "$health_code" = "200" -o "$health_code" = "503"
           curl --silent --show-error --fail http://127.0.0.1:18080/status > /tmp/paper-status.json
           curl --silent --show-error --fail http://127.0.0.1:18080/paper > /tmp/paper-portfolio.json
           curl --silent --show-error --fail http://127.0.0.1:18080/matches > /tmp/paper-matches.json
@@ -53,6 +55,7 @@ jobs:
           from pathlib import Path
 
           news = json.loads(Path("/tmp/paper-news.json").read_text())
+          health = json.loads(Path("/tmp/paper-health.json").read_text())
           status = json.loads(Path("/tmp/paper-status.json").read_text())
           paper = json.loads(Path("/tmp/paper-portfolio.json").read_text())
           matches = json.loads(Path("/tmp/paper-matches.json").read_text())
@@ -62,6 +65,9 @@ jobs:
           features = json.loads(Path("/tmp/paper-research-features.json").read_text())
           model_evaluation = json.loads(Path("/tmp/paper-independent-model-evaluation.json").read_text())
           assert "items" in news and "feeds_configured" in news, "news endpoint schema mismatch"
+          assert health.get("mode") == "paper_only", "health endpoint must remain paper-only"
+          assert health.get("status") in {"healthy", "degraded", "unhealthy"}, "health endpoint status schema mismatch"
+          assert isinstance(health.get("components"), dict), "health endpoint component details missing"
           assert status.get("mode") == "paper_only", "service must stay paper-only"
           assert isinstance(status.get("news"), dict), "status must include news health"
           assert isinstance(paper.get("metrics"), dict), "paper endpoint metrics missing"
@@ -78,5 +84,5 @@ jobs:
           assert model_evaluation.get("mode") == "INDEPENDENT_FEATURE_MODEL_EVALUATION_V1", "independent model endpoint mode mismatch"
           assert model_evaluation.get("status") == "insufficient_data", "empty smoke-test dataset must not fit a model"
           assert model_evaluation.get("research_only") is True and model_evaluation.get("execution") == "none", "model evaluation must remain research-only"
-          print("Container smoke check passed: /news, /status, /paper, /matches, /market-stream, /resolutions, /forecast-evaluation, /research-features and /independent-model-evaluation returned valid JSON.")
+          print("Container smoke check passed: /news, /status, /paper, /matches, /market-stream, /resolutions, /forecast-evaluation, /research-features /independent-model-evaluation and /health returned valid JSON.")
           PY

@@ -264,6 +264,19 @@ class PaperTraderTests(unittest.TestCase):
         self.assertEqual(result["skipped"]["conflicting_resolution"], 1)
         self.assertEqual(self.bot.snapshot()["metrics"]["open_positions"], 1)
 
+
+    def test_resolution_timestamp_equal_to_entry_is_not_settled(self):
+        self.bot.process_snapshot([self.row(0.50)], self.now)
+        self.bot.process_snapshot([self.row(0.54)], self.now + timedelta(minutes=5))
+        result = self.bot.settle_resolved_positions([{
+            "market_id": "market-1",
+            "resolved_yes": 1,
+            "resolved_at": (self.now + timedelta(minutes=5)).isoformat(),
+        }], now=self.now + timedelta(hours=1))
+        self.assertEqual(result["settled_count"], 0)
+        self.assertEqual(result["skipped"]["invalid_resolution"], 1)
+        self.assertEqual(self.bot.snapshot()["metrics"]["open_positions"], 1)
+
     def test_resolution_settlement_persists_state_and_audit_event(self):
         self.bot.process_snapshot([self.row(0.50)], self.now)
         self.bot.process_snapshot([self.row(0.54)], self.now + timedelta(minutes=5))

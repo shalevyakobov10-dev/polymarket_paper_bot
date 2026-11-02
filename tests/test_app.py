@@ -238,6 +238,7 @@ class ParserTests(unittest.TestCase):
         )
         self.assertTrue(healthy)
         self.assertTrue(payload["ok"])
+        self.assertEqual(payload["status"], "degraded")
         self.assertEqual(payload["components"]["market_data"]["status"], "healthy")
         self.assertEqual(payload["components"]["news"]["status"], "stale")
         self.assertEqual(payload["components"]["market_stream"]["status"], "disconnected")

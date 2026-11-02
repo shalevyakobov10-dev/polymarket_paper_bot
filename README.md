@@ -155,6 +155,8 @@ The polling service now maintains a persistent **simulated-only** portfolio thro
 
 These values are risk controls and research assumptions, not evidence of profitability. The signal uses a change between observations, not a validated predictive model. The service does not short outcomes, submit orders, or connect to an account.
 
+The paper risk engine also tracks a persistent all-time equity peak and snapshot-marked maximum drawdown. The default `PAPER_MAX_PORTFOLIO_DRAWDOWN_PCT=20` blocks all new entries once current equity is down 20% or more from the recorded peak; it never automatically liquidates existing positions. The public `/paper` response reports the current drawdown, maximum observed drawdown, peak equity, configured threshold, and whether the circuit breaker is active. Legacy paper-state files receive safe defaults on load. Drawdown is only as precise as the mark cadence and price/depth data; it can miss losses between snapshots and is not a guarantee against losses.
+
 Paper state is persisted in `data/paper_state.json`; audit events are appended to `data/paper_events.jsonl`. The status API exposes the simulated account at `/paper` and embeds summary metrics in `/status`. If the saved state file is malformed, the worker refuses to silently reset it.
 
 Optional environment variables:
@@ -169,6 +171,7 @@ Optional environment variables:
 - `PAPER_SLIPPAGE_RATE`
 - `PAPER_FEE_RATE`
 - `PAPER_DAILY_LOSS_LIMIT_USD`
+- `PAPER_MAX_PORTFOLIO_DRAWDOWN_PCT` (default `20`; hard all-time peak-to-current-equity drawdown stop, bounded to 0–100% exclusive of zero)
 - `PAPER_REQUIRE_ORDERBOOK` (overrides the live-worker default when explicitly set to true/false)
 - `PAPER_MAX_ORDERBOOK_AGE_SECONDS`
 - `PAPER_MAX_ORDERBOOK_SPREAD_BPS`

@@ -20,7 +20,7 @@ python app.py
 
 The service listens on port 8080 by default. Routes:
 - `/` and `/status`: current worker status
-- `/health`: health response that checks for a recent successful market poll
+- `/health`: readiness response with `healthy` / `degraded` / `unhealthy` status and separate freshness/worker checks for market data, news, resolutions, and the public market stream; the market-data poll is required while other collectors are exposed as optional degraded components
 - `/paper`: simulated portfolio and performance metrics
 - `/news`: recent attributed news headlines, source links, feed health, and collection status
 - `/matches`: recent headline-to-market keyword-overlap candidates; not probabilities or trade instructions

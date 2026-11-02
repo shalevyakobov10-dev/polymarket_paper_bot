@@ -466,6 +466,41 @@ class ParserTests(unittest.TestCase):
         self.assertEqual(result["settled_count"], 2)
         self.assertEqual({row["market_id"] for row in trader.settled}, {"market-a", "market-b"})
 
+
+    def test_settle_open_paper_positions_blocks_conflicts_between_retained_and_fresh_results(self):
+        class FakeTrader:
+            def __init__(self):
+                self.received = None
+            def snapshot(self):
+                return {"positions_list": [
+                    {"market_id": "market-conflict"},
+                    {"market_id": "market-valid"},
+                ]}
+            def settle_resolved_positions(self, rows):
+                self.received = rows
+                return {"settled_count": len(rows), "settled": rows, "skipped": {}}
+
+        class FakeCollector:
+            def load_resolutions(self, market_ids):
+                return [
+                    {"market_id": "market-conflict", "resolved_yes": 0,
+                     "resolved_at": "2026-10-30T12:00:00+00:00"},
+                ]
+
+        trader = FakeTrader()
+        result = app.settle_open_paper_positions(
+            FakeCollector(), trader, [
+                {"market_id": "market-conflict", "resolved_yes": 1,
+                 "resolved_at": "2026-10-30T13:00:00+00:00"},
+                {"market_id": "market-valid", "resolved_yes": 1,
+                 "resolved_at": "2026-10-30T13:00:00+00:00"},
+            ],
+        )
+        self.assertEqual(result["settled_count"], 1)
+        self.assertEqual([row["market_id"] for row in trader.received], ["market-valid"])
+        self.assertEqual(result["skipped"]["conflicting_persisted_resolution"], 1)
+        self.assertEqual(result["conflicting_market_ids"], ["market-conflict"])
+
     def test_settle_open_paper_positions_ignores_unrelated_resolutions(self):
         class FakeTrader:
             def snapshot(self):

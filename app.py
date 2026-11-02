@@ -127,6 +127,11 @@ _resolution_state = {
     "markets_checked_last_poll": 0,
     "resolutions_added_last_poll": 0,
     "resolutions_total_seen": 0,
+    "paper_positions_settled_last_poll": 0,
+    "paper_settlements_total_reported": 0,
+    "paper_settlement_skipped_last_poll": {},
+    "paper_settlement_conflicts_last_poll": [],
+    "paper_settlement_warning": None,
     "poll_interval_seconds": RESOLUTION_POLL_SECONDS,
 }
 
@@ -598,6 +603,18 @@ def resolution_worker_loop() -> None:
                     "paper_settlements_total_reported": (
                         int(_resolution_state.get("paper_settlements_total_reported") or 0)
                         + int(settlement.get("settled_count") or 0)
+                    ),
+                    "paper_settlement_skipped_last_poll": dict(settlement.get("skipped") or {}),
+                    "paper_settlement_conflicts_last_poll": list(
+                        settlement.get("conflicting_market_ids") or []
+                    ),
+                    "paper_settlement_warning": (
+                        "One or more markets were withheld from automatic paper settlement because resolution evidence conflicted or was invalid."
+                        if (
+                            int((settlement.get("skipped") or {}).get("conflicting_persisted_resolution") or 0)
+                            or int((settlement.get("skipped") or {}).get("conflicting_resolution") or 0)
+                            or int((settlement.get("skipped") or {}).get("invalid_resolution") or 0)
+                        ) else None
                     ),
                 })
         except Exception as exc:

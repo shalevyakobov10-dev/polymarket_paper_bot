@@ -262,6 +262,36 @@ class PaperTrader:
                 or not math.isfinite(float(position["unrealized_pnl"]))
             ):
                 raise ValueError(f"Paper position {token_id} has invalid unrealized P&L")
+            # New fee-accounting fields are optional for backward compatibility
+            # with schema-v1 positions created before share-denominated fee support.
+            if "gross_shares" in position:
+                gross_shares = position["gross_shares"]
+                if (
+                    isinstance(gross_shares, bool)
+                    or not isinstance(gross_shares, (int, float))
+                    or not math.isfinite(float(gross_shares))
+                    or float(gross_shares) <= 0.0
+                    or float(gross_shares) + 1e-10 < float(position["shares"])
+                ):
+                    raise ValueError(f"Paper position {token_id} has invalid gross_shares")
+            if "entry_fee_shares" in position:
+                fee_shares = position["entry_fee_shares"]
+                if (
+                    isinstance(fee_shares, bool)
+                    or not isinstance(fee_shares, (int, float))
+                    or not math.isfinite(float(fee_shares))
+                    or float(fee_shares) < 0.0
+                ):
+                    raise ValueError(f"Paper position {token_id} has invalid entry_fee_shares")
+            collection = position.get("entry_fee_collection")
+            if collection is not None and collection not in {"shares", "cash", "none"}:
+                raise ValueError(f"Paper position {token_id} has invalid entry_fee_collection")
+            if collection == "shares":
+                if "gross_shares" not in position or "entry_fee_shares" not in position:
+                    raise ValueError(f"Paper position {token_id} is missing share-fee accounting fields")
+                expected_shares = float(position["gross_shares"]) - float(position["entry_fee_shares"])
+                if abs(expected_shares - float(position["shares"])) > 1e-8:
+                    raise ValueError(f"Paper position {token_id} has inconsistent share-fee accounting")
             try:
                 parse_time(str(position.get("opened_at") or ""))
             except (TypeError, ValueError, OverflowError) as exc:
@@ -618,7 +648,7 @@ class PaperTrader:
         price_source: str = "gamma_outcome_price_fallback",
         fill_details: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        position = self._state["positions"].pop(key)
+        position = self._state["positions"][key]
         exit_price = observed_price * (1.0 - self.config.simulated_slippage)
         gross_proceeds = float(position["shares"]) * exit_price
         fee_model = self._position_fee_model(position)
@@ -632,6 +662,8 @@ class PaperTrader:
             raise ValueError("Cannot close paper position without a valid fee estimate")
         exit_fee = float(exit_fee_details["fee"])
         net_proceeds = gross_proceeds - exit_fee
+        # Commit the state transition only after every exit valuation succeeds.
+        self._state["positions"].pop(key)
         entry_fee_cash_cost = (
             0.0 if position.get("entry_fee_collection") == "shares"
             else float(position.get("entry_fee", 0.0))

@@ -100,6 +100,7 @@ The endpoint reports the original chronological holdout and a separate three-fol
 
 ```bash
 python backtest.py --markets 20 --days 30 --fidelity 5 --train-ratio 0.7 --output backtest_report.json
+python backtest.py --markets 20 --days 30 --fidelity 5 --train-ratio 0.7 --cost-sensitivity --output backtest_cost_stress.json
 ```
 
 Or pass specific public CLOB token IDs:
@@ -109,6 +110,7 @@ python backtest.py --tokens TOKEN_ID_1 TOKEN_ID_2 --days 30 --fidelity 60
 ```
 
 The default scan samples 400 active Gamma markets, ranks them by reported 24-hour volume, then reads up to two outcome tokens from each of the 20 highest-volume markets in that sample. It makes one public price-history request per selected token, with a small delay between requests. The report includes sample sizes, split time, P&L, win rate, fees/slippage assumptions, fetch errors, price-move diagnostics, and forward-return event studies at 1h, 6h, and 24h compared with the same-window all-observation baseline. The scheduled workflow also runs a fixed threshold sensitivity grid (0.005, 0.01, 0.02, 0.03) on the same fetched series; these are exploratory comparisons, not an automatic selection of the most profitable threshold. It does not model historic order-book depth, resolution payouts, or guaranteed executable fills; treat it as a research diagnostic, not proof of an edge.
+The optional `--cost-sensitivity` mode replays the unchanged strategy and chronological split across a predeclared 3×3 grid: flat fee assumptions of 0%, 0.5%, and 1% per side, and slippage assumptions of 0.5%, 1%, and 2% per side. It reports in-sample and out-of-sample returns/trade counts for every scenario. These are stress assumptions, not measured execution costs; the grid is not an optimizer and must not be used to select a holdout winner.
 
 ## Tests
 

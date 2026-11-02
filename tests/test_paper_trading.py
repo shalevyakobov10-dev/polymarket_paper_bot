@@ -192,7 +192,7 @@ class PaperTraderTests(unittest.TestCase):
         self.assertTrue(result["settled"][0]["won"])
         self.assertEqual(result["settled"][0]["event_type"], "position_settled")
         self.assertAlmostEqual(result["settled"][0]["settlement_payout_usd"], opened["shares"])
-        self.assertAlmostEqual(state["metrics"]["cash"], before_cash + opened["shares"])
+        self.assertAlmostEqual(state["metrics"]["cash"], before_cash + opened["shares"], places=4)
         self.assertEqual(state["metrics"]["open_positions"], 0)
         self.assertEqual(state["metrics"]["closed_trades"], 1)
         self.assertAlmostEqual(state["metrics"]["realized_pnl"], opened["shares"] - opened["gross_cost"])

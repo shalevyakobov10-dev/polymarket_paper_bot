@@ -2,7 +2,7 @@ import unittest
 from unittest.mock import patch
 from urllib.parse import parse_qs, urlparse
 
-from backtest import diagnose_price_changes, evaluate_forward_returns, fetch_price_history, list_field, run_backtest, run_threshold_sensitivity
+from backtest import diagnose_price_changes, evaluate_forward_returns, fetch_price_history, list_field, run_backtest, run_threshold_sensitivity, run_execution_cost_sensitivity
 from paper_trading import PaperConfig
 
 
@@ -122,6 +122,44 @@ class BacktestTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             run_backtest([], PaperConfig(), train_ratio=0.2)
 
+
+
+    def test_execution_cost_sensitivity_replays_fixed_strategy_across_cost_grid(self):
+        prices = [0.40, 0.44, 0.50, 0.48, 0.52, 0.46, 0.50, 0.47, 0.51, 0.48, 0.53, 0.50]
+        history = [
+            {
+                "timestamp": 1_800_000_000 + i * 3600,
+                "token_id": "token-a",
+                "market_id": "market-a",
+                "question": "Synthetic cost test",
+                "outcome": "Yes",
+                "observed_price": price,
+            }
+            for i, price in enumerate(prices)
+        ]
+        scenarios = run_execution_cost_sensitivity(
+            history,
+            PaperConfig(),
+            train_ratio=0.7,
+            fee_rates=(0.0, 0.01),
+            slippage_rates=(0.005, 0.02),
+        )
+        self.assertEqual(len(scenarios), 4)
+        self.assertEqual(
+            [(row["fee_rate_assumption_each_side"], row["slippage_rate_each_side"]) for row in scenarios],
+            [(0.0, 0.005), (0.0, 0.02), (0.01, 0.005), (0.01, 0.02)],
+        )
+        self.assertTrue(all(row["same_strategy_and_history"] for row in scenarios))
+        self.assertTrue(all(row["execution"] == "none" for row in scenarios))
+        self.assertTrue(all("return_pct" in row["out_of_sample"] for row in scenarios))
+
+    def test_execution_cost_sensitivity_rejects_invalid_cost_assumptions(self):
+        with self.assertRaises(ValueError):
+            run_execution_cost_sensitivity([], PaperConfig(), fee_rates=())
+        with self.assertRaises(ValueError):
+            run_execution_cost_sensitivity([], PaperConfig(), fee_rates=(-0.01,))
+        with self.assertRaises(ValueError):
+            run_execution_cost_sensitivity([], PaperConfig(), slippage_rates=(float("nan"),))
 
 if __name__ == "__main__":
     unittest.main()

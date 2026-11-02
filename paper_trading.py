@@ -662,13 +662,13 @@ class PaperTrader:
             raise ValueError("Cannot close paper position without a valid fee estimate")
         exit_fee = float(exit_fee_details["fee"])
         net_proceeds = gross_proceeds - exit_fee
-        # Commit the state transition only after every exit valuation succeeds.
-        self._state["positions"].pop(key)
         entry_fee_cash_cost = (
             0.0 if position.get("entry_fee_collection") == "shares"
             else float(position.get("entry_fee", 0.0))
         )
         pnl = net_proceeds - float(position["gross_cost"]) - entry_fee_cash_cost
+        # Commit the state transition only after the complete exit valuation succeeds.
+        self._state["positions"].pop(key)
         self._state["cash"] = round(float(self._state["cash"]) + net_proceeds, 8)
         self._state["realized_pnl"] = round(float(self._state["realized_pnl"]) + pnl, 8)
         self._state["daily_realized_pnl"] = round(float(self._state["daily_realized_pnl"]) + pnl, 8)
@@ -768,7 +768,7 @@ class PaperTrader:
                 except (TypeError, ValueError, OverflowError):
                     skipped["invalid_resolution"] += 1
                     continue
-                if resolved_at < opened_at:
+                if resolved_at <= opened_at:
                     skipped["invalid_resolution"] += 1
                     continue
 
@@ -878,18 +878,18 @@ class PaperTrader:
                 exposure += float(position.get("gross_cost", 0.0))
             equity = float(state["cash"]) + marked_value
             state["metrics"] = {
-                "cash": round(float(state["cash"]), 4),
-                "equity": round(equity, 4),
-                "total_pnl": round(equity - float(state["starting_cash"]), 4),
+                "cash": round(float(state["cash"]), 8),
+                "equity": round(equity, 8),
+                "total_pnl": round(equity - float(state["starting_cash"]), 8),
                 "return_pct": round((equity / float(state["starting_cash"]) - 1.0) * 100.0, 4),
-                "realized_pnl": round(float(state["realized_pnl"]), 4),
-                "unrealized_pnl": round(unrealized, 4),
-                "open_exposure": round(exposure, 4),
+                "realized_pnl": round(float(state["realized_pnl"]), 8),
+                "unrealized_pnl": round(unrealized, 8),
+                "open_exposure": round(exposure, 8),
                 "open_positions": len(positions),
                 "closed_trades": int(state["closed_trades"]),
                 "win_rate_pct": round(100.0 * int(state["winning_trades"]) / int(state["closed_trades"]), 4) if int(state["closed_trades"]) else 0.0,
-                "total_fees": round(float(state["total_fees"]), 4),
-                "daily_realized_pnl": round(float(state["daily_realized_pnl"]), 4),
+                "total_fees": round(float(state["total_fees"]), 8),
+                "daily_realized_pnl": round(float(state["daily_realized_pnl"]), 8),
                 "daily_loss_limit_usd": self.config.daily_loss_limit_usd,
             }
             state["positions_list"] = positions

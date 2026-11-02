@@ -310,12 +310,20 @@ class PaperTraderTests(unittest.TestCase):
             [market_fee], self.now + timedelta(minutes=5)
         )["opened"][0]
         expected_entry_fee = round(
-            opened["shares"] * 0.07 * opened["entry_price"] * (1.0 - opened["entry_price"]),
+            opened["gross_shares"] * 0.07 * opened["entry_price"] * (1.0 - opened["entry_price"]),
             5,
         )
         self.assertEqual(opened["fee_model"]["mode"], "polymarket_taker_curve")
         self.assertAlmostEqual(opened["entry_fee"], expected_entry_fee, places=8)
         self.assertEqual(opened["entry_fee_details"]["source"], "gamma_fee_schedule")
+        self.assertEqual(opened["entry_fee_collection"], "shares")
+        self.assertAlmostEqual(
+            opened["entry_fee_shares"],
+            opened["entry_fee"] / opened["entry_price"],
+            places=12,
+        )
+        self.assertLess(opened["shares"], opened["gross_shares"])
+        self.assertAlmostEqual(bot.snapshot()["metrics"]["cash"], 98.0, places=6)
 
         exit_book = {
             "token_id": "token-1",

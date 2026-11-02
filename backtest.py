@@ -422,8 +422,7 @@ def run_backtest(
 ) -> dict[str, Any]:
     if not 0.5 <= train_ratio < 0.9:
         raise ValueError("train_ratio must be between 0.5 and 0.9")
-    cleaned = [row for row in histories if isinstance(row, dict) and number(row.get("observed_price")) is not None]
-    cleaned = [row for row in cleaned if 0 < float(row["observed_price"]) < 1]
+    cleaned = clean_history_rows(histories)
     stamps = sorted({int(row["timestamp"]) for row in cleaned})
     if len(stamps) < 8:
         raise ValueError(f"Need at least 8 unique time points; got {len(stamps)}")

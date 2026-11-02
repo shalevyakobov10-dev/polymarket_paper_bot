@@ -7,7 +7,7 @@ import math
 import os
 import threading
 from dataclasses import asdict, dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -704,6 +704,152 @@ class PaperTrader:
             "pnl": round(pnl, 8),
             "reason": reason,
             "execution": "simulated_only",
+        }
+
+    def settle_resolved_positions(
+        self,
+        resolutions: list[dict[str, Any]],
+        now: datetime | None = None,
+    ) -> dict[str, Any]:
+        """Settle open paper positions from definitive, timestamped binary resolutions.
+
+        This is a simulated $1/$0 contract settlement, not a redemption request.
+        Any buy fee already deducted in shares is reflected in the remaining shares.
+        """
+        current_time = now or utc_now()
+        if current_time.tzinfo is None:
+            current_time = current_time.replace(tzinfo=timezone.utc)
+        current_time = current_time.astimezone(timezone.utc)
+
+        by_market: dict[str, dict[str, Any]] = {}
+        conflicts: set[str] = set()
+        for row in resolutions:
+            if not isinstance(row, dict):
+                continue
+            market_id = str(row.get("market_id") or "").strip()
+            resolved_yes = row.get("resolved_yes")
+            try:
+                resolved_at = parse_time(str(row.get("resolved_at") or ""))
+            except (TypeError, ValueError, OverflowError):
+                continue
+            if (
+                not market_id
+                or isinstance(resolved_yes, bool)
+                or not isinstance(resolved_yes, int)
+                or resolved_yes not in (0, 1)
+                or resolved_at > current_time + timedelta(minutes=1)
+            ):
+                continue
+            normalized = {**row, "market_id": market_id, "resolved_yes": resolved_yes}
+            previous = by_market.get(market_id)
+            if previous is not None and previous["resolved_yes"] != resolved_yes:
+                conflicts.add(market_id)
+            elif previous is None or resolved_at > parse_time(str(previous["resolved_at"])):
+                by_market[market_id] = normalized
+
+        settled: list[dict[str, Any]] = []
+        skipped = {"invalid_resolution": 0, "conflicting_resolution": len(conflicts)}
+        with self._lock:
+            self._daily_rollover(current_time)
+            for key, position in list(self._state["positions"].items()):
+                market_id = str(position.get("market_id") or "").strip()
+                if not market_id or market_id not in by_market:
+                    continue
+                if market_id in conflicts:
+                    continue
+                resolution = by_market[market_id]
+                outcome = str(position.get("outcome") or "").strip().casefold()
+                if outcome not in {"yes", "no"}:
+                    skipped["invalid_resolution"] += 1
+                    continue
+                try:
+                    opened_at = parse_time(str(position.get("opened_at") or ""))
+                    resolved_at = parse_time(str(resolution["resolved_at"]))
+                except (TypeError, ValueError, OverflowError):
+                    skipped["invalid_resolution"] += 1
+                    continue
+                if resolved_at < opened_at:
+                    skipped["invalid_resolution"] += 1
+                    continue
+
+                resolved_yes = int(resolution["resolved_yes"])
+                won = (outcome == "yes" and resolved_yes == 1) or (
+                    outcome == "no" and resolved_yes == 0
+                )
+                shares = finite_float(position.get("shares"))
+                gross_cost = finite_float(position.get("gross_cost"))
+                entry_fee = finite_float(position.get("entry_fee"))
+                if (
+                    shares is None or shares <= 0.0
+                    or gross_cost is None or gross_cost < 0.0
+                    or entry_fee is None or entry_fee < 0.0
+                ):
+                    skipped["invalid_resolution"] += 1
+                    continue
+
+                payout = shares if won else 0.0
+                entry_fee_cash_cost = (
+                    0.0 if position.get("entry_fee_collection") == "shares"
+                    else entry_fee
+                )
+                pnl = payout - gross_cost - entry_fee_cash_cost
+                self._state["positions"].pop(key)
+                self._state["last_prices"].pop(key, None)
+                self._state["cash"] = round(float(self._state["cash"]) + payout, 8)
+                self._state["realized_pnl"] = round(float(self._state["realized_pnl"]) + pnl, 8)
+                self._state["daily_realized_pnl"] = round(
+                    float(self._state["daily_realized_pnl"]) + pnl, 8
+                )
+                self._state["closed_trades"] = int(self._state["closed_trades"]) + 1
+                if pnl > 0.0:
+                    self._state["winning_trades"] = int(self._state["winning_trades"]) + 1
+                elif pnl < 0.0:
+                    self._state["losing_trades"] = int(self._state["losing_trades"]) + 1
+
+                event = {
+                    "event_type": "position_settled",
+                    "timestamp": iso_time(current_time),
+                    "token_id": key,
+                    "market_id": market_id,
+                    "question": position.get("question", ""),
+                    "outcome": position.get("outcome", ""),
+                    "opened_at": position.get("opened_at"),
+                    "resolved_at": resolution["resolved_at"],
+                    "resolution_source": str(
+                        resolution.get("resolution_source") or "public_gamma_resolved_market"
+                    ),
+                    "resolved_yes": resolved_yes,
+                    "won": won,
+                    "shares_settled": round(shares, 12),
+                    "settlement_value_per_share": 1.0 if won else 0.0,
+                    "settlement_payout_usd": round(payout, 8),
+                    "gross_cost": round(gross_cost, 8),
+                    "entry_fee": round(entry_fee, 8),
+                    "entry_fee_collection": str(position.get("entry_fee_collection") or "cash"),
+                    "entry_fee_cash_cost": round(entry_fee_cash_cost, 8),
+                    "settlement_fee": 0.0,
+                    "pnl": round(pnl, 8),
+                    "reason": "definitive_binary_market_resolution",
+                    "price_source": "public_gamma_resolved_binary_outcome",
+                    "execution": "simulated_only",
+                    "research_only": True,
+                }
+                self._state["recent_events"] = (
+                    self._state.get("recent_events", []) + [event]
+                )[-100:]
+                settled.append(event)
+
+            if settled:
+                self._save()
+                for event in settled:
+                    self._write_event(event)
+
+        return {
+            "settled_count": len(settled),
+            "settled": settled,
+            "skipped": skipped,
+            "execution": "none",
+            "research_only": True,
         }
 
     def snapshot(self) -> dict[str, Any]:

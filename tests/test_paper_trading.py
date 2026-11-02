@@ -172,6 +172,113 @@ class PaperTraderTests(unittest.TestCase):
         self.assertTrue(any(e["event_type"] == "position_opened" for e in events))
 
 
+    def test_resolution_settlement_pays_winning_yes_position(self):
+        self.bot.process_snapshot([self.row(0.50)], self.now)
+        opened = self.bot.process_snapshot(
+            [self.row(0.54)], self.now + timedelta(minutes=5)
+        )["opened"][0]
+        before_cash = self.bot.snapshot()["metrics"]["cash"]
+        resolution = {
+            "market_id": "market-1",
+            "resolved_yes": 1,
+            "resolved_at": (self.now + timedelta(hours=2)).isoformat(),
+            "resolution_source": "official_resolution_source",
+        }
+        result = self.bot.settle_resolved_positions(
+            [resolution], now=self.now + timedelta(hours=3)
+        )
+        state = self.bot.snapshot()
+        self.assertEqual(result["settled_count"], 1)
+        self.assertTrue(result["settled"][0]["won"])
+        self.assertEqual(result["settled"][0]["event_type"], "position_settled")
+        self.assertAlmostEqual(result["settled"][0]["settlement_payout_usd"], opened["shares"])
+        self.assertAlmostEqual(state["metrics"]["cash"], before_cash + opened["shares"])
+        self.assertEqual(state["metrics"]["open_positions"], 0)
+        self.assertEqual(state["metrics"]["closed_trades"], 1)
+        self.assertAlmostEqual(state["metrics"]["realized_pnl"], opened["shares"] - opened["gross_cost"])
+
+    def test_resolution_settlement_handles_losing_no_and_is_idempotent(self):
+        no_row = {**self.row(0.50), "outcome": "No"}
+        self.bot.process_snapshot([no_row], self.now)
+        opened = self.bot.process_snapshot(
+            [{**no_row, "observed_price": 0.54}], self.now + timedelta(minutes=5)
+        )["opened"][0]
+        before_cash = self.bot.snapshot()["metrics"]["cash"]
+        resolution = {
+            "market_id": "market-1",
+            "resolved_yes": 1,
+            "resolved_at": (self.now + timedelta(hours=2)).isoformat(),
+        }
+        first = self.bot.settle_resolved_positions([resolution], now=self.now + timedelta(hours=3))
+        second = self.bot.settle_resolved_positions([resolution], now=self.now + timedelta(hours=4))
+        state = self.bot.snapshot()
+        self.assertEqual(first["settled_count"], 1)
+        self.assertFalse(first["settled"][0]["won"])
+        self.assertEqual(first["settled"][0]["settlement_payout_usd"], 0.0)
+        self.assertAlmostEqual(state["metrics"]["cash"], before_cash)
+        self.assertEqual(second["settled_count"], 0)
+        self.assertEqual(state["metrics"]["closed_trades"], 1)
+        self.assertEqual(state["metrics"]["open_positions"], 0)
+
+    def test_resolution_settlement_respects_share_deducted_entry_fee(self):
+        cfg = PaperConfig(**{**self.config.__dict__, "require_orderbook": True})
+        bot = PaperTrader(Path(self.temp.name) / "settlement_share_fee.json", cfg)
+        bot.process_snapshot([self.row(0.50)], self.now)
+        book = {
+            "token_id": "token-1",
+            "observed_at": (self.now + timedelta(minutes=5)).isoformat(),
+            "best_bid": 0.52, "best_ask": 0.54, "spread_bps": 377.36,
+            "bid_depth_usd_top5": 20.0, "ask_depth_usd_top5": 18.0,
+            "bids_top5": [{"price": 0.52, "size": 100.0}],
+            "asks_top5": [{"price": 0.54, "size": 100.0}],
+            "book_usable": True, "crossed_book": False,
+        }
+        opened = bot.process_snapshot([{
+            **self.row(0.54), "fees_enabled": True,
+            "fee_schedule": {"rate": 0.07, "exponent": 1, "takerOnly": True},
+            "orderbook": book,
+        }], self.now + timedelta(minutes=5))["opened"][0]
+        fees_before = bot.snapshot()["metrics"]["total_fees"]
+        result = bot.settle_resolved_positions([{
+            "market_id": "market-1", "resolved_yes": 1,
+            "resolved_at": (self.now + timedelta(hours=1)).isoformat(),
+        }], now=self.now + timedelta(hours=2))
+        event = result["settled"][0]
+        self.assertEqual(opened["entry_fee_collection"], "shares")
+        self.assertEqual(event["settlement_fee"], 0.0)
+        self.assertAlmostEqual(event["settlement_payout_usd"], opened["shares"])
+        self.assertAlmostEqual(event["pnl"], opened["shares"] - opened["gross_cost"], places=8)
+        self.assertEqual(bot.snapshot()["metrics"]["total_fees"], fees_before)
+
+    def test_resolution_settlement_rejects_conflicting_future_and_pre_entry_records(self):
+        self.bot.process_snapshot([self.row(0.50)], self.now)
+        self.bot.process_snapshot([self.row(0.54)], self.now + timedelta(minutes=5))
+        valid_time = (self.now + timedelta(hours=2)).isoformat()
+        result = self.bot.settle_resolved_positions([
+            {"market_id": "market-1", "resolved_yes": 1, "resolved_at": valid_time},
+            {"market_id": "market-1", "resolved_yes": 0, "resolved_at": valid_time},
+            {"market_id": "market-1", "resolved_yes": 1,
+             "resolved_at": (self.now + timedelta(days=2)).isoformat()},
+        ], now=self.now + timedelta(hours=3))
+        self.assertEqual(result["settled_count"], 0)
+        self.assertEqual(result["skipped"]["conflicting_resolution"], 1)
+        self.assertEqual(self.bot.snapshot()["metrics"]["open_positions"], 1)
+
+    def test_resolution_settlement_persists_state_and_audit_event(self):
+        self.bot.process_snapshot([self.row(0.50)], self.now)
+        self.bot.process_snapshot([self.row(0.54)], self.now + timedelta(minutes=5))
+        result = self.bot.settle_resolved_positions([{
+            "market_id": "market-1", "resolved_yes": 1,
+            "resolved_at": (self.now + timedelta(hours=2)).isoformat(),
+            "resolution_source": "official",
+        }], now=self.now + timedelta(hours=3))
+        self.assertEqual(result["settled_count"], 1)
+        persisted = json.loads(self.state_path.read_text(encoding="utf-8"))
+        self.assertEqual(persisted["positions"], {})
+        event_path = Path(self.temp.name) / "paper_events.jsonl"
+        events = [json.loads(line) for line in event_path.read_text().splitlines()]
+        self.assertTrue(any(event["event_type"] == "position_settled" for event in events))
+
     def test_time_limit_closes_a_stale_position(self):
         cfg = PaperConfig(**{**self.config.__dict__, "max_hold_hours": 1.0})
         bot = PaperTrader(Path(self.temp.name) / "time_state.json", cfg)

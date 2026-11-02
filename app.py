@@ -512,6 +512,30 @@ def independent_model_evaluation_payload() -> dict:
     )
 
 
+def settle_open_paper_positions(
+    collector: ResolutionCollector,
+    trader: PaperTrader,
+    newly_fetched_resolutions: list[dict],
+) -> dict:
+    """Settle currently open paper positions from fresh and retained resolutions."""
+    positions = trader.snapshot().get("positions_list", [])
+    market_ids = {
+        str(position.get("market_id") or "").strip()
+        for position in positions
+        if isinstance(position, dict) and str(position.get("market_id") or "").strip()
+    }
+    retained = collector.load_resolutions(market_ids)
+    merged: dict[str, dict] = {}
+    # Retained records provide restart recovery; fresh API records take precedence.
+    for record in retained + list(newly_fetched_resolutions or []):
+        if not isinstance(record, dict):
+            continue
+        market_id = str(record.get("market_id") or "").strip()
+        if market_id in market_ids:
+            merged[market_id] = record
+    return trader.settle_resolved_positions(list(merged.values()))
+
+
 def resolution_worker_loop() -> None:
     """Collect public decisive binary resolutions for the forecast evaluation scorecard."""
     with _lock:
@@ -520,7 +544,13 @@ def resolution_worker_loop() -> None:
         with _lock:
             _resolution_state["last_poll_at"] = utc_now()
         try:
-            result = get_resolution_collector().fetch_once()
+            collector = get_resolution_collector()
+            result = collector.fetch_once()
+            settlement = settle_open_paper_positions(
+                collector,
+                get_paper_trader(),
+                result.get("resolved_markets") or [],
+            )
             with _lock:
                 _resolution_state.update({
                     "last_success_at": result.get("last_success_at"),
@@ -528,6 +558,11 @@ def resolution_worker_loop() -> None:
                     "markets_checked_last_poll": int(result.get("markets_checked") or 0),
                     "resolutions_added_last_poll": int(result.get("resolutions_added") or 0),
                     "resolutions_total_seen": int(result.get("resolutions_total_seen") or 0),
+                    "paper_positions_settled_last_poll": int(settlement.get("settled_count") or 0),
+                    "paper_settlements_total_reported": (
+                        int(_resolution_state.get("paper_settlements_total_reported") or 0)
+                        + int(settlement.get("settled_count") or 0)
+                    ),
                 })
         except Exception as exc:
             with _lock:

@@ -61,6 +61,41 @@ class ResolutionTrackerTests(unittest.TestCase):
         self.assertEqual(mocked.call_count, 2)
         self.assertEqual(len(result), 3)
 
+    def test_load_resolutions_reads_rotated_logs_for_open_markets_only(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "resolved.jsonl"
+            path.with_name("resolved.jsonl.1").write_text(json.dumps({
+                "market_id": "old-market", "resolved_yes": 0,
+                "resolved_at": "2026-10-29T10:00:00+00:00",
+            }) + "\n", encoding="utf-8")
+            path.write_text(
+                json.dumps({
+                    "market_id": "open-market", "resolved_yes": 1,
+                    "resolved_at": "2026-10-30T10:00:00+00:00",
+                }) + "\n" +
+                json.dumps({
+                    "market_id": "unrelated", "resolved_yes": 1,
+                    "resolved_at": "2026-10-30T11:00:00+00:00",
+                }) + "\n",
+                encoding="utf-8",
+            )
+            collector = resolution_tracker.ResolutionCollector(path)
+            rows = collector.load_resolutions({"old-market", "open-market"})
+            self.assertEqual({row["market_id"] for row in rows}, {"old-market", "open-market"})
+
+    def test_fetch_once_returns_current_decisive_resolutions(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            collector = resolution_tracker.ResolutionCollector(Path(tmp) / "resolved.jsonl")
+            market = {
+                "market_id": "market-1",
+                "resolved_yes": 1,
+                "resolved_at": "2026-10-30T12:00:00+00:00",
+            }
+            with patch.object(resolution_tracker, "fetch_recent_resolved_markets", return_value=[market]):
+                result = collector.fetch_once()
+            self.assertEqual(result["resolved_markets"], [market])
+            self.assertEqual(result["resolutions_added"], 1)
+
     def test_collector_persists_once_and_deduplicates_after_restart(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "resolved.jsonl"

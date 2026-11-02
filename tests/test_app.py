@@ -434,5 +434,60 @@ class ParserTests(unittest.TestCase):
                 app._research_feature_last_written.update(old_timestamps)
                 app._research_feature_schedule_loaded = old_loaded
 
+    def test_settle_open_paper_positions_combines_fetched_and_retained_records(self):
+        class FakeTrader:
+            def __init__(self):
+                self.settled = None
+            def snapshot(self):
+                return {"positions_list": [
+                    {"market_id": "market-a"}, {"market_id": "market-b"},
+                ]}
+            def settle_resolved_positions(self, rows):
+                self.settled = rows
+                return {"settled_count": len(rows), "settled": rows}
+
+        class FakeCollector:
+            def load_resolutions(self, market_ids):
+                self.asserted_ids = market_ids
+                return [{
+                    "market_id": "market-b", "resolved_yes": 0,
+                    "resolved_at": "2026-10-30T12:00:00+00:00",
+                }]
+
+        trader = FakeTrader()
+        collector = FakeCollector()
+        result = app.settle_open_paper_positions(
+            collector, trader, [{
+                "market_id": "market-a", "resolved_yes": 1,
+                "resolved_at": "2026-10-30T11:00:00+00:00",
+            }],
+        )
+        self.assertEqual(collector.asserted_ids, {"market-a", "market-b"})
+        self.assertEqual(result["settled_count"], 2)
+        self.assertEqual({row["market_id"] for row in trader.settled}, {"market-a", "market-b"})
+
+    def test_settle_open_paper_positions_ignores_unrelated_resolutions(self):
+        class FakeTrader:
+            def snapshot(self):
+                return {"positions_list": [{"market_id": "market-open"}]}
+            def settle_resolved_positions(self, rows):
+                return {"settled_count": len(rows), "settled": rows}
+
+        class FakeCollector:
+            def load_resolutions(self, market_ids):
+                return [{
+                    "market_id": "not-open", "resolved_yes": 1,
+                    "resolved_at": "2026-10-30T12:00:00+00:00",
+                }]
+
+        result = app.settle_open_paper_positions(
+            FakeCollector(), FakeTrader(), [{
+                "market_id": "other", "resolved_yes": 1,
+                "resolved_at": "2026-10-30T12:00:00+00:00",
+            }],
+        )
+        self.assertEqual(result["settled_count"], 0)
+
+
 if __name__ == "__main__":
     unittest.main()

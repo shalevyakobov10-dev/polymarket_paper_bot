@@ -98,6 +98,40 @@ class ResolutionCollector:
                 continue
         return known
 
+    def load_resolutions(self, market_ids: set[str] | None = None) -> list[dict[str, Any]]:
+        """Read retained definitive resolution records for a targeted set of markets."""
+        wanted = {str(value).strip() for value in (market_ids or set()) if str(value).strip()}
+        if not wanted:
+            return []
+        latest: dict[str, dict[str, Any]] = {}
+        for candidate in self._rotation_paths():
+            if not candidate.exists():
+                continue
+            try:
+                with candidate.open("r", encoding="utf-8") as handle:
+                    for line in handle:
+                        try:
+                            row = json.loads(line)
+                        except (json.JSONDecodeError, TypeError):
+                            continue
+                        if not isinstance(row, dict):
+                            continue
+                        market_id = str(row.get("market_id") or "").strip()
+                        resolved_yes = row.get("resolved_yes")
+                        if (
+                            market_id not in wanted
+                            or isinstance(resolved_yes, bool)
+                            or resolved_yes not in (0, 1)
+                            or not row.get("resolved_at")
+                        ):
+                            continue
+                        previous = latest.get(market_id)
+                        if previous is None or str(row.get("resolved_at")) > str(previous.get("resolved_at")):
+                            latest[market_id] = row
+            except OSError:
+                continue
+        return sorted(latest.values(), key=lambda row: str(row.get("resolved_at") or ""))
+
     def fetch_once(self) -> dict[str, Any]:
         limit = _bounded_env_int("RESOLUTION_MARKETS_PER_POLL", 100, 1, 100)
         pages = _bounded_env_int("RESOLUTION_PAGES", 2, 1, 10)
@@ -123,6 +157,7 @@ class ResolutionCollector:
             "markets_checked": len(markets),
             "resolutions_added": len(added),
             "resolutions_total_seen": len(self._known_ids),
+            "resolved_markets": markets,
             "last_success_at": datetime.now(timezone.utc).isoformat(),
             "research_only": True,
             "execution": "none",

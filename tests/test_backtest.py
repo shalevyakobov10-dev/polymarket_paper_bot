@@ -2,7 +2,7 @@ import unittest
 from unittest.mock import patch
 from urllib.parse import parse_qs, urlparse
 
-from backtest import diagnose_price_changes, evaluate_forward_returns, fetch_price_history, list_field, run_backtest, run_threshold_sensitivity, run_execution_cost_sensitivity
+from backtest import diagnose_price_changes, evaluate_forward_returns, fetch_price_history, list_field, run_backtest, run_threshold_sensitivity, run_execution_cost_sensitivity, run_walk_forward_backtest
 from paper_trading import PaperConfig
 
 
@@ -160,6 +160,57 @@ class BacktestTests(unittest.TestCase):
             run_execution_cost_sensitivity([], PaperConfig(), fee_rates=(-0.01,))
         with self.assertRaises(ValueError):
             run_execution_cost_sensitivity([], PaperConfig(), slippage_rates=(float("nan"),))
+
+
+    def test_walk_forward_uses_expanding_train_and_non_overlapping_test_windows(self):
+        prices = [0.40, 0.46, 0.43, 0.51, 0.48, 0.55, 0.50, 0.58, 0.54, 0.61,
+                  0.56, 0.64, 0.59, 0.67, 0.62, 0.70, 0.65, 0.73, 0.68, 0.76,
+                  0.71, 0.79, 0.74, 0.82, 0.77, 0.85, 0.80, 0.88, 0.83, 0.90]
+        history = [
+            {"timestamp": 1_800_000_000 + index * 3600, "token_id": "token-a",
+             "market_id": "market-a", "observed_price": price}
+            for index, price in enumerate(prices)
+        ]
+        report = run_walk_forward_backtest(
+            history, PaperConfig(), folds=3, initial_train_ratio=0.5
+        )
+        self.assertEqual(report["mode"], "EXPANDING_WALK_FORWARD_PAPER_BACKTEST")
+        self.assertTrue(report["strategy_fixed_across_folds"])
+        self.assertTrue(report["test_windows_non_overlapping"])
+        self.assertTrue(report["portfolio_reset_each_fold"])
+        self.assertEqual(len(report["folds"]), 3)
+        for index, fold in enumerate(report["folds"]):
+            self.assertLess(
+                fold["training_window"]["end_utc"],
+                fold["test_window"]["start_utc"],
+            )
+            self.assertEqual(fold["research_only"], True)
+            self.assertEqual(fold["execution"], "none")
+            if index:
+                self.assertLess(
+                    report["folds"][index - 1]["test_window"]["end_utc"],
+                    fold["test_window"]["start_utc"],
+                )
+                self.assertGreater(
+                    fold["training_window"]["unique_timestamps"],
+                    report["folds"][index - 1]["training_window"]["unique_timestamps"],
+                )
+        self.assertEqual(report["aggregate_out_of_sample"]["total_test_observations"], 15)
+
+    def test_walk_forward_rejects_invalid_fold_configuration_and_insufficient_history(self):
+        history = [
+            {"timestamp": 1_800_000_000 + index * 3600, "token_id": "t",
+             "observed_price": 0.5 + index * 0.001}
+            for index in range(12)
+        ]
+        with self.assertRaises(ValueError):
+            run_walk_forward_backtest(history, PaperConfig(), folds=1)
+        with self.assertRaises(ValueError):
+            run_walk_forward_backtest(history, PaperConfig(), folds=3, initial_train_ratio=0.95)
+        with self.assertRaises(ValueError):
+            run_walk_forward_backtest(history[:6], PaperConfig(), folds=2)
+        with self.assertRaises(ValueError):
+            run_walk_forward_backtest(history[:8], PaperConfig(), folds=5, initial_train_ratio=0.5)
 
 if __name__ == "__main__":
     unittest.main()

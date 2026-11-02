@@ -114,6 +114,134 @@ class FeatureModelEvaluationTests(unittest.TestCase):
         self.assertEqual(result["status"], "insufficient_class_diversity")
         self.assertIsNone(result.get("feature_model"))
 
+    def test_live_forecasts_train_only_on_resolved_history_and_skip_old_rows(self):
+        now = datetime(2026, 10, 30, 12, tzinfo=timezone.utc)
+        feature_rows = []
+        resolutions = []
+        for index in range(100):
+            outcome = 1 if index % 2 == 0 else 0
+            resolved_at = now - timedelta(days=2, minutes=index)
+            feature_rows.append({
+                "market_id": f"history-{index}",
+                "observed_at": (resolved_at - timedelta(hours=24)).isoformat(),
+                "gamma_yes_probability": 0.5,
+                "clob_book_usable": True,
+                "clob_midpoint": 0.85 if outcome else 0.15,
+                "clob_depth_imbalance_top5": 0.7 if outcome else -0.7,
+                "clob_spread_bps": 120,
+                "news_match_count_24h": 2 if outcome else 0,
+                "news_headlines": [{"lexical_overlap": 0.8 if outcome else 0.1}],
+                "volume_24h": 10000,
+            })
+            resolutions.append({
+                "market_id": f"history-{index}",
+                "resolved_yes": outcome,
+                "resolved_at": resolved_at.isoformat(),
+            })
+        feature_rows.extend([
+            {
+                "market_id": "live-positive",
+                "question": "Current positive feature market",
+                "observed_at": (now - timedelta(minutes=15)).isoformat(),
+                "gamma_yes_probability": 0.5,
+                "clob_book_usable": True,
+                "clob_midpoint": 0.85,
+                "clob_depth_imbalance_top5": 0.7,
+                "clob_spread_bps": 120,
+                "news_match_count_24h": 2,
+                "news_headlines": [{"lexical_overlap": 0.8}],
+                "volume_24h": 10000,
+            },
+            {
+                "market_id": "live-negative",
+                "question": "Current negative feature market",
+                "observed_at": (now - timedelta(minutes=15)).isoformat(),
+                "gamma_yes_probability": 0.5,
+                "clob_book_usable": True,
+                "clob_midpoint": 0.15,
+                "clob_depth_imbalance_top5": -0.7,
+                "clob_spread_bps": 120,
+                "news_match_count_24h": 0,
+                "news_headlines": [{"lexical_overlap": 0.1}],
+                "volume_24h": 10000,
+            },
+            {
+                "market_id": "live-stale",
+                "observed_at": (now - timedelta(hours=3)).isoformat(),
+                "gamma_yes_probability": 0.5,
+                "clob_book_usable": False,
+                "volume_24h": 100,
+            },
+        ])
+        result = model_eval.forecast_current_feature_rows(
+            feature_rows, resolutions, now=now, max_feature_age_seconds=3600
+        )
+        self.assertEqual(result["status"], "model_fitted")
+        self.assertEqual(result["training"]["eligible_unique_markets"], 100)
+        self.assertEqual(result["training"]["outcome_yes_count"], 50)
+        self.assertEqual(result["current_market_coverage"]["fresh_unresolved_markets"], 2)
+        self.assertEqual(result["current_market_coverage"]["exclusions"]["stale_rows"], 1)
+        self.assertEqual(len(result["forecasts"]), 2)
+        self.assertTrue(all(
+            0.0 <= row["feature_model_probability_yes"] <= 1.0
+            for row in result["forecasts"]
+        ))
+        self.assertEqual(result["decision"], "NO_ACTION_RESEARCH_ONLY")
+        self.assertFalse(result["live_execution_enabled"])
+
+    def test_live_forecasts_withhold_model_until_enough_labels_resolve(self):
+        now = datetime(2026, 10, 30, 12, tzinfo=timezone.utc)
+        feature_rows = []
+        resolutions = []
+        for index in range(79):
+            outcome = index % 2
+            resolved_at = now - timedelta(days=2, minutes=index)
+            feature_rows.append({
+                "market_id": f"history-{index}",
+                "observed_at": (resolved_at - timedelta(hours=24)).isoformat(),
+                "gamma_yes_probability": 0.5,
+                "clob_book_usable": True,
+                "clob_midpoint": 0.6 if outcome else 0.4,
+                "volume_24h": 1000,
+            })
+            resolutions.append({
+                "market_id": f"history-{index}",
+                "resolved_yes": outcome,
+                "resolved_at": resolved_at.isoformat(),
+            })
+        result = model_eval.forecast_current_feature_rows(
+            feature_rows, resolutions, now=now
+        )
+        self.assertEqual(result["status"], "insufficient_data")
+        self.assertEqual(result["training"]["eligible_unique_markets"], 79)
+        self.assertEqual(result["forecasts"], [])
+        self.assertEqual(result["decision"], "NO_ACTION_RESEARCH_ONLY")
+
+    def test_live_forecasts_never_use_unresolved_future_labels(self):
+        now = datetime(2026, 10, 30, 12, tzinfo=timezone.utc)
+        features = []
+        resolutions = []
+        for index in range(100):
+            outcome = index % 2
+            resolved_at = now - timedelta(days=2) if index < 80 else now + timedelta(days=2)
+            features.append({
+                "market_id": f"market-{index}",
+                "observed_at": (resolved_at - timedelta(hours=24)).isoformat(),
+                "gamma_yes_probability": 0.5,
+                "clob_book_usable": True,
+                "clob_midpoint": 0.65 if outcome else 0.35,
+                "volume_24h": 1000,
+            })
+            resolutions.append({
+                "market_id": f"market-{index}",
+                "resolved_yes": outcome,
+                "resolved_at": resolved_at.isoformat(),
+            })
+        result = model_eval.forecast_current_feature_rows(features, resolutions, now=now)
+        self.assertEqual(result["status"], "insufficient_data")
+        self.assertEqual(result["training"]["eligible_unique_markets"], 80)
+        self.assertEqual(result["forecasts"], [])
+
     def test_invalid_evaluation_configuration_is_rejected(self):
         with self.assertRaises(ValueError):
             model_eval.evaluate_feature_model([], train_fraction=0.95)

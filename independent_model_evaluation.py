@@ -666,6 +666,234 @@ def _load_jsonl(paths: Iterable[str | Path]) -> list[dict[str, Any]]:
     return output
 
 
+
+
+def forecast_current_feature_rows(
+    feature_rows: list[dict[str, Any]],
+    resolutions: list[dict[str, Any]],
+    *,
+    now: datetime | None = None,
+    minimum_training: int = 80,
+    max_feature_age_seconds: float = 3600.0,
+    l2: float = 0.25,
+) -> dict[str, Any]:
+    """Fit only on labels resolved before now and score fresh, unresolved markets.
+
+    The output is a research forecast only. It is deliberately not wired to the
+    paper order-entry strategy because holdout validation is not authorization
+    to trade and the model's current calibration/edge must be independently proven.
+    """
+    if isinstance(minimum_training, bool) or not isinstance(minimum_training, int) or minimum_training < 2:
+        raise ValueError("minimum_training must be an integer of at least 2")
+    if not math.isfinite(max_feature_age_seconds) or max_feature_age_seconds <= 0:
+        raise ValueError("max_feature_age_seconds must be finite and positive")
+    if not math.isfinite(l2) or l2 < 0:
+        raise ValueError("l2 must be finite and nonnegative")
+
+    current = now or datetime.now(timezone.utc)
+    if current.tzinfo is None:
+        current = current.replace(tzinfo=timezone.utc)
+    current = current.astimezone(timezone.utc)
+    current_stamp = current.timestamp()
+
+    historical_samples = build_feature_forecast_samples(
+        feature_rows, resolutions, horizon_hours=24.0, tolerance_hours=12.0
+    )
+    training_by_market: dict[str, dict[str, Any]] = {}
+    conflicting_training_ids: set[str] = set()
+    for sample in historical_samples:
+        market_id = str(sample.get("market_id") or "").strip()
+        resolved_stamp = _timestamp(sample.get("resolved_at"))
+        forecast_stamp = _timestamp(sample.get("forecast_timestamp"))
+        if (
+            not market_id or resolved_stamp is None or resolved_stamp >= current_stamp
+            or forecast_stamp is None or forecast_stamp >= resolved_stamp
+        ):
+            continue
+        previous = training_by_market.get(market_id)
+        if previous is not None and previous["outcome_yes"] != sample["outcome_yes"]:
+            conflicting_training_ids.add(market_id)
+            continue
+        if previous is None or str(sample["resolved_at"]) > str(previous["resolved_at"]):
+            training_by_market[market_id] = sample
+    training = [
+        sample for market_id, sample in training_by_market.items()
+        if market_id not in conflicting_training_ids
+    ]
+    training.sort(key=lambda row: (str(row["forecast_timestamp"]), str(row["market_id"])))
+
+    resolved_before_now = set()
+    for resolution in resolutions:
+        if not isinstance(resolution, dict):
+            continue
+        market_id = str(resolution.get("market_id") or "").strip()
+        resolved_stamp = _timestamp(resolution.get("resolved_at"))
+        outcome = resolution.get("resolved_yes")
+        if (
+            market_id and resolved_stamp is not None and resolved_stamp < current_stamp
+            and not isinstance(outcome, bool) and outcome in (0, 1)
+        ):
+            resolved_before_now.add(market_id)
+
+    latest_current: dict[str, dict[str, Any]] = {}
+    exclusions = {
+        "invalid_rows": 0,
+        "future_rows": 0,
+        "stale_rows": 0,
+        "already_resolved_markets": 0,
+        "duplicate_market_rows": 0,
+    }
+    for row in feature_rows:
+        if not isinstance(row, dict) or row.get("research_only") is False:
+            exclusions["invalid_rows"] += 1
+            continue
+        market_id = str(row.get("market_id") or "").strip()
+        stamp = _timestamp(row.get("observed_at"))
+        probability = _number(row.get("gamma_yes_probability"))
+        if not market_id or stamp is None or probability is None or not 0.0 <= probability <= 1.0:
+            exclusions["invalid_rows"] += 1
+            continue
+        if stamp > current_stamp + 60.0:
+            exclusions["future_rows"] += 1
+            continue
+        age = max(0.0, current_stamp - stamp)
+        if age > max_feature_age_seconds:
+            exclusions["stale_rows"] += 1
+            continue
+        if market_id in resolved_before_now:
+            exclusions["already_resolved_markets"] += 1
+            continue
+        try:
+            features = extract_model_features(row)
+        except ValueError:
+            exclusions["invalid_rows"] += 1
+            continue
+        candidate = {
+            "market_id": market_id,
+            "question": str(row.get("question") or "Unknown market")[:500],
+            "observed_at": _iso(stamp),
+            "feature_age_seconds": round(age, 1),
+            "market_probability_yes": float(probability),
+            "features": features,
+        }
+        previous = latest_current.get(market_id)
+        if previous is not None:
+            exclusions["duplicate_market_rows"] += 1
+        if previous is None or stamp > _timestamp(previous["observed_at"]):
+            latest_current[market_id] = candidate
+
+    base = {
+        "mode": "CURRENT_FEATURE_MODEL_FORECASTS_V1",
+        "generated_at": current.isoformat(),
+        "status": "insufficient_data",
+        "research_only": True,
+        "execution": "none",
+        "live_execution_enabled": False,
+        "training": {
+            "eligible_unique_markets": len(training),
+            "minimum_training_markets": minimum_training,
+            "labels_resolved_before_forecast_time": True,
+            "conflicting_training_markets_excluded": len(conflicting_training_ids),
+            "latest_training_resolution_at": max(
+                (str(row["resolved_at"]) for row in training), default=None
+            ),
+            "outcome_yes_count": sum(int(row["outcome_yes"]) for row in training),
+            "outcome_no_count": sum(1 - int(row["outcome_yes"]) for row in training),
+        },
+        "current_market_coverage": {
+            "feature_rows_loaded": len(feature_rows),
+            "fresh_unresolved_markets": len(latest_current),
+            "maximum_feature_age_seconds": max_feature_age_seconds,
+            "exclusions": exclusions,
+        },
+        "model": {
+            "type": "regularized_logistic_regression",
+            "l2": l2,
+            "features": list(FEATURE_NAMES),
+            "fit_scope": "all eligible resolved markets known before generated_at",
+        },
+        "forecasts": [],
+        "decision": "NO_ACTION_RESEARCH_ONLY",
+        "warning": (
+            "Model probabilities are exploratory estimates, not verified trading edges. "
+            "They are not calibrated for deployment and do not include an executable-fill or "
+            "market-impact model. No paper or live orders are generated by this endpoint."
+        ),
+    }
+    if len(training) < minimum_training:
+        base["warning"] = (
+            f"Only {len(training)} leakage-safe resolved training markets are available; "
+            f"at least {minimum_training} are required before fitting."
+        )
+        return base
+    if len({int(row["outcome_yes"]) for row in training}) < 2:
+        base["status"] = "insufficient_class_diversity"
+        base["warning"] = "Training labels contain only one outcome class; model fitting was withheld."
+        return base
+    if not latest_current:
+        base["status"] = "model_fitted_no_fresh_markets"
+        return base
+
+    current_rows = sorted(
+        latest_current.values(), key=lambda row: row["market_id"]
+    )
+    train_matrix, current_matrix, transform_metadata = _prepare_matrices(training, current_rows)
+    labels = [int(row["outcome_yes"]) for row in training]
+    intercept, weights, iterations = _fit_logistic(
+        train_matrix, labels, l2=l2
+    )
+    probabilities = _probabilities(current_matrix, intercept, weights)
+    forecasts = []
+    for row, probability in zip(current_rows, probabilities):
+        market_probability = float(row["market_probability_yes"])
+        difference = probability - market_probability
+        forecasts.append({
+            "market_id": row["market_id"],
+            "question": row["question"],
+            "observed_at": row["observed_at"],
+            "feature_age_seconds": row["feature_age_seconds"],
+            "market_probability_yes": round(market_probability, 8),
+            "feature_model_probability_yes": round(probability, 8),
+            "model_minus_market_probability_points": round(difference * 100.0, 4),
+            "absolute_model_disagreement_points": round(abs(difference) * 100.0, 4),
+            "forecast_interpretation": "research_estimate_not_trade_signal",
+        })
+    forecasts.sort(
+        key=lambda row: (-row["absolute_model_disagreement_points"], row["market_id"])
+    )
+    base.update({
+        "status": "model_fitted",
+        "model": {
+            **base["model"],
+            "iterations": iterations,
+            **transform_metadata,
+        },
+        "forecasts": forecasts,
+        "decision": "NO_ACTION_RESEARCH_ONLY",
+    })
+    return base
+
+
+def forecast_current_feature_files(
+    feature_paths: Iterable[str | Path],
+    resolution_paths: Iterable[str | Path],
+    *,
+    now: datetime | None = None,
+    minimum_training: int = 80,
+    max_feature_age_seconds: float = 3600.0,
+    l2: float = 0.25,
+) -> dict[str, Any]:
+    """Load retained research records and produce leakage-safe current forecasts."""
+    return forecast_current_feature_rows(
+        _load_jsonl(feature_paths),
+        _load_jsonl(resolution_paths),
+        now=now,
+        minimum_training=minimum_training,
+        max_feature_age_seconds=max_feature_age_seconds,
+        l2=l2,
+    )
+
+
 def evaluate_feature_files(
     feature_paths: Iterable[str | Path],
     resolution_paths: Iterable[str | Path],

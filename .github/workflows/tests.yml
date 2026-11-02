@@ -50,6 +50,7 @@ jobs:
           curl --silent --show-error --fail http://127.0.0.1:18080/forecast-evaluation > /tmp/paper-forecast-evaluation.json
           curl --silent --show-error --fail http://127.0.0.1:18080/research-features > /tmp/paper-research-features.json
           curl --silent --show-error --fail http://127.0.0.1:18080/independent-model-evaluation > /tmp/paper-independent-model-evaluation.json
+          curl --silent --show-error --fail http://127.0.0.1:18080/model-forecasts > /tmp/paper-model-forecasts.json
           python - <<'PY'
           import json
           from pathlib import Path
@@ -64,6 +65,7 @@ jobs:
           forecast = json.loads(Path("/tmp/paper-forecast-evaluation.json").read_text())
           features = json.loads(Path("/tmp/paper-research-features.json").read_text())
           model_evaluation = json.loads(Path("/tmp/paper-independent-model-evaluation.json").read_text())
+          model_forecasts = json.loads(Path("/tmp/paper-model-forecasts.json").read_text())
           assert "items" in news and "feeds_configured" in news, "news endpoint schema mismatch"
           assert health.get("mode") == "paper_only", "health endpoint must remain paper-only"
           assert health.get("status") in {"healthy", "degraded", "unhealthy"}, "health endpoint status schema mismatch"
@@ -84,5 +86,9 @@ jobs:
           assert model_evaluation.get("mode") == "INDEPENDENT_FEATURE_MODEL_EVALUATION_V1", "independent model endpoint mode mismatch"
           assert model_evaluation.get("status") == "insufficient_data", "empty smoke-test dataset must not fit a model"
           assert model_evaluation.get("research_only") is True and model_evaluation.get("execution") == "none", "model evaluation must remain research-only"
+          assert model_forecasts.get("mode") == "CURRENT_FEATURE_MODEL_FORECASTS_V1", "current model forecasts endpoint mode mismatch"
+          assert model_forecasts.get("status") == "insufficient_data", "empty smoke-test dataset must not fit a model"
+          assert model_forecasts.get("decision") == "NO_ACTION_RESEARCH_ONLY", "current model forecasts must not issue actions"
+          assert model_forecasts.get("live_execution_enabled") is False, "live execution must stay disabled"
           print("Container smoke check passed: /news, /status, /paper, /matches, /market-stream, /resolutions, /forecast-evaluation, /research-features /independent-model-evaluation and /health returned valid JSON.")
           PY

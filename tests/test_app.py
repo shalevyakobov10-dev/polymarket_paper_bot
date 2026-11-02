@@ -524,5 +524,20 @@ class ParserTests(unittest.TestCase):
         self.assertEqual(result["settled_count"], 0)
 
 
+    def test_current_model_forecasts_payload_is_research_only(self):
+        with patch.object(app, "forecast_current_feature_files", return_value={
+            "mode": "CURRENT_FEATURE_MODEL_FORECASTS_V1",
+            "status": "insufficient_data",
+            "research_only": True,
+            "decision": "NO_ACTION_RESEARCH_ONLY",
+            "execution": "none",
+            "live_execution_enabled": False,
+        }) as forecast:
+            payload = app.current_model_forecasts_payload()
+        self.assertEqual(payload["mode"], "CURRENT_FEATURE_MODEL_FORECASTS_V1")
+        self.assertEqual(payload["decision"], "NO_ACTION_RESEARCH_ONLY")
+        self.assertFalse(payload["live_execution_enabled"])
+        forecast.assert_called_once()
+
 if __name__ == "__main__":
     unittest.main()

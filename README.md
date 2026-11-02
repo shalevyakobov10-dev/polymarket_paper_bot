@@ -28,6 +28,7 @@ The service listens on port 8080 by default. Routes:
 - `/forecast-evaluation`: Brier score, log loss, accuracy, calibration bins and Brier skill against the sample base rate for archived pre-resolution Yes prices
 - `/research-features`: latest joined point-in-time market features (Gamma Yes/No prices, public CLOB spread/depth, and timestamp-filtered lexical news matches)
 - `/independent-model-evaluation`: leakage-aware comparison of a regularized feature model against the raw Polymarket probability on a purged chronological holdout
+- `/model-forecasts`: research-only current-market probability estimates from a regularized model trained only on resolved labels available before forecast time; stale rows and unresolved training labels are excluded, and no actions are issued
 
 Environment variables for market selection:
 - `GAMMA_DISCOVERY_LIMIT` (default `400`, bounded to 20–500 active markets fetched for ranking)
@@ -88,6 +89,8 @@ The scorecard reports Brier score, log loss, 50% threshold accuracy, calibration
 **Important:** this first evaluation stage measures the historical calibration of Polymarket's own implied Yes prices. It is not an independent news/sentiment model, it is not evidence of a profitable strategy, and it does not estimate executable trading returns. It currently supports binary Yes/No markets only. Historical samples accumulate only while the research worker is collecting snapshots; resolved markets that were never observed before resolution are excluded. This separation is intentional: first establish a reliable, leak-free baseline before attempting to train or evaluate an independent model.
 
 ## Independent feature-model evaluation
+
+The `/model-forecasts` endpoint is a separate research-only inference layer. It fits only from at least 80 unique historical binary markets whose outcomes were resolved before the forecast timestamp and whose training set contains both classes. It scores fresh unresolved markets only (maximum feature age 60 minutes). Its model-vs-market probability differences are exploratory disagreements, not validated trading edges, and the endpoint always returns `NO_ACTION_RESEARCH_ONLY`.
 
 The `/independent-model-evaluation` endpoint joins `research_features.jsonl` with resolved binary outcomes and selects one point-in-time feature row per market closest to 24 hours before resolution (12-hour tolerance). It compares the raw Gamma Yes probability with a fixed regularized logistic model using the market log-odds, the CLOB midpoint difference, book availability, top-five depth imbalance, log spread, recent lexical news-match count, mean headline keyword overlap, and log 24-hour volume.
 

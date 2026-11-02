@@ -442,6 +442,62 @@ class PaperTraderTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "mark_price"):
             PaperTrader(self.state_path, self.config)
 
+
+    def test_state_loader_validates_new_share_fee_accounting_fields(self):
+        state = self.bot._new_state()
+        state["positions"] = {
+            "token-1": {
+                "shares": 1.9,
+                "gross_shares": 2.0,
+                "entry_fee_shares": 0.1,
+                "entry_fee_collection": "shares",
+                "gross_cost": 1.0,
+                "entry_fee": 0.05,
+                "entry_price": 0.5,
+                "mark_price": 0.5,
+                "opened_at": self.now.isoformat(),
+            }
+        }
+        self.state_path.write_text(json.dumps(state), encoding="utf-8")
+        loaded = PaperTrader(self.state_path, self.config)
+        self.assertEqual(loaded.snapshot()["positions_list"][0]["entry_fee_collection"], "shares")
+
+        state["positions"]["token-1"]["shares"] = 1.95
+        self.state_path.write_text(json.dumps(state), encoding="utf-8")
+        with self.assertRaisesRegex(ValueError, "inconsistent share-fee accounting"):
+            PaperTrader(self.state_path, self.config)
+
+    def test_legacy_position_without_fee_collection_remains_cash_compatible(self):
+        state = self.bot._new_state()
+        state["positions"] = {
+            "legacy-token": {
+                "shares": 2.0,
+                "gross_cost": 1.0,
+                "entry_fee": 0.02,
+                "entry_price": 0.5,
+                "mark_price": 0.5,
+                "opened_at": self.now.isoformat(),
+            }
+        }
+        self.state_path.write_text(json.dumps(state), encoding="utf-8")
+        loaded = PaperTrader(self.state_path, self.config)
+        self.assertEqual(loaded.snapshot()["positions_list"][0]["shares"], 2.0)
+
+    def test_failed_exit_valuation_does_not_remove_open_position(self):
+        bot = PaperTrader(Path(self.temp.name) / "atomic_exit_state.json", self.config)
+        bot.process_snapshot([self.row(0.50)], self.now)
+        opened = bot.process_snapshot(
+            [{**self.row(0.54), "fees_enabled": False}],
+            self.now + timedelta(minutes=5),
+        )["opened"][0]
+        with patch("paper_trading.estimate_taker_fee", return_value={"known": False, "fee": None}):
+            with self.assertRaisesRegex(ValueError, "valid fee estimate"):
+                bot._close_position(
+                    "token-1", 0.6, "test_exit", self.now + timedelta(minutes=10)
+                )
+        self.assertIn("token-1", bot._state["positions"])
+        self.assertEqual(bot._state["positions"]["token-1"]["shares"], opened["shares"])
+
     def test_jsonl_rotation_retains_configured_backups(self):
         target = Path(self.temp.name) / "events.jsonl"
         target.write_text("1234567890", encoding="utf-8")

@@ -476,6 +476,161 @@ def run_backtest(
     }
 
 
+def run_walk_forward_backtest(
+    histories: list[dict[str, Any]],
+    config: PaperConfig,
+    *,
+    folds: int = 5,
+    initial_train_ratio: float = 0.5,
+) -> dict[str, Any]:
+    """Evaluate one fixed paper strategy across expanding, non-overlapping OOS windows.
+
+    Every fold starts with a fresh simulated portfolio. Its only state carried
+    from the past is the latest observed price per token, used to avoid a false
+    first-observation signal. No training P&L, open position, or future price
+    is carried into a test fold.
+    """
+    if isinstance(folds, bool) or not isinstance(folds, int) or not 2 <= folds <= 10:
+        raise ValueError("folds must be an integer between 2 and 10")
+    if not math.isfinite(float(initial_train_ratio)) or not 0.3 <= float(initial_train_ratio) < 0.9:
+        raise ValueError("initial_train_ratio must be between 0.3 and 0.9")
+
+    cleaned: list[dict[str, Any]] = []
+    for row in histories:
+        if not isinstance(row, dict):
+            continue
+        price = number(row.get("observed_price"))
+        try:
+            stamp = int(row.get("timestamp"))
+        except (TypeError, ValueError, OverflowError):
+            continue
+        if price is None or not 0.0 < price < 1.0:
+            continue
+        cleaned.append({**row, "timestamp": stamp, "observed_price": price})
+
+    stamps = sorted({int(row["timestamp"]) for row in cleaned})
+    if len(stamps) < 8:
+        raise ValueError(f"Need at least 8 unique time points; got {len(stamps)}")
+    initial_train_count = int(len(stamps) * float(initial_train_ratio))
+    if initial_train_count < 4:
+        raise ValueError("initial training window must contain at least 4 unique time points")
+    remaining_count = len(stamps) - initial_train_count
+    if remaining_count < folds:
+        raise ValueError("not enough remaining timestamps to create all non-empty test folds")
+
+    # Split the remaining timeline into consecutive, non-overlapping test blocks.
+    base_size, extra = divmod(remaining_count, folds)
+    fold_sizes = [base_size + (1 if index < extra else 0) for index in range(folds)]
+    results: list[dict[str, Any]] = []
+    cursor = initial_train_count
+
+    with tempfile.TemporaryDirectory(prefix="polymarket-walk-forward-") as temp_dir:
+        root = Path(temp_dir)
+        for fold_number, fold_size in enumerate(fold_sizes, start=1):
+            test_stamps = stamps[cursor:cursor + fold_size]
+            cursor += fold_size
+            test_start = test_stamps[0]
+            test_end = test_stamps[-1]
+            train_rows = [row for row in cleaned if int(row["timestamp"]) < test_start]
+            test_rows = [
+                row for row in cleaned
+                if test_start <= int(row["timestamp"]) <= test_end
+            ]
+            if not train_rows or not test_rows:
+                raise ValueError(f"fold {fold_number} produced an empty train or test window")
+
+            latest_by_token: dict[str, dict[str, Any]] = {}
+            for row in train_rows:
+                token_id = str(row.get("token_id") or "")
+                if not token_id:
+                    continue
+                prior = latest_by_token.get(token_id)
+                if prior is None or int(row["timestamp"]) > int(prior["timestamp"]):
+                    latest_by_token[token_id] = row
+            prime_prices = [
+                {**row, "observed_price": float(row["observed_price"])}
+                for row in latest_by_token.values()
+            ]
+            segment = run_segment(
+                test_rows,
+                config,
+                root / f"fold_{fold_number}_state.json",
+                prime_prices=prime_prices,
+                prime_timestamp=utc_from_timestamp(test_start) - timedelta(microseconds=1),
+            )
+            train_stamps = sorted({int(row["timestamp"]) for row in train_rows})
+            results.append({
+                "fold": fold_number,
+                "training_window": {
+                    "start_utc": utc_from_timestamp(train_stamps[0]).isoformat(),
+                    "end_utc": utc_from_timestamp(train_stamps[-1]).isoformat(),
+                    "unique_timestamps": len(train_stamps),
+                    "observations": len(train_rows),
+                },
+                "test_window": {
+                    "start_utc": utc_from_timestamp(test_start).isoformat(),
+                    "end_utc": utc_from_timestamp(test_end).isoformat(),
+                    "unique_timestamps": len(test_stamps),
+                    "observations": len(test_rows),
+                },
+                "out_of_sample": segment,
+                "research_only": True,
+                "execution": "none",
+            })
+
+    returns = [
+        float(value)
+        for fold in results
+        if (value := number(fold["out_of_sample"]["metrics"].get("return_pct"))) is not None
+    ]
+    sorted_returns = sorted(returns)
+    median_return = None
+    if sorted_returns:
+        middle = len(sorted_returns) // 2
+        median_return = (
+            sorted_returns[middle]
+            if len(sorted_returns) % 2
+            else (sorted_returns[middle - 1] + sorted_returns[middle]) / 2.0
+        )
+    total_closed = sum(int(fold["out_of_sample"]["positions_closed"]) for fold in results)
+    total_opened = sum(int(fold["out_of_sample"]["positions_opened"]) for fold in results)
+    total_observations = sum(int(fold["test_window"]["observations"]) for fold in results)
+    warnings = []
+    if total_closed == 0:
+        warnings.append("No positions closed across the walk-forward test folds; return consistency is not established.")
+    if total_opened == 0:
+        warnings.append("No simulated positions opened across the walk-forward test folds.")
+
+    return {
+        "mode": "EXPANDING_WALK_FORWARD_PAPER_BACKTEST",
+        "fold_count": folds,
+        "initial_train_ratio": float(initial_train_ratio),
+        "strategy_fixed_across_folds": True,
+        "test_windows_non_overlapping": True,
+        "portfolio_reset_each_fold": True,
+        "folds": results,
+        "aggregate_out_of_sample": {
+            "folds_with_return_metric": len(returns),
+            "mean_fold_return_pct": round(sum(returns) / len(returns), 5) if returns else None,
+            "median_fold_return_pct": round(median_return, 5) if median_return is not None else None,
+            "profitable_fold_rate_pct": round(100 * sum(value > 0 for value in returns) / len(returns), 3) if returns else None,
+            "total_test_observations": total_observations,
+            "positions_opened": total_opened,
+            "positions_closed": total_closed,
+        },
+        "warnings": warnings,
+        "methodology": [
+            "Expanding chronological training history with consecutive, non-overlapping out-of-sample test windows.",
+            "The strategy configuration is fixed before all folds; no fold is used to select parameters.",
+            "Each test fold uses a fresh paper portfolio and is primed only with the last pre-test price per token.",
+            "Fold returns are equal-weight descriptive summaries, not a compounded portfolio return.",
+            "Observed candles do not reproduce historical order-book depth, exact fills, or market-resolution payouts.",
+        ],
+        "research_only": True,
+        "execution": "none",
+    }
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Read-only historical Polymarket paper backtest")
     parser.add_argument("--tokens", nargs="+", help="Explicit CLOB token IDs; if omitted, discover liquid active markets")
@@ -493,6 +648,9 @@ def main() -> int:
     parser.add_argument("--fee-rate", type=float, default=0.0)
     parser.add_argument("--sensitivity", action="store_true", help="Compare predeclared signal thresholds on the same history window")
     parser.add_argument("--cost-sensitivity", action="store_true", help="Stress-test predeclared fee and slippage assumptions on the same history")
+    parser.add_argument("--walk-forward", action="store_true", help="Run expanding chronological out-of-sample paper evaluation")
+    parser.add_argument("--walk-forward-folds", type=int, default=5, help="Number of non-overlapping walk-forward test windows (2–10; default: 5)")
+    parser.add_argument("--walk-forward-initial-train-ratio", type=float, default=0.5, help="Initial history share used before the first walk-forward test window (default: 0.5)")
     args = parser.parse_args()
 
     if args.days < 1 or args.days > 365:
@@ -544,6 +702,13 @@ def main() -> int:
         thresholds = tuple(sorted({0.005, 0.01, 0.02, 0.03, args.signal_delta}))
         report["threshold_sensitivity"] = run_threshold_sensitivity(histories, config, args.train_ratio, thresholds)
         report["sensitivity_note"] = "Exploratory threshold comparison on one sample; do not choose a threshold from holdout results and treat that same holdout as untouched. Validate selected settings on a later forward paper period."
+    if args.walk_forward:
+        report["walk_forward_evaluation"] = run_walk_forward_backtest(
+            histories,
+            config,
+            folds=args.walk_forward_folds,
+            initial_train_ratio=args.walk_forward_initial_train_ratio,
+        )
     if args.cost_sensitivity:
         report["execution_cost_sensitivity"] = run_execution_cost_sensitivity(histories, config, args.train_ratio)
         report["execution_cost_sensitivity_note"] = (

@@ -38,13 +38,25 @@ class PaperFeeTests(unittest.TestCase):
         self.assertAlmostEqual(lower_price["fee"], 1.47)
         self.assertAlmostEqual(upper_price["fee"], 1.47)
 
-    def test_fee_rounding_uses_five_decimal_precision_and_minimum(self):
+    def test_fee_rounding_uses_decimal_half_up_without_forcing_a_minimum(self):
         model = resolve_taker_fee_model({
             "feesEnabled": True, "feeSchedule": {"rate": 0.00001, "exponent": 1},
         })
-        fee = estimate_taker_fee(model, shares=1, price=0.5)
-        self.assertEqual(fee["fee"], 0.00001)
-        self.assertEqual(fee["mode"], "polymarket_taker_curve")
+        below_half_unit = estimate_taker_fee(model, shares=1, price=0.5)
+        exact_half_unit = estimate_taker_fee(model, shares=2, price=0.5)
+        self.assertEqual(below_half_unit["fee"], 0.0)
+        self.assertEqual(exact_half_unit["fee"], 0.00001)
+        self.assertEqual(exact_half_unit["collection_method"], "shares_on_buy_usdc_on_sell")
+        self.assertEqual(exact_half_unit["mode"], "polymarket_taker_curve")
+
+    def test_invalid_explicit_notional_is_rejected_not_silently_replaced(self):
+        model = resolve_taker_fee_model({
+            "feesEnabled": True, "feeSchedule": {"rate": 0.07, "exponent": 1},
+        })
+        with self.assertRaises(ValueError):
+            estimate_taker_fee(model, shares=10, price=0.5, notional=float("nan"))
+        with self.assertRaises(ValueError):
+            estimate_taker_fee(model, shares=True, price=0.5)
 
     def test_enabled_market_without_schedule_is_unknown_not_silently_free(self):
         model = resolve_taker_fee_model({"feesEnabled": True}, fallback_rate=0.0)
@@ -67,14 +79,14 @@ class PaperFeeTests(unittest.TestCase):
         self.assertEqual(model["mode"], "legacy_flat_rate_fallback")
         self.assertAlmostEqual(fee["fee"], 0.05)
 
-    def test_cash_reserve_uses_market_fee_curve_maximum_at_low_price(self):
+    def test_buy_side_curve_fee_does_not_reserve_usdc_cash(self):
         model = resolve_taker_fee_model({
             "feesEnabled": True, "feeSchedule": {"rate": 0.07, "exponent": 1},
         })
         reserve_at_30c = conservative_fee_fraction_of_notional(model, lowest_price=0.3)
         reserve_at_70c = conservative_fee_fraction_of_notional(model, lowest_price=0.7)
-        self.assertAlmostEqual(reserve_at_30c, 0.049)
-        self.assertAlmostEqual(reserve_at_70c, 0.021)
+        self.assertEqual(reserve_at_30c, 0.0)
+        self.assertEqual(reserve_at_70c, 0.0)
 
     def test_rejects_bad_inputs(self):
         model = resolve_taker_fee_model({

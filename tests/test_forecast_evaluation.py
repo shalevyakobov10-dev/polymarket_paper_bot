@@ -54,6 +54,29 @@ class ForecastEvaluationTests(unittest.TestCase):
         result = normalize_binary_resolution(self.market(False))
         self.assertEqual(result["resolved_yes"], 0)
 
+
+    def test_rejects_nearly_decisive_prices_that_are_not_final_payouts(self):
+        near_final = {**self.market(), "outcomePrices": '["0.99","0.01"]'}
+        self.assertIsNone(normalize_binary_resolution(near_final))
+
+    def test_rejects_proposed_disputed_and_unknown_uma_states(self):
+        for status in ("proposed", "requested", "disputed", "unknown"):
+            with self.subTest(status=status):
+                self.assertIsNone(normalize_binary_resolution({
+                    **self.market(), "umaResolutionStatus": status,
+                }))
+        accepted = normalize_binary_resolution({
+            **self.market(), "umaResolutionStatus": "resolved",
+        })
+        self.assertIsNotNone(accepted)
+        self.assertEqual(accepted["resolution_status"], "resolved")
+
+    def test_rejects_scheduled_end_date_as_resolution_timestamp(self):
+        scheduled_only = {**self.market()}
+        scheduled_only.pop("closedTime")
+        scheduled_only["endDate"] = self.resolved_at.isoformat()
+        self.assertIsNone(normalize_binary_resolution(scheduled_only))
+
     def test_rejects_open_nonbinary_and_unresolved_markets(self):
         open_market = {**self.market(), "closed": False}
         self.assertIsNone(normalize_binary_resolution(open_market))

@@ -71,17 +71,32 @@ def normalize_binary_resolution(market: dict[str, Any]) -> dict[str, Any] | None
     no_price = _number(prices[no_index])
     if yes_price is None or no_price is None:
         return None
-    if not (0.99 <= yes_price <= 1.0 and 0.0 <= no_price <= 0.01):
-        if not (0.99 <= no_price <= 1.0 and 0.0 <= yes_price <= 0.01):
-            return None
+
+    # Do not turn a nearly-resolved market (for example 0.99 / 0.01) into
+    # a definitive $1/$0 settlement. The final binary payout must be exact.
+    if (yes_price, no_price) == (1.0, 0.0):
+        resolved_yes = 1
+    elif (yes_price, no_price) == (0.0, 1.0):
+        resolved_yes = 0
+    else:
+        return None
+
+    # If UMA lifecycle metadata exists, reject proposed/requested/disputed or
+    # unknown states. Legacy markets without the field still require exact
+    # binary final prices and a real close timestamp.
+    raw_status = market.get("umaResolutionStatus", market.get("resolutionStatus"))
+    resolution_status = str(raw_status or "").strip().casefold()
+    if resolution_status and resolution_status not in {"resolved", "settled"}:
+        return None
 
     market_id = str(market.get("conditionId") or market.get("id") or "").strip()
     if not market_id:
         return None
-    resolved_at_raw = market.get("closedTime") or market.get("endDate") or market.get("endDateIso")
+    resolved_at_raw = market.get("closedTime") or market.get("umaEndDate")
     resolved_at = _timestamp(resolved_at_raw)
     if resolved_at is None:
         return None
+    resolved_at_source = "closedTime" if market.get("closedTime") else "umaEndDate"
     yes_token_id = str(tokens[yes_index]).strip() if yes_index < len(tokens) else ""
     return {
         "market_id": market_id,
@@ -89,9 +104,10 @@ def normalize_binary_resolution(market: dict[str, Any]) -> dict[str, Any] | None
         "slug": str(market.get("slug") or ""),
         "question": str(market.get("question") or "Unknown market")[:500],
         "yes_token_id": yes_token_id,
-        "resolved_yes": 1 if yes_price >= 0.99 else 0,
+        "resolved_yes": resolved_yes,
         "resolved_at": datetime.fromtimestamp(resolved_at, tz=timezone.utc).isoformat(),
-        "resolved_at_source": "closedTime" if market.get("closedTime") else "endDate",
+        "resolved_at_source": resolved_at_source,
+        "resolution_status": resolution_status or "legacy_exact_binary_closed",
         "resolution_source": str(market.get("resolutionSource") or ""),
         "source": "public_gamma_resolved_market",
         "research_only": True,

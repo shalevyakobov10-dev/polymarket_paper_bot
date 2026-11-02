@@ -46,12 +46,52 @@ class OrderBookTests(unittest.TestCase):
 
     def test_batch_fetch_is_bounded_and_deduplicated(self):
         rows = [{"token_id": "a"}, {"token_id": "a"}, {"token_id": "b"}, {"token_id": "c"}]
-        with patch.dict("os.environ", {"ORDERBOOK_TOKENS_PER_POLL": "2"}):
+        with patch.dict("os.environ", {
+            "ORDERBOOK_TOKENS_PER_POLL": "2",
+            "ORDERBOOK_FETCH_WORKERS": "2",
+        }):
             with patch.object(market_data, "fetch_order_book", side_effect=lambda token: {"token_id": token}) as fetch:
-                with patch.object(market_data.time, "sleep"):
-                    result = market_data.fetch_order_books(rows)
+                result = market_data.fetch_order_books(rows)
         self.assertEqual(list(result), ["a", "b"])
         self.assertEqual(fetch.call_count, 2)
+
+    def test_batch_fetch_isolates_failures_without_dropping_other_books(self):
+        def fetch(token):
+            if token == "b":
+                raise TimeoutError("slow CLOB response")
+            return {"token_id": token, "book_usable": True}
+
+        rows = [{"token_id": "a"}, {"token_id": "b"}, {"token_id": "c"}]
+        with patch.dict("os.environ", {
+            "ORDERBOOK_TOKENS_PER_POLL": "3",
+            "ORDERBOOK_FETCH_WORKERS": "2",
+        }):
+            with patch.object(market_data, "fetch_order_book", side_effect=fetch):
+                result = market_data.fetch_order_books(rows)
+        self.assertEqual(list(result), ["a", "b", "c"])
+        self.assertTrue(result["a"]["book_usable"])
+        self.assertFalse(result["b"]["book_usable"])
+        self.assertIn("TimeoutError", result["b"]["error"])
+        self.assertTrue(result["c"]["book_usable"])
+
+    def test_batch_fetch_caps_worker_setting(self):
+        rows = [{"token_id": str(index)} for index in range(10)]
+        captured = {}
+        original_executor = market_data.ThreadPoolExecutor
+
+        def executor_spy(*, max_workers, thread_name_prefix):
+            captured["max_workers"] = max_workers
+            return original_executor(max_workers=max_workers, thread_name_prefix=thread_name_prefix)
+
+        with patch.dict("os.environ", {
+            "ORDERBOOK_TOKENS_PER_POLL": "10",
+            "ORDERBOOK_FETCH_WORKERS": "999",
+        }):
+            with patch.object(market_data, "ThreadPoolExecutor", side_effect=executor_spy):
+                with patch.object(market_data, "fetch_order_book", side_effect=lambda token: {"token_id": token}):
+                    result = market_data.fetch_order_books(rows)
+        self.assertEqual(captured["max_workers"], 8)
+        self.assertEqual(len(result), 10)
 
 
 if __name__ == "__main__":

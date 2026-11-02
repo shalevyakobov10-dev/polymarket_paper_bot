@@ -4,7 +4,7 @@ from __future__ import annotations
 import json
 import math
 import os
-import time
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from typing import Any
 from urllib.error import HTTPError, URLError
@@ -96,14 +96,23 @@ def fetch_order_book(token_id: str, *, timeout: float = 8.0) -> dict[str, Any]:
 
 
 def fetch_order_books(rows: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
-    """Fetch a bounded number of unique token books and isolate per-token failures."""
-    try:
-        limit = int(os.getenv("ORDERBOOK_TOKENS_PER_POLL", "20"))
-    except (TypeError, ValueError):
-        limit = 20
-    limit = min(100, max(0, limit))
+    """Fetch a bounded batch concurrently while isolating per-token failures.
+
+    Concurrency is deliberately capped to avoid turning a polling cycle into an
+    unbounded burst against the public CLOB API. Result keys retain input token
+    order even when requests complete out of order.
+    """
+    def bounded_env(name: str, default: int, minimum: int, maximum: int) -> int:
+        try:
+            value = int(os.getenv(name, str(default)))
+        except (TypeError, ValueError):
+            value = default
+        return min(maximum, max(minimum, value))
+
+    limit = bounded_env("ORDERBOOK_TOKENS_PER_POLL", 20, 0, 100)
     if limit == 0:
         return {}
+    workers = bounded_env("ORDERBOOK_FETCH_WORKERS", 4, 1, 8)
     tokens = []
     seen = set()
     for row in rows:
@@ -113,12 +122,15 @@ def fetch_order_books(rows: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
             tokens.append(token)
         if len(tokens) >= limit:
             break
-    results: dict[str, dict[str, Any]] = {}
-    for token in tokens:
+
+    def fetch_one(token: str) -> tuple[str, dict[str, Any]]:
         try:
-            results[token] = fetch_order_book(token)
+            result = fetch_order_book(token)
+            if not isinstance(result, dict):
+                raise ValueError("CLOB order-book fetch returned a non-object result")
+            return token, result
         except (HTTPError, URLError, TimeoutError, ValueError, RuntimeError, OSError) as exc:
-            results[token] = {
+            return token, {
                 "token_id": token,
                 "observed_at": None,
                 "book_usable": False,
@@ -128,7 +140,7 @@ def fetch_order_books(rows: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
                 "execution": "none",
             }
         except Exception as exc:
-            results[token] = {
+            return token, {
                 "token_id": token,
                 "observed_at": None,
                 "book_usable": False,
@@ -137,5 +149,11 @@ def fetch_order_books(rows: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
                 "research_only": True,
                 "execution": "none",
             }
-        time.sleep(0.05)
-    return results
+
+    completed: dict[str, dict[str, Any]] = {}
+    with ThreadPoolExecutor(max_workers=min(workers, len(tokens)), thread_name_prefix="clob-book") as pool:
+        futures = [pool.submit(fetch_one, token) for token in tokens]
+        for future in futures:
+            token, result = future.result()
+            completed[token] = result
+    return {token: completed[token] for token in tokens}

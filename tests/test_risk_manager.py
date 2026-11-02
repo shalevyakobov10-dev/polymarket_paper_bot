@@ -57,6 +57,16 @@ class PaperRiskManagerTests(unittest.TestCase):
         self.assertEqual(self.evaluate(price=1.0).reason, "price_outside_entry_range")
         self.assertEqual(self.evaluate(cash=float("nan")).reason, "invalid_risk_input")
 
+    def test_rejects_boolean_and_string_values_in_numeric_risk_inputs(self):
+        self.assertEqual(self.evaluate(cash=True).reason, "invalid_risk_input")
+        self.assertEqual(self.evaluate(requested_notional="2.0").reason, "invalid_risk_input")
+        self.assertEqual(self.evaluate(fee_rate=0.5).reason, "invalid_risk_input")
+        self.assertEqual(self.evaluate(fee_rate=float("inf")).reason, "invalid_risk_input")
+
+    def test_rejects_boolean_position_counters(self):
+        self.assertEqual(self.evaluate(open_positions=True).reason, "invalid_position_count")
+        self.assertEqual(self.evaluate(max_open_positions=True).reason, "invalid_position_count")
+
 
 if __name__ == "__main__":
     unittest.main()

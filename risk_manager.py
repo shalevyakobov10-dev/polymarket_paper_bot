@@ -21,6 +21,8 @@ class RiskDecision:
 
 
 def _finite(value: float) -> bool:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return False
     try:
         return math.isfinite(float(value))
     except (TypeError, ValueError, OverflowError):
@@ -63,6 +65,8 @@ def evaluate_paper_entry(
         return reject("invalid_risk_input")
     if not _finite(daily_realized_pnl) or not _finite(open_unrealized_pnl):
         return reject("invalid_risk_input")
+    if float(fee_rate) >= 0.5 or float(daily_loss_limit_usd) <= 0.0:
+        return reject("invalid_risk_input")
     # The daily stop takes priority over capacity checks and includes both
     # closed P&L and currently marked open P&L.
     daily_pnl = float(daily_realized_pnl) + float(open_unrealized_pnl)
@@ -70,7 +74,10 @@ def evaluate_paper_entry(
         return reject("daily_loss_limit_reached")
     if opposing_market_outcome_open:
         return reject("opposing_outcome_already_open")
-    if not isinstance(open_positions, int) or not isinstance(max_open_positions, int):
+    if (
+        isinstance(open_positions, bool) or not isinstance(open_positions, int)
+        or isinstance(max_open_positions, bool) or not isinstance(max_open_positions, int)
+    ):
         return reject("invalid_position_count")
     if open_positions < 0 or max_open_positions < 1:
         return reject("invalid_position_count")

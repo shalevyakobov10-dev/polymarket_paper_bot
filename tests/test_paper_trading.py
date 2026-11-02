@@ -395,6 +395,45 @@ class PaperTraderTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             PaperTrader(self.state_path, self.config)
 
+
+    def test_state_loader_rejects_nonstandard_nonfinite_numbers(self):
+        self.state_path.write_text(
+            '{"schema_version":1,"cash":NaN,"starting_cash":100,"positions":{},'
+            '"last_prices":{},"realized_pnl":0}',
+            encoding="utf-8",
+        )
+        with self.assertRaisesRegex(ValueError, "Non-standard JSON numeric constant"):
+            PaperTrader(self.state_path, self.config)
+
+    def test_state_loader_rejects_negative_cash_and_invalid_last_price(self):
+        state = self.bot._new_state()
+        state["cash"] = -1.0
+        self.state_path.write_text(json.dumps(state), encoding="utf-8")
+        with self.assertRaisesRegex(ValueError, "cash"):
+            PaperTrader(self.state_path, self.config)
+
+        state["cash"] = 100.0
+        state["last_prices"] = {"token-1": 1.0}
+        self.state_path.write_text(json.dumps(state), encoding="utf-8")
+        with self.assertRaisesRegex(ValueError, "last price"):
+            PaperTrader(self.state_path, self.config)
+
+    def test_state_loader_rejects_malformed_open_position(self):
+        state = self.bot._new_state()
+        state["positions"] = {
+            "token-1": {
+                "shares": 2.0,
+                "gross_cost": 2.0,
+                "entry_fee": 0.0,
+                "entry_price": 0.5,
+                "mark_price": float("nan"),
+                "opened_at": self.now.isoformat(),
+            }
+        }
+        self.state_path.write_text(json.dumps(state), encoding="utf-8")
+        with self.assertRaisesRegex(ValueError, "mark_price"):
+            PaperTrader(self.state_path, self.config)
+
     def test_jsonl_rotation_retains_configured_backups(self):
         target = Path(self.temp.name) / "events.jsonl"
         target.write_text("1234567890", encoding="utf-8")

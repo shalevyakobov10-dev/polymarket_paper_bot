@@ -24,7 +24,7 @@ The service listens on port 8080 by default. Routes:
 - `/paper`: simulated portfolio and performance metrics
 - `/news`: recent attributed news headlines, source links, feed health, and collection status
 - `/matches`: recent headline-to-market keyword-overlap candidates; not probabilities or trade instructions
-- `/resolutions`: health and ingestion counts for public resolved binary markets, plus counts of definitive settlements in the simulated paper ledger
+- `/resolutions`: health and ingestion counts for public resolved binary markets, simulated settlement counts, and explicit warnings/market IDs when conflicting or invalid resolution evidence is withheld from the paper ledger
 - `/forecast-evaluation`: Brier score, log loss, accuracy, calibration bins and Brier skill against the sample base rate for archived pre-resolution Yes prices
 - `/research-features`: latest joined point-in-time market features (Gamma Yes/No prices, public CLOB spread/depth, and timestamp-filtered lexical news matches)
 - `/independent-model-evaluation`: leakage-aware comparison of a regularized feature model against the raw Polymarket probability on a purged chronological holdout

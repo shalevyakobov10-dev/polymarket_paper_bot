@@ -632,6 +632,7 @@ def health_payload(
     news_snapshot: dict | None = None,
     stream_snapshot: dict | None = None,
     resolution_snapshot: dict | None = None,
+    gdelt_snapshot: dict | None = None,
 ) -> tuple[bool, dict]:
     """Report core market readiness and separately expose optional collector degradation."""
     current = now or datetime.now(timezone.utc)
@@ -674,6 +675,19 @@ def health_payload(
             last_error=resolution_snapshot.get("last_error"),
         )
 
+    if gdelt_snapshot is not None:
+        gdelt_component = _health_component(
+            name="gdelt",
+            worker_running=bool(news_snapshot and news_snapshot.get("worker_running")),
+            last_success_at=gdelt_snapshot.get("last_success_at"),
+            stale_after_seconds=news_stale_after,
+            now=current,
+            last_error=gdelt_snapshot.get("last_error"),
+        )
+        gdelt_component["items_total_recent"] = int(gdelt_snapshot.get("items_total_recent") or 0)
+        gdelt_component["query_window"] = gdelt_snapshot.get("query_window")
+        components["gdelt"] = gdelt_component
+
     if stream_snapshot is not None:
         stream_worker_running = bool(stream_snapshot.get("worker_running"))
         stream_last_connect = stream_snapshot.get("last_connect_at")
@@ -706,7 +720,7 @@ def health_payload(
         "last_error": snapshot.get("last_error"),
         "components": components,
         "degraded_components": degraded,
-        "health_policy": "market_data_is_required; news_resolution_and_stream_are_reported_as_optional_degraded_components",
+        "health_policy": "market_data_is_required; news_gdelt_resolution_and_stream_are_reported_as_optional_degraded_components",
     }
     if not healthy and not payload["last_error"]:
         payload["last_error"] = "No recent successful market poll"
@@ -832,6 +846,7 @@ class Handler(BaseHTTPRequestHandler):
             if self.path == "/health":
                 with _news_lock:
                     news_snapshot = dict(_news_state)
+                    gdelt_snapshot = dict(_gdelt_state)
                 with _lock:
                     stream_snapshot = dict(_market_stream_state)
                     resolution_snapshot = dict(_resolution_state)
@@ -840,6 +855,7 @@ class Handler(BaseHTTPRequestHandler):
                     news_snapshot=news_snapshot,
                     stream_snapshot=stream_snapshot,
                     resolution_snapshot=resolution_snapshot,
+                    gdelt_snapshot=gdelt_snapshot,
                 )
                 self._send(200 if healthy else 503, payload)
             elif self.path == "/paper":

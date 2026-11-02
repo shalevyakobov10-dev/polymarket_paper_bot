@@ -232,9 +232,16 @@ class ParserTests(unittest.TestCase):
             "last_success_at": None,
             "last_error": None,
         }
+        gdelt = {
+            "last_success_at": (now - timedelta(hours=3)).isoformat(),
+            "last_error": "GDELT request timed out",
+            "items_total_recent": 0,
+            "query_window": "last_1_hour",
+        }
         healthy, payload = app.health_payload(
             core, now, news_snapshot=news,
             stream_snapshot=stream, resolution_snapshot=resolutions,
+            gdelt_snapshot=gdelt,
         )
         self.assertTrue(healthy)
         self.assertTrue(payload["ok"])
@@ -243,7 +250,12 @@ class ParserTests(unittest.TestCase):
         self.assertEqual(payload["components"]["news"]["status"], "stale")
         self.assertEqual(payload["components"]["market_stream"]["status"], "disconnected")
         self.assertEqual(payload["components"]["resolutions"]["status"], "stopped")
-        self.assertEqual(payload["degraded_components"], ["news", "resolutions", "market_stream"])
+        self.assertEqual(payload["components"]["gdelt"]["status"], "stale")
+        self.assertEqual(payload["components"]["gdelt"]["items_total_recent"], 0)
+        self.assertEqual(
+            payload["degraded_components"],
+            ["news", "resolutions", "gdelt", "market_stream"],
+        )
 
     def test_health_rejects_future_and_invalid_component_timestamps(self):
         now = datetime(2026, 10, 25, 12, tzinfo=timezone.utc)

@@ -482,7 +482,40 @@ class PaperTrader:
         entry_price = entry_reference_price * (1.0 + self.config.simulated_slippage)
         if entry_price >= 1.0:
             return None, "slippage_makes_entry_price_invalid"
-        shares = spend / entry_price
+        gross_shares = spend / entry_price
+        entry_fee_details = estimate_taker_fee(
+            fee_model,
+            shares=gross_shares,
+            price=entry_price,
+            notional=spend,
+        )
+        if not entry_fee_details.get("known"):
+            return None, "entry_fee_estimate_unavailable"
+        entry_fee = float(entry_fee_details["fee"])
+        if fee_model.get("mode") == "polymarket_taker_curve":
+            # Polymarket deducts taker fees in shares on buys. Convert the
+            # USDC-denominated fee equivalent to shares at the execution price.
+            entry_fee_shares = entry_fee / entry_price if entry_price > 0 else 0.0
+            shares = gross_shares - entry_fee_shares
+            entry_fee_collection = "shares"
+            cash_entry_fee = 0.0
+        elif fee_model.get("mode") == "legacy_flat_rate_fallback":
+            # Explicit legacy fallback is a cash assumption, not a claimed
+            # reproduction of Polymarket's market-specific fee settlement.
+            entry_fee_shares = 0.0
+            shares = gross_shares
+            entry_fee_collection = "cash"
+            cash_entry_fee = entry_fee
+        else:
+            entry_fee_shares = 0.0
+            shares = gross_shares
+            entry_fee_collection = "none"
+            cash_entry_fee = 0.0
+        if shares <= 0.0:
+            return None, "entry_fee_exceeds_gross_shares"
+        if spend + cash_entry_fee > available_cash + 1e-8:
+            return None, "insufficient_cash_after_market_fee"
+
         if market_quality.get("reason") == "approved_market_quality":
             initial_mark_fill_details = simulate_orderbook_fill(
                 row.get("orderbook"), side="sell", target_shares=shares
@@ -493,17 +526,6 @@ class PaperTrader:
             else:
                 initial_mark_price = observed_price
                 initial_mark_source = "gamma_outcome_price_fallback_insufficient_bid_depth"
-        entry_fee_details = estimate_taker_fee(
-            fee_model,
-            shares=shares,
-            price=entry_price,
-            notional=spend,
-        )
-        if not entry_fee_details.get("known"):
-            return None, "entry_fee_estimate_unavailable"
-        entry_fee = float(entry_fee_details["fee"])
-        if spend + entry_fee > available_cash + 1e-8:
-            return None, "insufficient_cash_after_market_fee"
         position = {
             "token_id": key,
             "market_id": str(row.get("market_id") or ""),
@@ -516,7 +538,10 @@ class PaperTrader:
             "entry_price": round(entry_price, 8),
             "mark_price": round(initial_mark_price, 8),
             "mark_source": initial_mark_source,
+            "gross_shares": round(gross_shares, 12),
             "shares": round(shares, 12),
+            "entry_fee_shares": round(entry_fee_shares, 12),
+            "entry_fee_collection": entry_fee_collection,
             "gross_cost": round(spend, 8),
             "entry_fee": round(entry_fee, 8),
             "fee_model": fee_model,
@@ -531,7 +556,7 @@ class PaperTrader:
         position["unrealized_pnl"] = round(
             self._position_unrealized(position, initial_mark_price), 8
         )
-        self._state["cash"] = round(available_cash - spend - entry_fee, 8)
+        self._state["cash"] = round(available_cash - spend - cash_entry_fee, 8)
         self._state["total_fees"] = round(self._state["total_fees"] + entry_fee, 8)
         positions[key] = position
         return {"event_type": "position_opened", "timestamp": iso_time(now), **copy.deepcopy(position)}, ""
@@ -574,10 +599,14 @@ class PaperTrader:
             price=exit_price,
             notional=gross_proceeds,
         )
+        entry_fee_cash_cost = (
+            0.0 if position.get("entry_fee_collection") == "shares"
+            else float(position.get("entry_fee", 0.0))
+        )
         if not fee_details.get("known"):
-            return -float(position["gross_cost"]) - float(position["entry_fee"])
+            return -float(position["gross_cost"]) - entry_fee_cash_cost
         net_proceeds = gross_proceeds - float(fee_details["fee"])
-        return net_proceeds - float(position["gross_cost"]) - float(position["entry_fee"])
+        return net_proceeds - float(position["gross_cost"]) - entry_fee_cash_cost
 
     def _close_position(
         self,
@@ -603,7 +632,11 @@ class PaperTrader:
             raise ValueError("Cannot close paper position without a valid fee estimate")
         exit_fee = float(exit_fee_details["fee"])
         net_proceeds = gross_proceeds - exit_fee
-        pnl = net_proceeds - float(position["gross_cost"]) - float(position["entry_fee"])
+        entry_fee_cash_cost = (
+            0.0 if position.get("entry_fee_collection") == "shares"
+            else float(position.get("entry_fee", 0.0))
+        )
+        pnl = net_proceeds - float(position["gross_cost"]) - entry_fee_cash_cost
         self._state["cash"] = round(float(self._state["cash"]) + net_proceeds, 8)
         self._state["realized_pnl"] = round(float(self._state["realized_pnl"]) + pnl, 8)
         self._state["daily_realized_pnl"] = round(float(self._state["daily_realized_pnl"]) + pnl, 8)
@@ -628,6 +661,9 @@ class PaperTrader:
             "exit_price_after_slippage": round(exit_price, 8),
             "exit_fill_details": fill_details,
             "shares": position["shares"],
+            "gross_shares": position.get("gross_shares", position["shares"]),
+            "entry_fee_shares": position.get("entry_fee_shares", 0.0),
+            "entry_fee_collection": position.get("entry_fee_collection", "cash"),
             "gross_cost": position["gross_cost"],
             "entry_fee": position["entry_fee"],
             "exit_fee": round(exit_fee, 8),

@@ -71,8 +71,13 @@ def _published_time(value: Any) -> str:
         return ""
 
 
-def normalize_gdelt_articles(payload: dict[str, Any], fetched_at: str | None = None) -> list[dict[str, str]]:
-    """Normalize article metadata; GDELT indexing is not independent event verification."""
+def normalize_gdelt_articles(
+    payload: dict[str, Any],
+    fetched_at: str | None = None,
+    *,
+    topic_category: str | None = None,
+) -> list[dict[str, Any]]:
+    """Normalize attributed article metadata and the query lane that found it."""
     if not isinstance(payload, dict):
         raise ValueError("GDELT response must be a JSON object")
     articles = payload.get("articles")
@@ -102,6 +107,7 @@ def normalize_gdelt_articles(payload: dict[str, Any], fetched_at: str | None = N
             "published_at": _published_time(article.get("seendate")),
             "fetched_at": observed_at,
             "indexing_source": "GDELT DOC 2.0",
+            "topic_categories": [str(topic_category)[:80]] if topic_category else [],
             "interpretation": "aggregated_media_coverage_not_event_verification",
             "research_only": "true",
             "execution": "none",
@@ -115,7 +121,9 @@ class GDELTCollector:
     def __init__(self, log_path: str | Path) -> None:
         self.log_path = Path(log_path)
         self.seen_ids: set[str] = set()
-        self.items: list[dict[str, str]] = []
+        self.items: list[dict[str, Any]] = []
+        self._topic_queries = _configured_topics()
+        self._topic_cursor = 0
         self._load_existing()
 
     def _load_existing(self) -> None:
@@ -136,7 +144,7 @@ class GDELTCollector:
                         if isinstance(item, dict) and item.get("id"):
                             item_id = str(item["id"])
                             self.seen_ids.add(item_id)
-                            self.items.append({str(k): str(v) for k, v in item.items()})
+                            self.items.append(dict(item))
             except OSError:
                 continue
         self.items = self.items[-500:]

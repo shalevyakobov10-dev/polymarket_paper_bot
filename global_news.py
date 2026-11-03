@@ -31,6 +31,14 @@ DEFAULT_TOPIC_QUERIES = (
     ("sports", '(football OR soccer OR basketball OR tennis OR cricket OR Olympics OR FIFA OR championship OR tournament)'),
     ("science_space", '(NASA OR spaceflight OR astronomy OR "scientific discovery" OR research OR physics OR "space mission")'),
     ("entertainment_culture", '(movie OR film OR music OR celebrity OR actor OR "award ceremony" OR gaming OR "video game")'),
+    ("law_regulation", '("court ruling" OR lawsuit OR regulation OR antitrust OR legislation OR "supreme court" OR investigation OR regulator)'),
+    ("transport_logistics", '(airline OR airport OR shipping OR port OR freight OR railway OR logistics OR vessel)'),
+    ("agriculture_food", '(harvest OR crop OR "food prices" OR agriculture OR livestock OR fertilizer OR "food supply" OR "food safety")'),
+    ("labor_employment", '(unemployment OR wage OR strike OR union OR "labor market" OR hiring OR employment OR pension)'),
+    ("education_policy", '(school OR university OR tuition OR "education policy" OR student OR exam OR "research funding")'),
+    ("consumer_retail", '(retail OR "consumer spending" OR "e-commerce" OR supermarket OR "consumer confidence" OR "product recall")'),
+    ("migration_demographics", '(migration OR immigration OR refugee OR population OR census OR "border crossing")'),
+    ("infrastructure_utilities", '("power grid" OR "water supply" OR infrastructure OR blackout OR "nuclear plant" OR "data center" OR construction)'),
 )
 
 
@@ -55,7 +63,7 @@ def _configured_topics() -> tuple[tuple[str, str], ...]:
 def _topics_for_poll(topics: tuple[tuple[str, str], ...], cursor: int) -> tuple[list[tuple[str, str]], int]:
     if not topics:
         return [], 0
-    count = _bounded_env_int("GDELT_TOPICS_PER_POLL", 4, 1, len(topics))
+    count = _bounded_env_int("GDELT_TOPICS_PER_POLL", 6, 1, len(topics))
     selected = [topics[(cursor + offset) % len(topics)] for offset in range(count)]
     return selected, (cursor + count) % len(topics)
 

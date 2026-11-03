@@ -18,7 +18,7 @@ jobs:
       - name: Install runtime dependencies
         run: python -m pip install -r requirements.txt
       - name: Compile
-        run: python -m py_compile app.py paper_trading.py news_monitor.py market_data.py market_quality.py market_stream.py global_news.py risk_manager.py resilience.py backtest.py forecast_evaluation.py resolution_tracker.py research_features.py independent_model_evaluation.py paper_fees.py
+        run: python -m py_compile app.py paper_trading.py news_monitor.py market_data.py market_quality.py market_stream.py global_news.py risk_manager.py resilience.py backtest.py forecast_evaluation.py resolution_tracker.py research_features.py independent_model_evaluation.py learning_journal.py paper_fees.py
       - name: Unit tests
         run: python -m unittest discover -s tests -v
       - name: Build Docker image
@@ -51,6 +51,7 @@ jobs:
           curl --silent --show-error --fail http://127.0.0.1:18080/research-features > /tmp/paper-research-features.json
           curl --silent --show-error --fail http://127.0.0.1:18080/independent-model-evaluation > /tmp/paper-independent-model-evaluation.json
           curl --silent --show-error --fail http://127.0.0.1:18080/model-forecasts > /tmp/paper-model-forecasts.json
+          curl --silent --show-error --fail http://127.0.0.1:18080/learning > /tmp/paper-learning.json
           python - <<'PY'
           import json
           from pathlib import Path
@@ -66,6 +67,7 @@ jobs:
           features = json.loads(Path("/tmp/paper-research-features.json").read_text())
           model_evaluation = json.loads(Path("/tmp/paper-independent-model-evaluation.json").read_text())
           model_forecasts = json.loads(Path("/tmp/paper-model-forecasts.json").read_text())
+          learning = json.loads(Path("/tmp/paper-learning.json").read_text())
           assert "items" in news and "feeds_configured" in news, "news endpoint schema mismatch"
           assert health.get("mode") == "paper_only", "health endpoint must remain paper-only"
           assert health.get("status") in {"healthy", "degraded", "unhealthy"}, "health endpoint status schema mismatch"
@@ -90,5 +92,8 @@ jobs:
           assert model_forecasts.get("status") == "insufficient_data", "empty smoke-test dataset must not fit a model"
           assert model_forecasts.get("decision") == "NO_ACTION_RESEARCH_ONLY", "current model forecasts must not issue actions"
           assert model_forecasts.get("live_execution_enabled") is False, "live execution must stay disabled"
+          assert learning.get("mode") == "REALIZED_FORECAST_FEEDBACK_V1", "learning endpoint mode mismatch"
+          assert learning.get("live_execution_enabled") is False, "learning feedback must remain non-executable"
+          assert learning.get("automatic_parameter_tuning") is False, "parameter tuning must remain gated"
           print("Container smoke check passed: /news, /status, /paper, /matches, /market-stream, /resolutions, /forecast-evaluation, /research-features /independent-model-evaluation and /health returned valid JSON.")
           PY

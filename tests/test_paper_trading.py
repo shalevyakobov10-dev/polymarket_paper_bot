@@ -68,13 +68,108 @@ class PaperTraderTests(unittest.TestCase):
         )
         state = bot.snapshot()
         self.assertEqual(result["opened"], [])
-        self.assertEqual(result["candidates"][0]["skip_reason"], "max_portfolio_drawdown_reached")
+        self.assertEqual(result["candidates"][0]["skip_reason"], "portfolio_drawdown_circuit_breaker_latched")
         self.assertAlmostEqual(state["metrics"]["current_drawdown_pct"], 5.0)
         self.assertAlmostEqual(state["metrics"]["max_drawdown_pct"], 5.0)
         self.assertTrue(state["metrics"]["drawdown_limit_reached"])
         persisted = json.loads((Path(self.temp.name) / "drawdown_state.json").read_text())
         self.assertAlmostEqual(persisted["equity_peak"], 100.0)
         self.assertAlmostEqual(persisted["max_drawdown_pct"], 5.0)
+
+    def test_drawdown_circuit_breaker_latches_after_recovery_and_restart(self):
+        cfg = PaperConfig(**{
+            **self.config.__dict__,
+            "max_portfolio_drawdown_pct": 4.0,
+        })
+        state_path = Path(self.temp.name) / "latched_breaker_state.json"
+        bot = PaperTrader(state_path, cfg)
+        bot._state["cash"] = 95.0
+        bot._state["realized_pnl"] = -5.0
+        bot.process_snapshot([self.row(0.50)], self.now)
+
+        tripped = bot.snapshot()["metrics"]
+        self.assertTrue(tripped["circuit_breaker_tripped"])
+        self.assertTrue(tripped["new_entries_halted"])
+        self.assertAlmostEqual(tripped["circuit_breaker_drawdown_pct"], 5.0)
+
+        # Simulate equity recovery. The all-time drawdown latch must remain set.
+        bot._state["cash"] = 100.0
+        bot._state["realized_pnl"] = 0.0
+        bot._state["last_prices"]["token-1"] = 0.50
+        bot._save()
+        recovered = bot.snapshot()["metrics"]
+        self.assertAlmostEqual(recovered["current_drawdown_pct"], 0.0)
+        self.assertTrue(recovered["circuit_breaker_tripped"])
+
+        restarted = PaperTrader(state_path, cfg)
+        result = restarted.process_snapshot(
+            [self.row(0.54)], self.now + timedelta(minutes=5)
+        )
+        self.assertEqual(result["opened"], [])
+        self.assertEqual(
+            result["candidates"][0]["skip_reason"],
+            "portfolio_drawdown_circuit_breaker_latched",
+        )
+        self.assertTrue(restarted.snapshot()["metrics"]["new_entries_halted"])
+
+        events = [
+            json.loads(line)
+            for line in (Path(self.temp.name) / "paper_events.jsonl").read_text().splitlines()
+        ]
+        self.assertTrue(any(
+            event.get("event_type") == "portfolio_drawdown_circuit_breaker_tripped"
+            for event in events
+        ))
+
+    def test_partial_circuit_breaker_state_is_rejected(self):
+        state = self.bot._new_state()
+        state.pop("circuit_breaker_at")
+        self.state_path.write_text(json.dumps(state), encoding="utf-8")
+        with self.assertRaisesRegex(ValueError, "incomplete circuit-breaker fields"):
+            PaperTrader(self.state_path, self.config)
+
+    def test_legacy_state_migrates_to_latched_breaker_if_old_max_drawdown_crossed_limit(self):
+        cfg = PaperConfig(**{
+            **self.config.__dict__,
+            "max_portfolio_drawdown_pct": 4.0,
+        })
+        legacy_path = Path(self.temp.name) / "legacy_latched_state.json"
+        bot = PaperTrader(legacy_path, self.config)
+        legacy = bot._new_state()
+        legacy["max_drawdown_pct"] = 5.0
+        legacy["max_drawdown_usd"] = 5.0
+        for field in (
+            "circuit_breaker_tripped",
+            "circuit_breaker_reason",
+            "circuit_breaker_at",
+            "circuit_breaker_drawdown_pct",
+        ):
+            legacy.pop(field)
+        legacy_path.write_text(json.dumps(legacy), encoding="utf-8")
+
+        migrated = PaperTrader(legacy_path, cfg).snapshot()["metrics"]
+        self.assertTrue(migrated["circuit_breaker_tripped"])
+        self.assertEqual(
+            migrated["circuit_breaker_reason"],
+            "max_portfolio_drawdown_reached",
+        )
+        self.assertAlmostEqual(migrated["circuit_breaker_drawdown_pct"], 5.0)
+
+    def test_paper_reset_clears_latched_breaker_and_full_simulated_portfolio(self):
+        cfg = PaperConfig(**{
+            **self.config.__dict__,
+            "max_portfolio_drawdown_pct": 4.0,
+        })
+        bot = PaperTrader(Path(self.temp.name) / "reset_breaker_state.json", cfg)
+        bot._state["cash"] = 95.0
+        bot._state["realized_pnl"] = -5.0
+        bot.process_snapshot([self.row(0.50)], self.now)
+        self.assertTrue(bot.snapshot()["metrics"]["circuit_breaker_tripped"])
+
+        reset = bot.reset()
+        self.assertFalse(reset["metrics"]["circuit_breaker_tripped"])
+        self.assertFalse(reset["metrics"]["new_entries_halted"])
+        self.assertEqual(reset["metrics"]["open_positions"], 0)
 
     def test_legacy_paper_state_receives_safe_drawdown_defaults(self):
         self.bot.process_snapshot([self.row(0.50)], self.now)

@@ -79,6 +79,8 @@ def publisher_identity(
 ) -> str:
     """Return a stable publisher key, preferring known outlet aliases."""
     source_base = str(source or "").split(" - ", 1)[0].strip()
+    if "://" in source_base and not _hostname(source_base):
+        return ""
     label_key = re.sub(r"[^a-z0-9]+", " ", source_base.lower()).strip()
     if label_key in _SOURCE_ALIASES:
         return _SOURCE_ALIASES[label_key]

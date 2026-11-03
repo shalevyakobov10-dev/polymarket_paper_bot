@@ -567,5 +567,37 @@ class ParserTests(unittest.TestCase):
         self.assertFalse(payload["live_execution_enabled"])
         forecast.assert_called_once()
 
+class WorkerRetryIntegrationTests(unittest.TestCase):
+    def test_worker_retry_delay_grows_to_shared_cap(self):
+        with patch("app.random.random", return_value=0.5):
+            delays = [
+                app._worker_retry_delay(RuntimeError("upstream unavailable"), count, base_seconds=60)
+                for count in (1, 2, 3, 4, 5)
+            ]
+        self.assertEqual(delays, [60.0, 120.0, 240.0, 480.0, 900.0])
+
+    def test_worker_retry_delay_respects_http_retry_after(self):
+        from email.message import Message
+        from urllib.error import HTTPError
+
+        headers = Message()
+        headers["Retry-After"] = "180"
+        error = HTTPError("https://example.invalid", 429, "rate limited", headers, None)
+        with patch("app.random.random", return_value=0.5):
+            delay = app._worker_retry_delay(error, 1, base_seconds=60)
+        self.assertEqual(delay, 180.0)
+
+    def test_worker_retry_delay_never_exceeds_shared_cap(self):
+        from email.message import Message
+        from urllib.error import HTTPError
+
+        headers = Message()
+        headers["Retry-After"] = "3600"
+        error = HTTPError("https://example.invalid", 429, "rate limited", headers, None)
+        with patch("app.random.random", return_value=0.5):
+            delay = app._worker_retry_delay(error, 1, base_seconds=60)
+        self.assertEqual(delay, 900.0)
+
+
 if __name__ == "__main__":
     unittest.main()

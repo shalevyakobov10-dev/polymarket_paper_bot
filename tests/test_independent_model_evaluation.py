@@ -237,6 +237,9 @@ class FeatureModelEvaluationTests(unittest.TestCase):
             feature_rows, resolutions, now=now, max_feature_age_seconds=3600
         )
         self.assertEqual(result["status"], "model_fitted")
+        self.assertTrue(result["model_version"].startswith("feature-logistic-v1-"))
+        self.assertEqual(result["model"]["version"], result["model_version"])
+        self.assertTrue(all(row["model_version"] == result["model_version"] for row in result["forecasts"]))
         self.assertEqual(result["training"]["eligible_unique_markets"], 100)
         self.assertEqual(result["training"]["outcome_yes_count"], 50)
         self.assertEqual(result["current_market_coverage"]["fresh_unresolved_markets"], 2)
@@ -248,6 +251,47 @@ class FeatureModelEvaluationTests(unittest.TestCase):
         ))
         self.assertEqual(result["decision"], "NO_ACTION_RESEARCH_ONLY")
         self.assertFalse(result["live_execution_enabled"])
+
+    def test_extract_model_features_includes_news_topic_and_source_diversity(self):
+        features = model_eval.extract_model_features({
+            "gamma_yes_probability": 0.5,
+            "news_match_count_24h": 3,
+            "news_topic_category_count_24h": 4,
+            "news_unique_source_label_count_24h": 2,
+            "volume_24h": 100,
+        })
+        self.assertAlmostEqual(features["log_news_topic_category_count_24h"], __import__("math").log1p(4))
+        self.assertAlmostEqual(features["log_news_unique_source_label_count_24h"], __import__("math").log1p(2))
+
+    def test_model_version_changes_when_resolved_training_history_changes(self):
+        now = datetime(2026, 10, 30, 12, tzinfo=timezone.utc)
+        feature_rows = []
+        resolutions = []
+        for index in range(100):
+            outcome = index % 2
+            resolved_at = now - timedelta(days=2, minutes=index)
+            feature_rows.append({
+                "market_id": f"history-{index}",
+                "observed_at": (resolved_at - timedelta(hours=24)).isoformat(),
+                "gamma_yes_probability": 0.5,
+                "clob_book_usable": True,
+                "clob_midpoint": 0.65 if outcome else 0.35,
+                "clob_depth_imbalance_top5": 0.5 if outcome else -0.5,
+                "news_match_count_24h": 1,
+                "news_topic_category_count_24h": 1,
+                "news_unique_source_label_count_24h": 1,
+                "volume_24h": 1000,
+            })
+            resolutions.append({
+                "market_id": f"history-{index}",
+                "resolved_yes": outcome,
+                "resolved_at": resolved_at.isoformat(),
+            })
+        first = model_eval.forecast_current_feature_rows(feature_rows, resolutions, now=now)
+        changed_resolutions = [dict(row) for row in resolutions]
+        changed_resolutions[0] = {**changed_resolutions[0], "resolved_yes": 0}
+        second = model_eval.forecast_current_feature_rows(feature_rows, changed_resolutions, now=now)
+        self.assertNotEqual(first["model_version"], second["model_version"])
 
     def test_live_forecasts_withhold_model_until_enough_labels_resolve(self):
         now = datetime(2026, 10, 30, 12, tzinfo=timezone.utc)

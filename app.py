@@ -641,7 +641,7 @@ def resolution_worker_loop() -> None:
                 })
         except Exception as exc:
             failure_count += 1
-            delay = _worker_retry_delay(exc, failure_count, base_seconds=RESOLUTION_POLL_SECONDS)
+            delay = _worker_retry_delay(exc, failure_count, base_seconds=POLL_SECONDS)
             with _lock:
                 _resolution_state.update({
                     "last_error": f"Unexpected {type(exc).__name__}: {str(exc)[:300]}",
@@ -714,6 +714,20 @@ def market_stream_worker_loop() -> None:
             })
         if not connected:
             time.sleep(delay)
+
+
+def _worker_retry_delay(exc: Exception, failure_count: int, *, base_seconds: int) -> float:
+    """Share one bounded retry policy across all external-data workers."""
+    headers = getattr(exc, "headers", None)
+    retry_after_header = headers.get("Retry-After") if headers is not None else None
+    return exponential_backoff_seconds(
+        failure_count,
+        base_seconds=base_seconds,
+        max_seconds=max(base_seconds, min(3600, POLL_MAX_BACKOFF_SECONDS)),
+        jitter_fraction=0.15,
+        random_value=random.random(),
+        retry_after_seconds=parse_retry_after(retry_after_header),
+    )
 
 
 def _record_market_worker_failure(exc: Exception, failure_count: int, *, unexpected: bool = False) -> float:

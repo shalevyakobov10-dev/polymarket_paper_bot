@@ -3,9 +3,10 @@ from __future__ import annotations
 
 import json
 import os
+import random
 import threading
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.error import HTTPError, URLError
@@ -22,6 +23,7 @@ from global_news import GDELTCollector
 from news_monitor import DEFAULT_FEEDS, NewsCollector, NewsMarketMatcher, summarize_market_corroboration, summarize_news_freshness
 from research_features import build_market_feature_rows, read_recent_jsonl, summarize_feature_rows
 from independent_model_evaluation import evaluate_feature_files, forecast_current_feature_files
+from resilience import exponential_backoff_seconds, parse_retry_after
 
 GAMMA_URL = "https://gamma-api.polymarket.com/markets"
 POLL_SECONDS = max(15, int(os.getenv("POLL_SECONDS", "60")))
@@ -49,6 +51,9 @@ _state = {
     "last_poll_at": None,
     "last_success_at": None,
     "last_error": None,
+    "consecutive_failures": 0,
+    "retry_delay_seconds": 0.0,
+    "next_retry_at": None,
     "markets_seen": 0,
     "markets_discovered": 0,
     "outcomes_seen": 0,
@@ -158,6 +163,9 @@ def _bounded_int_env(name: str, default: int, minimum: int, maximum: int) -> int
     except (ValueError, TypeError):
         value = default
     return min(maximum, max(minimum, value))
+
+
+POLL_MAX_BACKOFF_SECONDS = max(POLL_SECONDS, _bounded_int_env("POLL_MAX_BACKOFF_SECONDS", 900, 60, 3600))
 
 
 def _research_feature_rotation_paths() -> list[Path]:
@@ -655,18 +663,57 @@ def market_stream_worker_loop() -> None:
         if not result.get("connected"):
             time.sleep(5)
 
+def _record_market_worker_failure(exc: Exception, failure_count: int, *, unexpected: bool = False) -> float:
+    """Record a failed market poll and calculate a bounded retry delay."""
+    headers = getattr(exc, "headers", None)
+    retry_after_header = headers.get("Retry-After") if headers is not None else None
+    retry_after_seconds = parse_retry_after(retry_after_header)
+    delay = exponential_backoff_seconds(
+        failure_count,
+        base_seconds=POLL_SECONDS,
+        max_seconds=POLL_MAX_BACKOFF_SECONDS,
+        jitter_fraction=0.15,
+        random_value=random.random(),
+        retry_after_seconds=retry_after_seconds,
+    )
+    message = (
+        f"Unexpected {type(exc).__name__}: {str(exc)[:300]}"
+        if unexpected else f"{type(exc).__name__}: {str(exc)[:300]}"
+    )
+    next_retry = datetime.now(timezone.utc) + timedelta(seconds=delay)
+    with _lock:
+        _state.update({
+            "last_error": message,
+            "consecutive_failures": failure_count,
+            "retry_delay_seconds": delay,
+            "next_retry_at": next_retry.isoformat(),
+        })
+    return delay
+
+
 def worker_loop() -> None:
+    """Poll public market data, backing off safely during upstream outages/rate limits."""
+    failure_count = 0
     with _lock:
         _state["worker_running"] = True
     while True:
         try:
             poll_once()
+            failure_count = 0
+            with _lock:
+                _state.update({
+                    "consecutive_failures": 0,
+                    "retry_delay_seconds": 0.0,
+                    "next_retry_at": None,
+                })
         except (HTTPError, URLError, TimeoutError, ValueError, RuntimeError, OSError) as exc:
-            with _lock:
-                _state["last_error"] = f"{type(exc).__name__}: {str(exc)[:300]}"
+            failure_count += 1
+            time.sleep(_record_market_worker_failure(exc, failure_count))
+            continue
         except Exception as exc:  # keep the worker alive on malformed third-party data
-            with _lock:
-                _state["last_error"] = f"Unexpected {type(exc).__name__}: {str(exc)[:300]}"
+            failure_count += 1
+            time.sleep(_record_market_worker_failure(exc, failure_count, unexpected=True))
+            continue
         time.sleep(POLL_SECONDS)
 
 
@@ -806,6 +853,9 @@ def health_payload(
         "seconds_since_success": market_component["seconds_since_success"],
         "stale_after_seconds": market_stale_after,
         "last_error": snapshot.get("last_error"),
+        "consecutive_failures": int(snapshot.get("consecutive_failures") or 0),
+        "retry_delay_seconds": float(snapshot.get("retry_delay_seconds") or 0.0),
+        "next_retry_at": snapshot.get("next_retry_at"),
         "components": components,
         "degraded_components": degraded,
         "health_policy": "market_data_is_required; news_gdelt_resolution_and_stream_are_reported_as_optional_degraded_components",

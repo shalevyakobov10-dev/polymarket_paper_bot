@@ -73,6 +73,12 @@ docker build -t polymarket-paper-bot .
 docker run --rm -p 8080:8080 -v polymarket-data:/app/data polymarket-paper-bot
 ```
 
+## Publisher identity and source diversity
+
+RSS sections from the same newsroom and GDELT article-domain results are normalized to a shared publisher identity where the outlet is known (including BBC, The Guardian, Al Jazeera, NPR, Deutsche Welle, Sky, and France 24). News-to-market match records retain this publisher key, and `/matches` counts unique publisher identities rather than treating each feed section as a separate publisher. Legacy records fall back to normalized source labels.
+
+This is still only a source-diversity measure: it does not detect every syndicated wire story, prove editorial independence, verify that an event happened, or validate a trading signal. Source country and language are preserved separately from publisher identity.
+
 ## News ingestion limits
 
 News records preserve source attribution, original links, publication timestamp when provided by the publisher, and collection timestamp. The collector handles RSS and Atom formats, de-duplicates IDs across restarts, limits response size, and isolates failures per feed. It records headlines and short summaries, then emits conservative keyword-overlap candidates for review at `/matches` and in `data/news_market_candidates.jsonl`. This matching is lexical rather than semantic, does not estimate probabilities, and is not a validated trading signal. It does not place or suggest live orders. Headlines need corroboration, timestamp-aware evaluation, and out-of-sample testing before they can inform any strategy.

@@ -12,6 +12,7 @@ from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
 from paper_trading import rotate_jsonl_file
+from publisher_identity import publisher_identity
 
 GDELT_DOC_URL = "https://api.gdeltproject.org/api/v2/doc/doc"
 DEFAULT_QUERY = (
@@ -106,6 +107,9 @@ def normalize_gdelt_articles(
         records.append({
             "id": hashlib.sha256(canonical_url.encode("utf-8")).hexdigest(),
             "source": str(article.get("domain") or "GDELT indexed source")[:100],
+            "publisher_id": publisher_identity(
+                str(article.get("domain") or ""), article_url=url
+            ),
             "source_type": "gdelt_doc_api",
             "source_country": str(article.get("sourcecountry") or "")[:10],
             "language": str(article.get("language") or "")[:20],

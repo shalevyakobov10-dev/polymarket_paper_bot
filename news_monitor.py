@@ -21,6 +21,7 @@ from urllib.request import Request, urlopen
 import xml.etree.ElementTree as ET
 
 from paper_trading import rotate_jsonl_file
+from publisher_identity import publisher_identity
 
 
 DEFAULT_FEEDS = (
@@ -155,6 +156,7 @@ def parse_feed(
         records.append({
             "id": item_id,
             "source": source[:100],
+            "publisher_id": publisher_identity(source, feed_url, link),
             "feed_url": feed_url[:1000],
             "title": title,
             "summary": summary,
@@ -252,25 +254,28 @@ def summarize_market_corroboration(matches: list[dict[str, Any]]) -> list[dict[s
         # Multiple sections of one publisher (e.g. BBC World and BBC Business)
         # are one source, not independent corroboration.
         publisher = source.split(" - ", 1)[0].strip()[:100]
+        publisher_id = str(match.get("publisher_id") or publisher_identity(source)).strip()
         row = grouped.setdefault(market_id, {
             "market_id": market_id,
             "market_question": str(match.get("market_question") or "")[:500],
-            "publishers": set(),
+            "publishers": {},
             "headline_count": 0,
         })
-        row["publishers"].add(publisher)
+        row["publishers"].setdefault(publisher_id, publisher)
         row["headline_count"] += 1
 
     summaries = []
     for row in grouped.values():
-        publishers = sorted(row["publishers"])
+        publisher_ids = sorted(row["publishers"])
+        publishers = sorted(set(row["publishers"].values()))
         summaries.append({
             "market_id": row["market_id"],
             "market_question": row["market_question"],
-            "distinct_publisher_count": len(publishers),
+            "distinct_publisher_count": len(publisher_ids),
+            "publisher_ids": publisher_ids,
             "publishers": publishers,
             "matched_headline_count": row["headline_count"],
-            "interpretation": "source_diversity_only_not_independent_event_verification",
+            "interpretation": "normalized_publisher_diversity_only_not_independent_event_verification",
             "research_only": True,
             "execution": "none",
         })
@@ -351,6 +356,11 @@ class NewsMarketMatcher:
                         "pair_id": pair_id,
                         "news_id": news_id,
                         "source": str(news.get("source") or "")[:100],
+                        "publisher_id": str(news.get("publisher_id") or publisher_identity(
+                            str(news.get("source") or ""),
+                            str(news.get("feed_url") or ""),
+                            str(news.get("url") or ""),
+                        ))[:120],
                         "news_title": str(news.get("title") or "")[:MAX_TITLE_CHARS],
                         "news_url": str(news.get("url") or "")[:2000],
                         "news_published_at": str(news.get("published_at") or "")[:100],

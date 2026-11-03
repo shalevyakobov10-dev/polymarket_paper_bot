@@ -19,7 +19,18 @@ class GDELTCollectorTests(unittest.TestCase):
         self.assertEqual(rows[0]["published_at"], "2026-10-30T12:00:00+00:00")
         self.assertEqual(rows[0]["source_country"], "US")
         self.assertEqual(rows[0]["source_type"], "gdelt_doc_api")
+        self.assertEqual(rows[0]["publisher_id"], "example.org")
         self.assertEqual(rows[0]["execution"], "none")
+
+    def test_normalizes_known_gdelt_publisher_domain(self):
+        rows = global_news.normalize_gdelt_articles({
+            "articles": [{
+                "title": "BBC report",
+                "url": "https://www.bbc.com/news/world-1",
+                "domain": "www.bbc.com",
+            }]
+        })
+        self.assertEqual(rows[0]["publisher_id"], "bbc")
 
     def test_normalize_records_topic_category(self):
         payload = {"articles": [

@@ -6,6 +6,7 @@ chronological holdout. It never emits orders or trade instructions.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import math
 import random
@@ -20,6 +21,8 @@ FEATURE_NAMES = (
     "depth_imbalance_top5",
     "log_spread_bps",
     "log_news_matches_24h",
+    "log_news_topic_category_count_24h",
+    "log_news_unique_source_label_count_24h",
     "mean_lexical_overlap",
     "log_volume_24h",
 )
@@ -66,6 +69,8 @@ def extract_model_features(row: dict[str, Any]) -> dict[str, float | None]:
     imbalance = _number(row.get("clob_depth_imbalance_top5")) if book_usable else None
     volume = _number(row.get("volume_24h"))
     news_count = _number(row.get("news_match_count_24h"))
+    topic_count = _number(row.get("news_topic_category_count_24h"))
+    source_count = _number(row.get("news_unique_source_label_count_24h"))
     headlines = row.get("news_headlines")
     overlaps = []
     if isinstance(headlines, list):
@@ -86,6 +91,8 @@ def extract_model_features(row: dict[str, Any]) -> dict[str, float | None]:
         ),
         "log_spread_bps": math.log1p(spread) if spread is not None and spread >= 0 else None,
         "log_news_matches_24h": math.log1p(max(0.0, news_count or 0.0)),
+        "log_news_topic_category_count_24h": math.log1p(max(0.0, topic_count or 0.0)),
+        "log_news_unique_source_label_count_24h": math.log1p(max(0.0, source_count or 0.0)),
         "mean_lexical_overlap": sum(overlaps) / len(overlaps) if overlaps else None,
         "log_volume_24h": math.log1p(max(0.0, volume or 0.0)),
     }
@@ -962,6 +969,24 @@ def forecast_current_feature_rows(
         if market_id not in conflicting_training_ids
     ]
     training.sort(key=lambda row: (str(row["forecast_timestamp"]), str(row["market_id"])))
+    version_material = {
+        "model_type": "regularized_logistic_regression",
+        "feature_names": list(FEATURE_NAMES),
+        "l2": float(l2),
+        "training_labels": [
+            [
+                str(row.get("market_id") or ""),
+                str(row.get("forecast_timestamp") or ""),
+                str(row.get("resolved_at") or ""),
+                int(row.get("outcome_yes") or 0),
+            ]
+            for row in training
+        ],
+    }
+    version_digest = hashlib.sha256(
+        json.dumps(version_material, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()[:20]
+    model_version = f"feature-logistic-v1-{version_digest}" if training else None
 
     resolved_before_now = set()
     for resolution in resolutions:
@@ -1027,6 +1052,7 @@ def forecast_current_feature_rows(
         "mode": "CURRENT_FEATURE_MODEL_FORECASTS_V1",
         "generated_at": current.isoformat(),
         "status": "insufficient_data",
+        "model_version": model_version,
         "research_only": True,
         "execution": "none",
         "live_execution_enabled": False,
@@ -1049,6 +1075,7 @@ def forecast_current_feature_rows(
         },
         "model": {
             "type": "regularized_logistic_regression",
+            "version": model_version,
             "l2": l2,
             "features": list(FEATURE_NAMES),
             "fit_scope": "all eligible resolved markets known before generated_at",
@@ -1090,6 +1117,7 @@ def forecast_current_feature_rows(
         difference = probability - market_probability
         forecasts.append({
             "market_id": row["market_id"],
+            "model_version": model_version,
             "question": row["question"],
             "observed_at": row["observed_at"],
             "feature_age_seconds": row["feature_age_seconds"],

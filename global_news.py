@@ -221,7 +221,7 @@ class GDELTCollector:
                 continue
             rotate_jsonl_file(self.log_path, 5 * 1024 * 1024, 3)
             with self.log_path.open("a", encoding="utf-8") as handle:
-                handle.write(json.dumps(item, ensure_ascii=False, allow_nan=False) + "\\n")
+                handle.write(json.dumps(item, ensure_ascii=False, allow_nan=False) + "\n")
             self.seen_ids.add(item["id"])
             self.items.append(item)
             added.append(item)

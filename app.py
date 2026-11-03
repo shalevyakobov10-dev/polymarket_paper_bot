@@ -584,6 +584,102 @@ def independent_model_evaluation_payload() -> dict:
     )
 
 
+def get_learning_journal() -> LearningJournal:
+    global _learning_journal
+    with _learning_lock:
+        if _learning_journal is None:
+            _learning_journal = LearningJournal(
+                MODEL_FORECASTS,
+                MODEL_FEEDBACK,
+                MODEL_LEARNING_EVALUATIONS,
+            )
+        return _learning_journal
+
+
+def model_learning_worker_loop() -> None:
+    """Periodically refit on resolved history and score stored forecasts after resolution."""
+    failure_count = 0
+    last_evaluation_stamp = 0.0
+    with _learning_lock:
+        _learning_state["worker_running"] = True
+
+    while True:
+        attempted_at = utc_now()
+        with _learning_lock:
+            _learning_state["last_poll_at"] = attempted_at
+        retry_delay = None
+        try:
+            journal = get_learning_journal()
+            forecast = current_model_forecasts_payload()
+            saved = journal.record_forecasts(
+                forecast.get("forecasts") or [],
+                model_version=str(forecast.get("model_version") or ""),
+                generated_at=str(forecast.get("generated_at") or attempted_at),
+            )
+            resolution_rows = read_recent_jsonl(
+                get_resolution_collector()._rotation_paths(),
+                limit=100_000,
+            )
+            feedback = journal.score_resolved_forecasts(resolution_rows)
+
+            evaluation_record = None
+            current_stamp = time.time()
+            if (
+                last_evaluation_stamp == 0.0
+                or current_stamp - last_evaluation_stamp >= MODEL_EVALUATION_SECONDS
+            ):
+                evaluation = independent_model_evaluation_payload()
+                evaluation["model_version"] = forecast.get("model_version")
+                evaluation_record = journal.record_evaluation(evaluation)
+                last_evaluation_stamp = current_stamp
+
+            summary = journal.summary()
+            training = forecast.get("training") if isinstance(forecast.get("training"), dict) else {}
+            with _learning_lock:
+                _learning_state.update({
+                    "last_success_at": utc_now(),
+                    "last_error": None,
+                    "consecutive_failures": 0,
+                    "retry_delay_seconds": 0.0,
+                    "next_retry_at": None,
+                    "model_status": str(forecast.get("status") or "unknown"),
+                    "model_version": forecast.get("model_version"),
+                    "training_markets": int(training.get("eligible_unique_markets") or 0),
+                    "forecasts_saved_last_cycle": int(saved.get("added") or 0),
+                    "feedback_scored_last_cycle": int(feedback.get("scored_added") or 0),
+                    "feedback_forecasts_scored_total": int(summary.get("forecasts_scored") or 0),
+                    "model_versions_with_feedback": int(summary.get("model_versions_with_feedback") or 0),
+                    "last_evaluation_at": (
+                        evaluation_record.get("evaluated_at")
+                        if evaluation_record else _learning_state.get("last_evaluation_at")
+                    ),
+                    "last_evaluation_status": (
+                        evaluation_record.get("status")
+                        if evaluation_record else _learning_state.get("last_evaluation_status")
+                    ),
+                    "last_evaluation_walk_forward_status": (
+                        evaluation_record.get("walk_forward_status")
+                        if evaluation_record else _learning_state.get("last_evaluation_walk_forward_status")
+                    ),
+                })
+            failure_count = 0
+        except Exception as exc:
+            failure_count += 1
+            retry_delay = _worker_retry_delay(
+                exc, failure_count, base_seconds=MODEL_LEARNING_POLL_SECONDS
+            )
+            with _learning_lock:
+                _learning_state.update({
+                    "last_error": f"Unexpected {type(exc).__name__}: {str(exc)[:300]}",
+                    "consecutive_failures": failure_count,
+                    "retry_delay_seconds": retry_delay,
+                    "next_retry_at": (
+                        datetime.now(timezone.utc) + timedelta(seconds=retry_delay)
+                    ).isoformat(),
+                })
+        time.sleep(retry_delay if retry_delay is not None else MODEL_LEARNING_POLL_SECONDS)
+
+
 def settle_open_paper_positions(
     collector: ResolutionCollector,
     trader: PaperTrader,

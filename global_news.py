@@ -31,6 +31,14 @@ DEFAULT_TOPIC_QUERIES = (
     ("sports", '(football OR soccer OR basketball OR tennis OR cricket OR Olympics OR FIFA OR championship OR tournament)'),
     ("science_space", '(NASA OR spaceflight OR astronomy OR "scientific discovery" OR research OR physics OR "space mission")'),
     ("entertainment_culture", '(movie OR film OR music OR celebrity OR actor OR "award ceremony" OR gaming OR "video game")'),
+    ("law_regulation", '("court ruling" OR lawsuit OR regulation OR antitrust OR legislation OR "supreme court" OR investigation OR regulator)'),
+    ("transport_logistics", '(airline OR airport OR shipping OR port OR freight OR railway OR logistics OR vessel)'),
+    ("agriculture_food", '(harvest OR crop OR "food prices" OR agriculture OR livestock OR fertilizer OR "food supply" OR "food safety")'),
+    ("labor_employment", '(unemployment OR wage OR strike OR union OR "labor market" OR hiring OR employment OR pension)'),
+    ("education_policy", '(school OR university OR tuition OR "education policy" OR student OR exam OR "research funding")'),
+    ("consumer_retail", '(retail OR "consumer spending" OR "e-commerce" OR supermarket OR "consumer confidence" OR "product recall")'),
+    ("migration_demographics", '(migration OR immigration OR refugee OR population OR census OR "border crossing")'),
+    ("infrastructure_utilities", '("power grid" OR "water supply" OR infrastructure OR blackout OR "nuclear plant" OR "data center" OR construction)'),
 )
 
 
@@ -55,7 +63,7 @@ def _configured_topics() -> tuple[tuple[str, str], ...]:
 def _topics_for_poll(topics: tuple[tuple[str, str], ...], cursor: int) -> tuple[list[tuple[str, str]], int]:
     if not topics:
         return [], 0
-    count = _bounded_env_int("GDELT_TOPICS_PER_POLL", 4, 1, len(topics))
+    count = _bounded_env_int("GDELT_TOPICS_PER_POLL", 6, 1, len(topics))
     selected = [topics[(cursor + offset) % len(topics)] for offset in range(count)]
     return selected, (cursor + count) % len(topics)
 
@@ -123,8 +131,42 @@ class GDELTCollector:
         self.seen_ids: set[str] = set()
         self.items: list[dict[str, Any]] = []
         self._topic_queries = _configured_topics()
-        self._topic_cursor = 0
+        self._topic_cursor_path = self.log_path.with_name(self.log_path.name + ".cursor.json")
+        self._topic_cursor = self._load_topic_cursor()
         self._load_existing()
+
+    def _load_topic_cursor(self) -> int:
+        """Restore the round-robin cursor only when the configured catalog matches."""
+        try:
+            state = json.loads(self._topic_cursor_path.read_text(encoding="utf-8"))
+            expected = [name for name, _ in self._topic_queries]
+            if isinstance(state, dict) and state.get("topics") == expected:
+                cursor = state.get("cursor")
+                if isinstance(cursor, int) and not isinstance(cursor, bool):
+                    return cursor % max(1, len(self._topic_queries))
+        except (OSError, ValueError, TypeError):
+            pass
+        return 0
+
+    def _save_topic_cursor(self) -> None:
+        """Persist rotation progress atomically so restarts do not starve later topics."""
+        if not self._topic_queries:
+            return
+        temporary = self._topic_cursor_path.with_name(self._topic_cursor_path.name + ".tmp")
+        state = {
+            "topics": [name for name, _ in self._topic_queries],
+            "cursor": self._topic_cursor,
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+        }
+        try:
+            self._topic_cursor_path.parent.mkdir(parents=True, exist_ok=True)
+            temporary.write_text(json.dumps(state, ensure_ascii=False) + "\n", encoding="utf-8")
+            temporary.replace(self._topic_cursor_path)
+        except OSError:
+            try:
+                temporary.unlink(missing_ok=True)
+            except OSError:
+                pass
 
     def _load_existing(self) -> None:
         paths = [self.log_path] + [
@@ -155,6 +197,7 @@ class GDELTCollector:
         """Rotate through broad global-news topic lanes and persist unique articles."""
         topics, next_cursor = _topics_for_poll(self._topic_queries, self._topic_cursor)
         self._topic_cursor = next_cursor
+        self._save_topic_cursor()
         max_records = _bounded_env_int("GDELT_MAX_RECORDS_PER_TOPIC", 75, 1, 250)
         window = os.getenv("GDELT_TIMESPAN", "1h").strip() or "1h"
         allowed_windows = {"15min", "30min", "1h", "2h", "4h", "6h", "12h", "1d"}

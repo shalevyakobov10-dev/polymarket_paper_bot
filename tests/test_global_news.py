@@ -102,6 +102,51 @@ class GDELTCollectorTests(unittest.TestCase):
             self.assertEqual(result["items_added"], 1)
             self.assertEqual(result["latest_items"][0]["topic_categories"], ["science_space"])
 
+    def test_default_catalog_covers_additional_global_topic_lanes(self):
+        names = {name for name, _ in global_news.DEFAULT_TOPIC_QUERIES}
+        expected = {
+            "law_regulation", "transport_logistics", "agriculture_food",
+            "labor_employment", "education_policy", "consumer_retail",
+            "migration_demographics", "infrastructure_utilities",
+        }
+        self.assertTrue(expected.issubset(names))
+        self.assertEqual(len(names), len(global_news.DEFAULT_TOPIC_QUERIES))
+
+    def test_default_poll_size_rotates_through_full_catalog(self):
+        from unittest.mock import patch
+        with patch.dict("os.environ", {}, clear=True):
+            first, cursor = global_news._topics_for_poll(global_news.DEFAULT_TOPIC_QUERIES, 0)
+            second, cursor = global_news._topics_for_poll(global_news.DEFAULT_TOPIC_QUERIES, cursor)
+            third, cursor = global_news._topics_for_poll(global_news.DEFAULT_TOPIC_QUERIES, cursor)
+        seen = [name for batch in (first, second, third) for name, _ in batch]
+        self.assertEqual(len(first), 6)
+        self.assertEqual(len(seen), len(global_news.DEFAULT_TOPIC_QUERIES))
+        self.assertEqual(len(set(seen)), len(global_news.DEFAULT_TOPIC_QUERIES))
+
+    def test_topic_rotation_survives_collector_restart(self):
+        payload = {"articles": [{"title": "Global event", "url": "https://example.org/restart", "seendate": "20261030T120000Z"}]}
+        class FakeResponse:
+            status = 200
+            def __enter__(self): return self
+            def __exit__(self, *args): return False
+            def read(self):
+                import json
+                return json.dumps(payload).encode("utf-8")
+        with tempfile.TemporaryDirectory() as directory, patch.dict(
+            "os.environ",
+            {"GDELT_TOPICS": "geopolitics_security,macroeconomics_finance,business_trade", "GDELT_TOPICS_PER_POLL": "1"},
+        ):
+            path = Path(directory) / "gdelt.jsonl"
+            first = global_news.GDELTCollector(path)
+            with patch("global_news.urlopen", return_value=FakeResponse()):
+                first_result = first.fetch_once()
+            restarted = global_news.GDELTCollector(path)
+            with patch("global_news.urlopen", return_value=FakeResponse()) as mocked:
+                second_result = restarted.fetch_once()
+            self.assertEqual(first_result["topics_attempted"], ["geopolitics_security"])
+            self.assertEqual(second_result["topics_attempted"], ["macroeconomics_finance"])
+            self.assertEqual(mocked.call_count, 1)
+
     def test_rejects_missing_articles_collection(self):
         with self.assertRaises(ValueError):
             global_news.normalize_gdelt_articles({})

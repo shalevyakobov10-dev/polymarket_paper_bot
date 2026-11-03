@@ -160,7 +160,7 @@ class GDELTCollector:
         }
         try:
             self._topic_cursor_path.parent.mkdir(parents=True, exist_ok=True)
-            temporary.write_text(json.dumps(state, ensure_ascii=False) + "\\n", encoding="utf-8")
+            temporary.write_text(json.dumps(state, ensure_ascii=False) + "\n", encoding="utf-8")
             temporary.replace(self._topic_cursor_path)
         except OSError:
             try:

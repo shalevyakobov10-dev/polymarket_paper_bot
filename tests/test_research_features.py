@@ -29,6 +29,7 @@ class ResearchFeatureTests(unittest.TestCase):
                 "market_id": "market-1", "source": "Example News",
                 "news_title": "A fresh headline", "news_published_at": "2026-10-30T11:30:00Z",
                 "lexical_overlap": 0.75, "shared_term_count": 3,
+                "topic_categories": ["geopolitics_security", "energy_commodities"],
             },
             {
                 "market_id": "market-1", "source": "Old News",
@@ -61,6 +62,8 @@ class ResearchFeatureTests(unittest.TestCase):
         self.assertTrue(item["clob_book_quality_eligible"])
         self.assertEqual(item["news_match_count_24h"], 1)
         self.assertEqual(item["news_unique_source_label_count_24h"], 1)
+        self.assertEqual(item["news_topic_categories_24h"], ["energy_commodities", "geopolitics_security"])
+        self.assertEqual(item["news_topic_category_count_24h"], 2)
         self.assertEqual(item["news_matches_without_publish_time"], 1)
         self.assertEqual(item["news_headlines"][0]["title"], "A fresh headline")
         self.assertIsNone(item["forecast"])

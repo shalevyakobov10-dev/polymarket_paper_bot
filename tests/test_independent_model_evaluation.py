@@ -1,3 +1,4 @@
+import math
 import unittest
 from datetime import datetime, timedelta, timezone
 
@@ -260,8 +261,8 @@ class FeatureModelEvaluationTests(unittest.TestCase):
             "news_unique_source_label_count_24h": 2,
             "volume_24h": 100,
         })
-        self.assertAlmostEqual(features["log_news_topic_category_count_24h"], __import__("math").log1p(4))
-        self.assertAlmostEqual(features["log_news_unique_source_label_count_24h"], __import__("math").log1p(2))
+        self.assertAlmostEqual(features["log_news_topic_category_count_24h"], math.log1p(4))
+        self.assertAlmostEqual(features["log_news_unique_source_label_count_24h"], math.log1p(2))
 
     def test_model_version_changes_when_resolved_training_history_changes(self):
         now = datetime(2026, 10, 30, 12, tzinfo=timezone.utc)

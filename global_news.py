@@ -157,7 +157,8 @@ class GDELTCollector:
         self._topic_cursor = next_cursor
         max_records = _bounded_env_int("GDELT_MAX_RECORDS_PER_TOPIC", 75, 1, 250)
         window = os.getenv("GDELT_TIMESPAN", "1h").strip() or "1h"
-        if len(window) > 12:
+        allowed_windows = {"15min", "30min", "1h", "2h", "4h", "6h", "12h", "1d"}
+        if window not in allowed_windows:
             window = "1h"
 
         aggregated: dict[str, dict[str, Any]] = {}

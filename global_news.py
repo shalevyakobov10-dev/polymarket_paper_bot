@@ -152,46 +152,95 @@ class GDELTCollector:
             self.seen_ids = {item["id"] for item in self.items if item.get("id")}
 
     def fetch_once(self) -> dict[str, Any]:
-        query = os.getenv("GDELT_QUERY", DEFAULT_QUERY).strip() or DEFAULT_QUERY
-        params = {
-            "query": query,
-            "mode": "artlist",
-            "format": "json",
-            "timespan": "1h",
-            "maxrecords": 100,
-            "sort": "datedesc",
-        }
-        request = Request(
-            f"{GDELT_DOC_URL}?{urlencode(params)}",
-            headers={
-                "User-Agent": "PolymarketPaperResearchBot/1.0 (+read-only global news research)",
-                "Accept": "application/json",
-            },
-        )
-        with urlopen(request, timeout=12) as response:
-            if getattr(response, "status", 200) != 200:
-                raise RuntimeError(f"GDELT API returned HTTP {response.status}")
-            payload = json.loads(response.read().decode("utf-8"))
-        parsed = normalize_gdelt_articles(payload)
+        """Rotate through broad global-news topic lanes and persist unique articles."""
+        topics, next_cursor = _topics_for_poll(self._topic_queries, self._topic_cursor)
+        self._topic_cursor = next_cursor
+        max_records = _bounded_env_int("GDELT_MAX_RECORDS_PER_TOPIC", 75, 1, 250)
+        window = os.getenv("GDELT_TIMESPAN", "1h").strip() or "1h"
+        if len(window) > 12:
+            window = "1h"
+
+        aggregated: dict[str, dict[str, Any]] = {}
+        topic_results: dict[str, int] = {}
+        topic_errors: list[dict[str, str]] = []
+        for category, query in topics:
+            params = {
+                "query": query,
+                "mode": "artlist",
+                "format": "json",
+                "timespan": window,
+                "maxrecords": max_records,
+                "sort": "datedesc",
+            }
+            request = Request(
+                f"{GDELT_DOC_URL}?{urlencode(params)}",
+                headers={
+                    "User-Agent": "PolymarketPaperResearchBot/1.0 (+read-only global news research)",
+                    "Accept": "application/json",
+                },
+            )
+            try:
+                with urlopen(request, timeout=12) as response:
+                    if getattr(response, "status", 200) != 200:
+                        raise RuntimeError(f"GDELT API returned HTTP {response.status}")
+                    payload = json.loads(response.read().decode("utf-8"))
+                parsed = normalize_gdelt_articles(payload, topic_category=category)
+                topic_results[category] = len(parsed)
+                for article in parsed:
+                    article_id = article["id"]
+                    previous = aggregated.get(article_id)
+                    if previous is None:
+                        aggregated[article_id] = article
+                    else:
+                        previous["topic_categories"] = sorted(
+                            set(previous.get("topic_categories") or [])
+                            | set(article.get("topic_categories") or [])
+                        )
+            except (HTTPError, URLError, TimeoutError, OSError, ValueError, RuntimeError) as exc:
+                topic_errors.append({
+                    "topic": category,
+                    "error": f"{type(exc).__name__}: {str(exc)[:240]}",
+                })
+
+        if not topic_results:
+            detail = "; ".join(item["topic"] + ": " + item["error"] for item in topic_errors[:3])
+            raise RuntimeError(f"All GDELT topic queries failed: {detail}")
+
+        existing_by_id = {str(item.get("id")): item for item in self.items if item.get("id")}
         added = []
         self.log_path.parent.mkdir(parents=True, exist_ok=True)
-        for item in parsed:
+        for item in aggregated.values():
+            existing = existing_by_id.get(item["id"])
+            if existing is not None:
+                existing["topic_categories"] = sorted(
+                    set(existing.get("topic_categories") or [])
+                    | set(item.get("topic_categories") or [])
+                )
+                continue
             if item["id"] in self.seen_ids:
                 continue
             rotate_jsonl_file(self.log_path, 5 * 1024 * 1024, 3)
             with self.log_path.open("a", encoding="utf-8") as handle:
-                handle.write(json.dumps(item, ensure_ascii=False, allow_nan=False) + "\n")
+                handle.write(json.dumps(item, ensure_ascii=False, allow_nan=False) + "\\n")
             self.seen_ids.add(item["id"])
             self.items.append(item)
             added.append(item)
+
         self.items = self.items[-500:]
         if len(self.seen_ids) > 20000:
-            self.seen_ids = {item["id"] for item in self.items if item.get("id")}
+            self.seen_ids = {str(item["id"]) for item in self.items if item.get("id")}
         return {
             "items_added": len(added),
             "items_total_recent": len(self.items),
             "latest_items": list(reversed(self.items[-500:])),
-            "query_window": "last_1_hour",
+            "query_window": window,
             "source": "GDELT DOC 2.0",
+            "topics_configured": len(self._topic_queries),
+            "topics_attempted": [category for category, _ in topics],
+            "topics_succeeded": len(topic_results),
+            "topics_failed": len(topic_errors),
+            "topic_results": topic_results,
+            "topic_errors": topic_errors,
+            "max_records_per_topic": max_records,
             "interpretation": "aggregated_media_coverage_not_event_verification",
         }

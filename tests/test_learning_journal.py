@@ -108,7 +108,7 @@ class LearningJournalTests(unittest.TestCase):
             })
             self.assertEqual(evaluation["status"], "scored")
             self.assertFalse(evaluation["multi_fold_consistency_gate_passed"])
-            self.assertFalse(summary["live_execution_enabled"] if "live_execution_enabled" in summary else False)
+            self.assertFalse(summary["live_execution_enabled"])
             self.assertFalse(summary["automatic_parameter_tuning"])
 
 

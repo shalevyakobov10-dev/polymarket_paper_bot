@@ -131,8 +131,42 @@ class GDELTCollector:
         self.seen_ids: set[str] = set()
         self.items: list[dict[str, Any]] = []
         self._topic_queries = _configured_topics()
-        self._topic_cursor = 0
+        self._topic_cursor_path = self.log_path.with_name(self.log_path.name + ".cursor.json")
+        self._topic_cursor = self._load_topic_cursor()
         self._load_existing()
+
+    def _load_topic_cursor(self) -> int:
+        """Restore the round-robin cursor only when the configured catalog matches."""
+        try:
+            state = json.loads(self._topic_cursor_path.read_text(encoding="utf-8"))
+            expected = [name for name, _ in self._topic_queries]
+            if isinstance(state, dict) and state.get("topics") == expected:
+                cursor = state.get("cursor")
+                if isinstance(cursor, int) and not isinstance(cursor, bool):
+                    return cursor % max(1, len(self._topic_queries))
+        except (OSError, ValueError, TypeError):
+            pass
+        return 0
+
+    def _save_topic_cursor(self) -> None:
+        """Persist rotation progress atomically so restarts do not starve later topics."""
+        if not self._topic_queries:
+            return
+        temporary = self._topic_cursor_path.with_name(self._topic_cursor_path.name + ".tmp")
+        state = {
+            "topics": [name for name, _ in self._topic_queries],
+            "cursor": self._topic_cursor,
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+        }
+        try:
+            self._topic_cursor_path.parent.mkdir(parents=True, exist_ok=True)
+            temporary.write_text(json.dumps(state, ensure_ascii=False) + "\\n", encoding="utf-8")
+            temporary.replace(self._topic_cursor_path)
+        except OSError:
+            try:
+                temporary.unlink(missing_ok=True)
+            except OSError:
+                pass
 
     def _load_existing(self) -> None:
         paths = [self.log_path] + [
@@ -163,6 +197,7 @@ class GDELTCollector:
         """Rotate through broad global-news topic lanes and persist unique articles."""
         topics, next_cursor = _topics_for_poll(self._topic_queries, self._topic_cursor)
         self._topic_cursor = next_cursor
+        self._save_topic_cursor()
         max_records = _bounded_env_int("GDELT_MAX_RECORDS_PER_TOPIC", 75, 1, 250)
         window = os.getenv("GDELT_TIMESPAN", "1h").strip() or "1h"
         allowed_windows = {"15min", "30min", "1h", "2h", "4h", "6h", "12h", "1d"}

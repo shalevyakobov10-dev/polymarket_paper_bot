@@ -123,6 +123,15 @@ def build_market_feature_rows(
             for _, match in fresh_matches
             if str(match.get("source") or "").strip()
         }
+        topic_categories = {
+            str(category).strip()[:80]
+            for _, match in fresh_matches
+            for category in (
+                match.get("topic_categories")
+                if isinstance(match.get("topic_categories"), list) else []
+            )
+            if str(category).strip()
+        }
         headline_rows = []
         for published, match in fresh_matches[:max_headlines_per_market]:
             headline_rows.append({
@@ -131,13 +140,21 @@ def build_market_feature_rows(
                 "published_at": published.isoformat(),
                 "lexical_overlap": _finite_nonnegative(match.get("lexical_overlap")),
                 "shared_term_count": int(_finite_nonnegative(match.get("shared_term_count")) or 0),
+                "topic_categories": sorted({
+                    str(category).strip()[:80]
+                    for category in (
+                        match.get("topic_categories")
+                        if isinstance(match.get("topic_categories"), list) else []
+                    )
+                    if str(category).strip()
+                }),
             })
 
         fee_schedule = yes.get("fee_schedule") if isinstance(yes.get("fee_schedule"), dict) else {}
         fee_rate = _finite_nonnegative(fee_schedule.get("rate"))
         fee_exponent = _finite_nonnegative(fee_schedule.get("exponent"))
         output.append({
-            "schema_version": 1,
+            "schema_version": 2,
             "observed_at": current.isoformat(),
             "market_id": market_id,
             "token_id_yes": str(yes.get("token_id") or ""),
@@ -166,6 +183,8 @@ def build_market_feature_rows(
             "clob_depth_imbalance_top5": book.get("depth_imbalance_top5"),
             "news_match_count_24h": len(fresh_matches),
             "news_unique_source_label_count_24h": len(source_labels),
+            "news_topic_categories_24h": sorted(topic_categories),
+            "news_topic_category_count_24h": len(topic_categories),
             "news_matches_without_publish_time": unknown_time,
             "news_matches_with_future_publish_time": future_time,
             "news_window_hours": float(news_window_hours),

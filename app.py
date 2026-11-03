@@ -1226,7 +1226,7 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def do_GET(self):
-        if self.path in ("/", "/status", "/health", "/paper", "/news", "/matches", "/market-stream", "/resolutions", "/forecast-evaluation", "/research-features", "/independent-model-evaluation", "/model-forecasts"):
+        if self.path in ("/", "/status", "/health", "/paper", "/news", "/matches", "/market-stream", "/resolutions", "/forecast-evaluation", "/research-features", "/independent-model-evaluation", "/model-forecasts", "/learning"):
             with _lock:
                 snapshot = dict(_state)
             if self.path == "/health":
@@ -1236,12 +1236,15 @@ class Handler(BaseHTTPRequestHandler):
                 with _lock:
                     stream_snapshot = dict(_market_stream_state)
                     resolution_snapshot = dict(_resolution_state)
+                with _learning_lock:
+                    learning_snapshot = dict(_learning_state)
                 healthy, payload = health_payload(
                     snapshot,
                     news_snapshot=news_snapshot,
                     stream_snapshot=stream_snapshot,
                     resolution_snapshot=resolution_snapshot,
                     gdelt_snapshot=gdelt_snapshot,
+                    learning_snapshot=learning_snapshot,
                 )
                 self._send(200 if healthy else 503, payload)
             elif self.path == "/paper":
@@ -1301,6 +1304,25 @@ class Handler(BaseHTTPRequestHandler):
                         "forecast": None,
                         "execution": "none",
                     })
+            elif self.path == "/learning":
+                try:
+                    with _learning_lock:
+                        learning_snapshot = dict(_learning_state)
+                    self._send(200, {
+                        **learning_snapshot,
+                        **get_learning_journal().summary(),
+                        "research_only": True,
+                        "live_execution_enabled": False,
+                        "automatic_parameter_tuning": False,
+                    })
+                except Exception as exc:
+                    self._send(503, {
+                        "mode": "REALIZED_FORECAST_FEEDBACK_V1",
+                        "error": f"{type(exc).__name__}: {str(exc)[:300]}",
+                        "research_only": True,
+                        "live_execution_enabled": False,
+                        "execution": "none",
+                    })
             elif self.path == "/forecast-evaluation":
                 try:
                     self._send(200, forecast_evaluation_payload())
@@ -1333,12 +1355,15 @@ class Handler(BaseHTTPRequestHandler):
                 with _lock:
                     stream_snapshot = dict(_market_stream_state)
                     resolution_snapshot = dict(_resolution_state)
+                with _learning_lock:
+                    learning_snapshot = dict(_learning_state)
                 self._send(200, {
                     "service": "Polymarket Paper Research Bot",
                     **snapshot,
                     "news": news_snapshot,
                     "market_stream": stream_snapshot,
                     "resolutions": resolution_snapshot,
+                    "model_learning": learning_snapshot,
                 })
         else:
             self._send(404, {"error": "not_found"})
@@ -1352,6 +1377,7 @@ def main() -> None:
     threading.Thread(target=news_worker_loop, daemon=True, name="global-news-poller").start()
     threading.Thread(target=market_stream_worker_loop, daemon=True, name="market-stream-poller").start()
     threading.Thread(target=resolution_worker_loop, daemon=True, name="resolution-poller").start()
+    threading.Thread(target=model_learning_worker_loop, daemon=True, name="model-learning-poller").start()
     port = int(os.getenv("PORT", "8080"))
     server = ThreadingHTTPServer(("0.0.0.0", port), Handler)
     print(f"Paper research worker listening on port {port}; polling every {POLL_SECONDS}s")

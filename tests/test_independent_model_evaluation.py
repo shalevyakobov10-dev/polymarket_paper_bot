@@ -34,6 +34,66 @@ def synthetic_samples(count=240):
 
 
 class FeatureModelEvaluationTests(unittest.TestCase):
+    def test_score_reports_calibration_for_well_calibrated_probabilities(self):
+        probabilities = [0.2] * 10 + [0.8] * 10
+        labels = [1, 1] + [0] * 8 + [1] * 8 + [0, 0]
+        result = model_eval._score(probabilities, labels)
+
+        self.assertEqual(result["n"], 20)
+        calibration = result["calibration"]
+        self.assertEqual(calibration["method"], "equal_width_10_bins")
+        self.assertAlmostEqual(calibration["expected_calibration_error"], 0.0)
+        self.assertAlmostEqual(calibration["maximum_calibration_error"], 0.0)
+        self.assertEqual(len(calibration["bins"]), 2)
+        self.assertEqual(calibration["bins"][0]["count"], 10)
+        self.assertEqual(calibration["bins"][1]["count"], 10)
+
+    def test_score_detects_overconfident_probability_calibration(self):
+        result = model_eval._score([0.9] * 10, [1, 1, 1, 1, 1, 0, 0, 0, 0, 0])
+        self.assertAlmostEqual(result["calibration"]["expected_calibration_error"], 0.4)
+        self.assertAlmostEqual(result["calibration"]["maximum_calibration_error"], 0.4)
+        self.assertEqual(result["calibration"]["bins"][0]["count"], 10)
+
+    def test_score_rejects_nonfinite_or_out_of_range_probabilities(self):
+        for probability in (float("nan"), float("inf"), -0.01, 1.01):
+            with self.subTest(probability=probability):
+                with self.assertRaises(ValueError):
+                    model_eval._score([probability], [1])
+
+    def test_holdout_excludes_all_duplicate_market_samples(self):
+        samples = synthetic_samples()
+        duplicate = {
+            **samples[0],
+            "forecast_timestamp": (
+                datetime.fromisoformat(samples[0]["forecast_timestamp"]) + timedelta(hours=1)
+            ).isoformat(),
+            "resolved_at": (
+                datetime.fromisoformat(samples[0]["resolved_at"]) + timedelta(hours=1)
+            ).isoformat(),
+        }
+        result = model_eval.evaluate_feature_model(samples + [duplicate])
+        self.assertEqual(result["status"], "scored")
+        self.assertEqual(result["eligible_markets"], len(samples) - 1)
+        self.assertEqual(result["duplicate_market_ids_excluded"], 1)
+        self.assertEqual(result["duplicate_market_samples_excluded"], 2)
+
+    def test_walk_forward_deduplication_is_independent_of_input_order(self):
+        samples = synthetic_samples()
+        duplicate = {
+            **samples[0],
+            "forecast_timestamp": (
+                datetime.fromisoformat(samples[0]["forecast_timestamp"]) + timedelta(hours=1)
+            ).isoformat(),
+            "resolved_at": (
+                datetime.fromisoformat(samples[0]["resolved_at"]) + timedelta(hours=1)
+            ).isoformat(),
+        }
+        result = model_eval.evaluate_feature_model_walk_forward([duplicate] + samples)
+        self.assertEqual(result["status"], "scored")
+        self.assertEqual(result["eligible_unique_markets"], len(samples) - 1)
+        self.assertEqual(result["duplicate_market_ids_excluded"], 1)
+        self.assertEqual(result["duplicate_market_samples_excluded"], 2)
+
     def test_builds_one_nearest_pre_resolution_snapshot_per_market(self):
         resolved_at = datetime(2026, 10, 30, 12, tzinfo=timezone.utc)
         target = resolved_at - timedelta(hours=24)

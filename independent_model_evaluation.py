@@ -264,9 +264,95 @@ def _probabilities(
     ]
 
 
+def _calibration_summary(
+    probabilities: list[float],
+    labels: list[int],
+    *,
+    bin_count: int = 10,
+) -> dict[str, Any]:
+    """Summarize equal-width reliability bins and expected calibration error."""
+    if bin_count < 2:
+        raise ValueError("bin_count must be at least 2")
+    if len(probabilities) != len(labels):
+        raise ValueError("probabilities and labels must have the same length")
+    if not probabilities:
+        return {
+            "method": f"equal_width_{bin_count}_bins",
+            "expected_calibration_error": None,
+            "maximum_calibration_error": None,
+            "mean_probability": None,
+            "observed_outcome_rate": None,
+            "bins": [],
+        }
+
+    counts = [0] * bin_count
+    probability_sums = [0.0] * bin_count
+    positive_counts = [0] * bin_count
+    for probability, label in zip(probabilities, labels):
+        if (
+            isinstance(probability, bool)
+            or not isinstance(probability, (int, float))
+            or not math.isfinite(float(probability))
+            or not 0.0 <= float(probability) <= 1.0
+        ):
+            raise ValueError("probabilities must be finite values between 0 and 1")
+        if label not in (0, 1, False, True):
+            raise ValueError("labels must be binary")
+        value = float(probability)
+        bucket = min(bin_count - 1, int(value * bin_count))
+        counts[bucket] += 1
+        probability_sums[bucket] += value
+        positive_counts[bucket] += int(bool(label))
+
+    n = len(labels)
+    bins = []
+    weighted_gaps = 0.0
+    max_gap = 0.0
+    for index, count in enumerate(counts):
+        if count == 0:
+            continue
+        mean_probability = probability_sums[index] / count
+        observed_rate = positive_counts[index] / count
+        gap = abs(mean_probability - observed_rate)
+        weighted_gaps += (count / n) * gap
+        max_gap = max(max_gap, gap)
+        bins.append({
+            "lower_bound": round(index / bin_count, 6),
+            "upper_bound": round((index + 1) / bin_count, 6),
+            "count": count,
+            "mean_predicted_probability": round(mean_probability, 8),
+            "observed_outcome_rate": round(observed_rate, 8),
+            "absolute_calibration_gap": round(gap, 8),
+        })
+
+    return {
+        "method": f"equal_width_{bin_count}_bins",
+        "expected_calibration_error": round(weighted_gaps, 8),
+        "maximum_calibration_error": round(max_gap, 8),
+        "mean_probability": round(sum(float(p) for p in probabilities) / n, 8),
+        "observed_outcome_rate": round(sum(int(bool(y)) for y in labels) / n, 8),
+        "bins": bins,
+    }
+
+
 def _score(probabilities: list[float], labels: list[int]) -> dict[str, Any]:
     if not probabilities or len(probabilities) != len(labels):
-        return {"n": 0, "brier_score": None, "log_loss": None, "accuracy_pct": None}
+        return {
+            "n": 0,
+            "brier_score": None,
+            "log_loss": None,
+            "accuracy_pct": None,
+            "calibration": _calibration_summary([], []),
+        }
+    if any(
+        isinstance(p, bool) or not isinstance(p, (int, float))
+        or not math.isfinite(float(p)) or not 0.0 <= float(p) <= 1.0
+        for p in probabilities
+    ):
+        raise ValueError("probabilities must be finite values between 0 and 1")
+    if any(label not in (0, 1, False, True) for label in labels):
+        raise ValueError("labels must be binary")
+
     eps = 1e-12
     n = len(labels)
     brier = sum((p - y) ** 2 for p, y in zip(probabilities, labels)) / n
@@ -280,6 +366,7 @@ def _score(probabilities: list[float], labels: list[int]) -> dict[str, Any]:
         "brier_score": round(brier, 8),
         "log_loss": round(log_loss, 8),
         "accuracy_pct": round(accuracy * 100.0, 4),
+        "calibration": _calibration_summary(probabilities, labels),
     }
 
 
@@ -308,13 +395,15 @@ def evaluate_feature_model(
     for sample in samples:
         if not isinstance(sample, dict):
             continue
+        market_id = str(sample.get("market_id") or "").strip()
         forecast_stamp = _timestamp(sample.get("forecast_timestamp"))
         resolved_stamp = _timestamp(sample.get("resolved_at"))
         outcome = sample.get("outcome_yes")
         market_probability = _number(sample.get("market_probability_yes"))
         features = sample.get("features")
         if (
-            forecast_stamp is None or resolved_stamp is None or forecast_stamp >= resolved_stamp
+            not market_id or forecast_stamp is None or resolved_stamp is None
+            or forecast_stamp >= resolved_stamp
             or outcome not in (0, 1, False, True)
             or market_probability is None or not 0.0 <= market_probability <= 1.0
             or not isinstance(features, dict)
@@ -324,10 +413,7 @@ def evaluate_feature_model(
         vector: dict[str, float | None] = {}
         for name in FEATURE_NAMES:
             value = _number(features.get(name))
-            if value is not None:
-                vector[name] = value
-            else:
-                vector[name] = None
+            vector[name] = value
         # Rebuild the market-prior feature from the separately validated baseline
         # probability rather than trusting a potentially inconsistent stored value.
         vector["logit_market_probability"] = math.log(
@@ -335,14 +421,29 @@ def evaluate_feature_model(
         )
         eligible.append({
             **sample,
+            "market_id": market_id,
             "forecast_timestamp": _iso(forecast_stamp),
             "resolved_at": _iso(resolved_stamp),
             "features": vector,
+            "market_probability_yes": float(market_probability),
             "outcome_yes": int(bool(outcome)),
             "_forecast_stamp": forecast_stamp,
             "_resolved_stamp": resolved_stamp,
         })
-    eligible.sort(key=lambda row: (row["_forecast_stamp"], row["market_id"] if row.get("market_id") else ""))
+    eligible.sort(key=lambda row: (row["_forecast_stamp"], row["market_id"]))
+    market_counts: dict[str, int] = {}
+    for row in eligible:
+        market_counts[row["market_id"]] = market_counts.get(row["market_id"], 0) + 1
+    duplicate_market_ids = {
+        market_id for market_id, count in market_counts.items() if count > 1
+    }
+    duplicate_market_samples_excluded = sum(
+        count for count in market_counts.values() if count > 1
+    )
+    eligible = [
+        row for row in eligible
+        if row["market_id"] not in duplicate_market_ids
+    ]
 
     split_index = int(len(eligible) * train_fraction)
     initial_train = eligible[:split_index]
@@ -358,6 +459,8 @@ def evaluate_feature_model(
         "mode": "INDEPENDENT_FEATURE_MODEL_EVALUATION_V1",
         "status": "insufficient_data",
         "eligible_markets": len(eligible),
+        "duplicate_market_ids_excluded": len(duplicate_market_ids),
+        "duplicate_market_samples_excluded": duplicate_market_samples_excluded,
         "initial_train_n": len(initial_train),
         "purged_train_n": len(initial_train) - len(train),
         "train_n": len(train),
@@ -565,7 +668,6 @@ def evaluate_feature_model_walk_forward(
         raise ValueError("l2 must be finite and nonnegative")
 
     eligible = []
-    seen_market_ids: set[str] = set()
     for sample in samples:
         if not isinstance(sample, dict):
             continue
@@ -576,7 +678,7 @@ def evaluate_feature_model_walk_forward(
         market_probability = _number(sample.get("market_probability_yes"))
         features = sample.get("features")
         if (
-            not market_id or market_id in seen_market_ids
+            not market_id
             or forecast_stamp is None or resolved_stamp is None
             or forecast_stamp >= resolved_stamp
             or outcome not in (0, 1, False, True)
@@ -603,9 +705,21 @@ def evaluate_feature_model_walk_forward(
             "_forecast_stamp": forecast_stamp,
             "_resolved_stamp": resolved_stamp,
         })
-        seen_market_ids.add(market_id)
 
     eligible.sort(key=lambda row: (row["_forecast_stamp"], row["market_id"]))
+    market_counts: dict[str, int] = {}
+    for row in eligible:
+        market_counts[row["market_id"]] = market_counts.get(row["market_id"], 0) + 1
+    duplicate_market_ids = {
+        market_id for market_id, count in market_counts.items() if count > 1
+    }
+    duplicate_market_samples_excluded = sum(
+        count for count in market_counts.values() if count > 1
+    )
+    eligible = [
+        row for row in eligible
+        if row["market_id"] not in duplicate_market_ids
+    ]
     n = len(eligible)
     warmup_n = int(n * warmup_fraction)
     remaining_n = n - warmup_n
@@ -613,6 +727,8 @@ def evaluate_feature_model_walk_forward(
         "mode": "PURGED_WALK_FORWARD_MODEL_VALIDATION_V1",
         "status": "insufficient_data",
         "eligible_unique_markets": n,
+        "duplicate_market_ids_excluded": len(duplicate_market_ids),
+        "duplicate_market_samples_excluded": duplicate_market_samples_excluded,
         "warmup_fraction": warmup_fraction,
         "warmup_n": warmup_n,
         "requested_folds": folds,

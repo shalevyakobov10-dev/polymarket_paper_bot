@@ -43,6 +43,10 @@ def _hostname(value: str) -> str:
     raw = str(value or "").strip()
     if not raw:
         return ""
+    if any(character.isspace() for character in raw):
+        return ""
+    if "://" not in raw and "." not in raw.split("/", 1)[0]:
+        return ""
     candidate = raw if "://" in raw else "//" + raw
     try:
         host = (urlsplit(candidate).hostname or "").lower().strip(".")

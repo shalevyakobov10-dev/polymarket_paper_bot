@@ -257,6 +257,30 @@ class ParserTests(unittest.TestCase):
             ["news", "resolutions", "gdelt", "market_stream"],
         )
 
+    def test_health_reports_model_learning_worker_freshness(self):
+        now = datetime(2026, 11, 3, 12, tzinfo=timezone.utc)
+        core = {
+            "worker_running": True,
+            "last_success_at": (now - timedelta(seconds=30)).isoformat(),
+            "last_error": None,
+        }
+        learning = {
+            "worker_running": True,
+            "last_success_at": (now - timedelta(minutes=5)).isoformat(),
+            "last_error": None,
+            "model_status": "model_fitted",
+            "training_markets": 100,
+            "feedback_forecasts_scored_total": 42,
+        }
+        healthy, payload = app.health_payload(core, now, learning_snapshot=learning)
+        self.assertTrue(healthy)
+        self.assertEqual(payload["components"]["model_learning"]["status"], "healthy")
+        self.assertEqual(payload["components"]["model_learning"]["training_markets"], 100)
+        self.assertEqual(
+            payload["components"]["model_learning"]["feedback_forecasts_scored_total"], 42
+        )
+        self.assertNotIn("model_learning", payload["degraded_components"])
+
     def test_health_rejects_future_and_invalid_component_timestamps(self):
         now = datetime(2026, 10, 25, 12, tzinfo=timezone.utc)
         future = {

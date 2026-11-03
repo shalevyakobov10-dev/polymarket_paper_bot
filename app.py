@@ -23,6 +23,7 @@ from global_news import DEFAULT_TOPIC_QUERIES, GDELTCollector
 from news_monitor import DEFAULT_FEEDS, NewsCollector, NewsMarketMatcher, summarize_market_corroboration, summarize_news_freshness
 from research_features import build_market_feature_rows, read_recent_jsonl, summarize_feature_rows
 from independent_model_evaluation import evaluate_feature_files, forecast_current_feature_files
+from learning_journal import LearningJournal
 from resilience import exponential_backoff_seconds, parse_retry_after
 
 GAMMA_URL = "https://gamma-api.polymarket.com/markets"
@@ -35,12 +36,23 @@ try:
     RESOLUTION_POLL_SECONDS = min(3600, max(300, int(os.getenv("RESOLUTION_POLL_SECONDS", "900"))))
 except (ValueError, TypeError):
     RESOLUTION_POLL_SECONDS = 900
+try:
+    MODEL_LEARNING_POLL_SECONDS = min(3600, max(300, int(os.getenv("MODEL_LEARNING_POLL_SECONDS", "900"))))
+except (ValueError, TypeError):
+    MODEL_LEARNING_POLL_SECONDS = 900
+try:
+    MODEL_EVALUATION_SECONDS = min(86400, max(3600, int(os.getenv("MODEL_EVALUATION_SECONDS", "21600"))))
+except (ValueError, TypeError):
+    MODEL_EVALUATION_SECONDS = 21600
 DATA_DIR = Path(os.getenv("DATA_DIR", "data"))
 SNAPSHOTS = DATA_DIR / "market_snapshots.jsonl"
 SIGNALS = DATA_DIR / "candidate_signals.jsonl"
 ORDERBOOK_SNAPSHOTS = DATA_DIR / "orderbook_snapshots.jsonl"
 RESOLUTIONS = DATA_DIR / "resolved_markets.jsonl"
 RESEARCH_FEATURES = DATA_DIR / "research_features.jsonl"
+MODEL_FORECASTS = DATA_DIR / "model_forecasts.jsonl"
+MODEL_FEEDBACK = DATA_DIR / "model_feedback.jsonl"
+MODEL_LEARNING_EVALUATIONS = DATA_DIR / "model_learning_evaluations.jsonl"
 try:
     RESEARCH_FEATURES_SNAPSHOT_SECONDS = min(3600, max(60, int(os.getenv("RESEARCH_FEATURES_SNAPSHOT_SECONDS", "900"))))
 except (ValueError, TypeError):
@@ -134,6 +146,28 @@ _gdelt_state = {
 _latest_market_questions: list[dict] = []
 _research_feature_last_written: dict[str, float] = {}
 _research_feature_schedule_loaded = False
+_learning_lock = threading.RLock()
+_learning_journal: LearningJournal | None = None
+_learning_state = {
+    "enabled": True,
+    "worker_running": False,
+    "last_poll_at": None,
+    "last_success_at": None,
+    "last_error": None,
+    "consecutive_failures": 0,
+    "retry_delay_seconds": 0.0,
+    "next_retry_at": None,
+    "poll_interval_seconds": MODEL_LEARNING_POLL_SECONDS,
+    "evaluation_interval_seconds": MODEL_EVALUATION_SECONDS,
+    "model_status": "starting",
+    "model_version": None,
+    "training_markets": 0,
+    "forecasts_saved_last_cycle": 0,
+    "feedback_scored_last_cycle": 0,
+    "last_evaluation_at": None,
+    "last_evaluation_status": None,
+    "live_execution_enabled": False,
+}
 _resolution_collector: ResolutionCollector | None = None
 _resolution_state = {
     "enabled": True,

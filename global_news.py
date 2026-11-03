@@ -20,6 +20,45 @@ DEFAULT_QUERY = (
     "OR ceasefire OR missile OR trade tariff OR government resignation)"
 )
 
+DEFAULT_TOPIC_QUERIES = (
+    ("geopolitics_security", '(election OR parliament OR government OR diplomacy OR sanctions OR war OR ceasefire OR conflict OR military OR missile)'),
+    ("macroeconomics_finance", '(inflation OR "central bank" OR "interest rates" OR GDP OR recession OR currency OR "bond yields" OR "stock market")'),
+    ("business_trade", '(merger OR acquisition OR bankruptcy OR earnings OR exports OR imports OR tariffs OR "trade agreement" OR layoffs)'),
+    ("technology_cyber_ai", '("artificial intelligence" OR semiconductor OR cybersecurity OR "data breach" OR chipmaker OR robotics OR "technology company")'),
+    ("energy_commodities", '(oil OR "natural gas" OR OPEC OR electricity OR uranium OR lithium OR copper OR wheat OR grain)'),
+    ("health_biotech", '(outbreak OR epidemic OR pandemic OR vaccine OR "clinical trial" OR biotech OR disease OR hospital)'),
+    ("climate_disasters", '(earthquake OR hurricane OR flood OR wildfire OR drought OR cyclone OR "extreme weather" OR climate)'),
+    ("sports", '(football OR soccer OR basketball OR tennis OR cricket OR Olympics OR FIFA OR championship OR tournament)'),
+    ("science_space", '(NASA OR spaceflight OR astronomy OR "scientific discovery" OR research OR physics OR "space mission")'),
+    ("entertainment_culture", '(movie OR film OR music OR celebrity OR actor OR "award ceremony" OR gaming OR "video game")'),
+)
+
+
+def _bounded_env_int(name: str, default: int, minimum: int, maximum: int) -> int:
+    try:
+        value = int(os.getenv(name, str(default)))
+    except (TypeError, ValueError):
+        value = default
+    return min(maximum, max(minimum, value))
+
+
+def _configured_topics() -> tuple[tuple[str, str], ...]:
+    custom = os.getenv("GDELT_QUERY", "").strip()
+    if custom:
+        return (("custom", custom[:1000]),)
+    requested = [part.strip() for part in os.getenv("GDELT_TOPICS", "").split(",") if part.strip()]
+    available = dict(DEFAULT_TOPIC_QUERIES)
+    selected = [(name, available[name]) for name in requested if name in available] if requested else list(DEFAULT_TOPIC_QUERIES)
+    return tuple(selected or list(DEFAULT_TOPIC_QUERIES))
+
+
+def _topics_for_poll(topics: tuple[tuple[str, str], ...], cursor: int) -> tuple[list[tuple[str, str]], int]:
+    if not topics:
+        return [], 0
+    count = _bounded_env_int("GDELT_TOPICS_PER_POLL", 4, 1, len(topics))
+    selected = [topics[(cursor + offset) % len(topics)] for offset in range(count)]
+    return selected, (cursor + count) % len(topics)
+
 
 def _published_time(value: Any) -> str:
     raw = str(value or "").strip()

@@ -75,7 +75,7 @@ docker run --rm -p 8080:8080 -v polymarket-data:/app/data polymarket-paper-bot
 
 ## Publisher identity and source diversity
 
-RSS sections from the same newsroom and GDELT article-domain results are normalized to a shared publisher identity where the outlet is known (including BBC, The Guardian, Al Jazeera, NPR, Deutsche Welle, Sky, and France 24). News-to-market match records retain this publisher key, and `/matches` counts unique publisher identities rather than treating each feed section as a separate publisher. Legacy records fall back to normalized source labels.
+RSS sections from the same newsroom and GDELT article-domain results are normalized to a shared publisher identity where the outlet is known (including BBC, The Guardian, Al Jazeera, NPR, Deutsche Welle, Sky, France 24, Reuters, Associated Press, AFP, CNN, CNBC, Bloomberg, Financial Times, The New York Times, The Washington Post, and selected regional publishers). News-to-market match records retain this publisher key, and `/matches` counts unique publisher identities rather than treating each feed section as a separate publisher. Legacy records fall back to normalized source labels.
 
 This is still only a source-diversity measure: it does not detect every syndicated wire story, prove editorial independence, verify that an event happened, or validate a trading signal. Source country and language are preserved separately from publisher identity.
 

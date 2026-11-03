@@ -961,6 +961,7 @@ def health_payload(
     stream_snapshot: dict | None = None,
     resolution_snapshot: dict | None = None,
     gdelt_snapshot: dict | None = None,
+    learning_snapshot: dict | None = None,
 ) -> tuple[bool, dict]:
     """Report core market readiness and separately expose optional collector degradation."""
     current = now or datetime.now(timezone.utc)
@@ -1020,6 +1021,22 @@ def health_payload(
         gdelt_component["topics_attempted"] = list(gdelt_snapshot.get("topics_attempted") or [])
         components["gdelt"] = gdelt_component
 
+    if learning_snapshot is not None:
+        learning_component = _health_component(
+            name="model_learning",
+            worker_running=bool(learning_snapshot.get("worker_running")),
+            last_success_at=learning_snapshot.get("last_success_at"),
+            stale_after_seconds=max(900, MODEL_LEARNING_POLL_SECONDS * 3),
+            now=current,
+            last_error=learning_snapshot.get("last_error"),
+        )
+        learning_component["model_status"] = learning_snapshot.get("model_status")
+        learning_component["training_markets"] = int(learning_snapshot.get("training_markets") or 0)
+        learning_component["feedback_forecasts_scored_total"] = int(
+            learning_snapshot.get("feedback_forecasts_scored_total") or 0
+        )
+        components["model_learning"] = learning_component
+
     if stream_snapshot is not None:
         stream_worker_running = bool(stream_snapshot.get("worker_running"))
         stream_last_connect = stream_snapshot.get("last_connect_at")
@@ -1055,7 +1072,7 @@ def health_payload(
         "next_retry_at": snapshot.get("next_retry_at"),
         "components": components,
         "degraded_components": degraded,
-        "health_policy": "market_data_is_required; news_gdelt_resolution_and_stream_are_reported_as_optional_degraded_components",
+        "health_policy": "market_data_is_required; news_gdelt_resolution_stream_and_model_learning_are_reported_as_optional_degraded_components",
     }
     if not healthy and not payload["last_error"]:
         payload["last_error"] = "No recent successful market poll"

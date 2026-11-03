@@ -73,6 +73,9 @@ _state = {
 _market_stream_state = {
     "enabled": True,
     "worker_running": False,
+    "consecutive_failures": 0,
+    "retry_delay_seconds": 0.0,
+    "next_retry_at": None,
     "connected": False,
     "last_connect_at": None,
     "last_message_at": None,
@@ -91,6 +94,9 @@ _news_collector: NewsCollector | None = None
 _news_state = {
     "enabled": True,
     "worker_running": False,
+    "consecutive_failures": 0,
+    "retry_delay_seconds": 0.0,
+    "next_retry_at": None,
     "feeds_configured": len(DEFAULT_FEEDS),
     "feeds_succeeded": 0,
     "feeds_failed": 0,
@@ -126,6 +132,9 @@ _resolution_collector: ResolutionCollector | None = None
 _resolution_state = {
     "enabled": True,
     "worker_running": False,
+    "consecutive_failures": 0,
+    "retry_delay_seconds": 0.0,
+    "next_retry_at": None,
     "last_poll_at": None,
     "last_success_at": None,
     "last_error": None,
@@ -587,6 +596,7 @@ def settle_open_paper_positions(
 
 def resolution_worker_loop() -> None:
     """Collect public decisive binary resolutions for the forecast evaluation scorecard."""
+    failure_count = 0
     with _lock:
         _resolution_state["worker_running"] = True
     while True:
@@ -600,10 +610,14 @@ def resolution_worker_loop() -> None:
                 get_paper_trader(),
                 result.get("resolved_markets") or [],
             )
+            failure_count = 0
             with _lock:
                 _resolution_state.update({
                     "last_success_at": result.get("last_success_at"),
                     "last_error": None,
+                    "consecutive_failures": 0,
+                    "retry_delay_seconds": 0.0,
+                    "next_retry_at": None,
                     "markets_checked_last_poll": int(result.get("markets_checked") or 0),
                     "resolutions_added_last_poll": int(result.get("resolutions_added") or 0),
                     "resolutions_total_seen": int(result.get("resolutions_total_seen") or 0),
@@ -626,8 +640,17 @@ def resolution_worker_loop() -> None:
                     ),
                 })
         except Exception as exc:
+            failure_count += 1
+            delay = _worker_retry_delay(exc, failure_count, base_seconds=RESOLUTION_POLL_SECONDS)
             with _lock:
-                _resolution_state["last_error"] = f"Unexpected {type(exc).__name__}: {str(exc)[:300]}"
+                _resolution_state.update({
+                    "last_error": f"Unexpected {type(exc).__name__}: {str(exc)[:300]}",
+                    "consecutive_failures": failure_count,
+                    "retry_delay_seconds": delay,
+                    "next_retry_at": (datetime.now(timezone.utc) + timedelta(seconds=delay)).isoformat(),
+                })
+            time.sleep(delay)
+            continue
         time.sleep(RESOLUTION_POLL_SECONDS)
 
 
@@ -640,7 +663,8 @@ def get_market_stream_collector() -> MarketStreamCollector:
 
 
 def market_stream_worker_loop() -> None:
-    """Reconnect bounded public market subscriptions and persist incoming events."""
+    """Reconnect bounded public market subscriptions with exponential backoff on errors."""
+    failure_count = 0
     with _lock:
         _market_stream_state["worker_running"] = True
     while True:
@@ -649,33 +673,52 @@ def market_stream_worker_loop() -> None:
         if not tokens:
             time.sleep(5)
             continue
-        result = get_market_stream_collector().run_session(tokens, max_seconds=45)
+        try:
+            result = get_market_stream_collector().run_session(tokens, max_seconds=45)
+        except Exception as exc:
+            failure_count += 1
+            delay = _worker_retry_delay(exc, failure_count, base_seconds=5)
+            with _lock:
+                _market_stream_state.update({
+                    "connected": False,
+                    "last_error": f"Unexpected {type(exc).__name__}: {str(exc)[:300]}",
+                    "consecutive_failures": failure_count,
+                    "retry_delay_seconds": delay,
+                    "next_retry_at": (datetime.now(timezone.utc) + timedelta(seconds=delay)).isoformat(),
+                    "sessions": int(_market_stream_state["sessions"]) + 1,
+                })
+            time.sleep(delay)
+            continue
+        connected = bool(result.get("connected"))
+        if connected:
+            failure_count = 0
+        else:
+            failure_count += 1
+        delay = 0.0 if connected else _worker_retry_delay(
+            RuntimeError(str(result.get("reason") or "Market stream disconnected")),
+            failure_count,
+            base_seconds=5,
+        )
         with _lock:
             _market_stream_state.update({
-                "connected": bool(result.get("connected")),
-                "last_connect_at": utc_now() if result.get("connected") else _market_stream_state.get("last_connect_at"),
+                "connected": connected,
+                "last_connect_at": utc_now() if connected else _market_stream_state.get("last_connect_at"),
                 "last_message_at": result.get("last_message_at") or _market_stream_state.get("last_message_at"),
                 "last_error": result.get("reason"),
+                "consecutive_failures": failure_count,
+                "retry_delay_seconds": delay,
+                "next_retry_at": (datetime.now(timezone.utc) + timedelta(seconds=delay)).isoformat() if delay else None,
                 "subscribed_tokens": int(result.get("subscribed_tokens") or 0),
                 "events_persisted_last_session": int(result.get("events_persisted") or 0),
                 "sessions": int(_market_stream_state["sessions"]) + 1,
             })
-        if not result.get("connected"):
-            time.sleep(5)
+        if not connected:
+            time.sleep(delay)
+
 
 def _record_market_worker_failure(exc: Exception, failure_count: int, *, unexpected: bool = False) -> float:
     """Record a failed market poll and calculate a bounded retry delay."""
-    headers = getattr(exc, "headers", None)
-    retry_after_header = headers.get("Retry-After") if headers is not None else None
-    retry_after_seconds = parse_retry_after(retry_after_header)
-    delay = exponential_backoff_seconds(
-        failure_count,
-        base_seconds=POLL_SECONDS,
-        max_seconds=POLL_MAX_BACKOFF_SECONDS,
-        jitter_fraction=0.15,
-        random_value=random.random(),
-        retry_after_seconds=retry_after_seconds,
-    )
+    delay = _worker_retry_delay(exc, failure_count, base_seconds=POLL_SECONDS)
     message = (
         f"Unexpected {type(exc).__name__}: {str(exc)[:300]}"
         if unexpected else f"{type(exc).__name__}: {str(exc)[:300]}"
@@ -910,14 +953,17 @@ def match_recent_news() -> dict:
 
 def news_worker_loop() -> None:
     """Continuously collect attributed headlines without blocking market polling."""
+    failure_count = 0
     with _news_lock:
         _news_state["worker_running"] = True
     while True:
         attempted_at = utc_now()
         with _news_lock:
             _news_state["last_poll_at"] = attempted_at
+        retry_delay = None
         try:
             result = get_news_collector().fetch_once()
+            feeds_succeeded = int(result.get("feeds_succeeded") or 0)
             with _news_lock:
                 _news_state.update({
                     "feeds_configured": result["feeds_configured"],
@@ -932,11 +978,29 @@ def news_worker_loop() -> None:
                     ),
                 })
                 _news_items_cache[:] = result["latest_items"][:100]
-                if result["feeds_succeeded"] > 0:
+                if feeds_succeeded > 0:
                     _news_state["last_success_at"] = utc_now()
                     _news_state["last_error"] = None
+                    _news_state["consecutive_failures"] = 0
+                    _news_state["retry_delay_seconds"] = 0.0
+                    _news_state["next_retry_at"] = None
                 else:
                     _news_state["last_error"] = "All configured news feeds failed"
+            if feeds_succeeded > 0:
+                failure_count = 0
+            else:
+                failure_count += 1
+                retry_delay = _worker_retry_delay(
+                    RuntimeError("All configured news feeds failed"),
+                    failure_count,
+                    base_seconds=NEWS_POLL_SECONDS,
+                )
+                with _news_lock:
+                    _news_state.update({
+                        "consecutive_failures": failure_count,
+                        "retry_delay_seconds": retry_delay,
+                        "next_retry_at": (datetime.now(timezone.utc) + timedelta(seconds=retry_delay)).isoformat(),
+                    })
             try:
                 gdelt_result = get_gdelt_collector().fetch_once()
                 with _news_lock:
@@ -961,9 +1025,16 @@ def news_worker_loop() -> None:
                 with _news_lock:
                     _news_state["last_match_error"] = f"Unexpected {type(exc).__name__}: {str(exc)[:240]}"
         except Exception as exc:
+            failure_count += 1
+            retry_delay = _worker_retry_delay(exc, failure_count, base_seconds=NEWS_POLL_SECONDS)
             with _news_lock:
-                _news_state["last_error"] = f"Unexpected {type(exc).__name__}: {str(exc)[:300]}"
-        time.sleep(NEWS_POLL_SECONDS)
+                _news_state.update({
+                    "last_error": f"Unexpected {type(exc).__name__}: {str(exc)[:300]}",
+                    "consecutive_failures": failure_count,
+                    "retry_delay_seconds": retry_delay,
+                    "next_retry_at": (datetime.now(timezone.utc) + timedelta(seconds=retry_delay)).isoformat(),
+                })
+        time.sleep(retry_delay if retry_delay is not None else NEWS_POLL_SECONDS)
 
 
 class Handler(BaseHTTPRequestHandler):

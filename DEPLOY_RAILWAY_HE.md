@@ -5,7 +5,7 @@
 
 ## פריסה עם תצורת התשתית שבמאגר
 
-הקובץ `.railway/railway.ts` מגדיר שירות אחד בשם `polymarket-paper-bot` ממאגר GitHub הזה ומ-branch `main`, Volume בנפח 1GB, חיבור Volume אל `/app/data`, health check, וערכי סיכון קבועים ל-Paper Trading. הוא מציב את השירות ואת ה-Volume באזור `europe-west4`.
+הקובץ `.railway/railway.ts` מגדיר שירות אחד בשם `polymarket-paper-bot` ממאגר GitHub הזה ומ-branch `main`, Volume בנפח 1GB, חיבור Volume אל `/app/data`, health check, וערכי סיכון קבועים ל-Paper Trading. הוא מציב את השירות ואת ה-Volume באזור `europe-west4`. התצורה כוללת גם איסוף GDELT בארבעה מסלולי נושא בכל מחזור (חלון שעה), רישום/אימון מחזורי של מודל כל 15 דקות והערכת holdout/walk-forward כל 6 שעות.
 
 Railway ממליצה כיום על Infrastructure as Code דרך `.railway/railway.ts`; קובצי `railway.json`/`railway.toml` הישנים הוצאו משימוש עבור שירותים חדשים. ראו [Railway IaC](https://docs.railway.com/infrastructure-as-code) ו-[Reference](https://docs.railway.com/infrastructure-as-code/reference).
 
@@ -46,6 +46,8 @@ Railway ממליצה כיום על Infrastructure as Code דרך `.railway/railw
 - `/health` — בדיקת חיות בסיסית של HTTP.
 - `/status` — מצב worker, זמן הסריקה האחרונה, כמות שווקים/תוצאות, שגיאה אחרונה וסיכום הסימולציה.
 - `/paper` — יתרת הסימולציה, מדדי ביצועים ופוזיציות מדומות פתוחות.
+- `/learning` — גרסת המודל, כמות שווקים באימון, מספר תחזיות שהבשילו, Brier/Log Loss מול baseline ותוצאות לפי גרסת מודל.
+- `/news` — מצב RSS/GDELT, מסלולי הנושא שהצליחו/נכשלו, פריטים עדכניים וטריות המידע.
 
 `/health` אינו מוכיח שה-API החיצוני נגיש. ב-`/status` בדוק ש-`last_success_at` מתעדכן וש-`last_error` הוא `null`. אם מופיעה שגיאת DNS, timeout או rate limit, השירות עדיין עשוי להגיש HTTP אך לא לקבל נתוני שוק חדשים.
 

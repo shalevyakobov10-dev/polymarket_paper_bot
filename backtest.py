@@ -24,6 +24,21 @@ from paper_trading import PaperConfig, PaperTrader
 GAMMA_BASE = "https://gamma-api.polymarket.com"
 CLOB_BASE = "https://clob.polymarket.com"
 USER_AGENT = "PolymarketPaperBacktest/1.0"
+MINIMUM_CLOSED_TRADES_FOR_DESCRIPTIVE_METRICS = 30
+
+
+def trade_sample_quality(closed_trades: int) -> dict[str, Any]:
+    """Label sparse trade samples without implying statistical significance."""
+    count = int(closed_trades)
+    adequate = count >= MINIMUM_CLOSED_TRADES_FOR_DESCRIPTIVE_METRICS
+    return {
+        "closed_trades": count,
+        "minimum_closed_trades_for_descriptive_metrics": MINIMUM_CLOSED_TRADES_FOR_DESCRIPTIVE_METRICS,
+        "status": "MINIMUM_SAMPLE_REACHED" if adequate else "BELOW_MINIMUM_SAMPLE",
+        "note": (
+            "This is only a reporting floor, not proof of predictive edge or statistical significance."
+        ),
+    }
 
 
 def get_json(url: str, timeout: int = 20) -> Any:
@@ -329,6 +344,7 @@ def run_segment(
         "max_drawdown_usd": round(max_drawdown_usd, 4),
         "max_drawdown_pct": round(max_drawdown_pct, 4),
         "drawdown_method": "snapshot-marked peak-to-trough; intraperiod drawdown may be missed",
+        "trade_sample_quality": trade_sample_quality(int(status["metrics"]["closed_trades"])),
     }
 
 
@@ -353,6 +369,7 @@ def run_threshold_sensitivity(
                 "return_pct": trial["in_sample"]["metrics"]["return_pct"],
                 "closed_trades": trial["in_sample"]["metrics"]["closed_trades"],
                 "win_rate_pct": trial["in_sample"]["metrics"]["win_rate_pct"],
+                "trade_sample_quality": trial["in_sample"]["trade_sample_quality"],
             },
             "out_of_sample": {
                 "candidate_signals": trial["out_of_sample"]["candidate_signals"],
@@ -361,6 +378,7 @@ def run_threshold_sensitivity(
                 "return_pct": trial["out_of_sample"]["metrics"]["return_pct"],
                 "closed_trades": trial["out_of_sample"]["metrics"]["closed_trades"],
                 "win_rate_pct": trial["out_of_sample"]["metrics"]["win_rate_pct"],
+                "trade_sample_quality": trial["out_of_sample"]["trade_sample_quality"],
             },
         })
     return results
@@ -466,6 +484,13 @@ def run_backtest(
         warnings.append("No simulated positions opened in the in-sample segment for this threshold.")
     if test["positions_opened"] == 0:
         warnings.append("No simulated positions opened in the out-of-sample segment for this threshold.")
+    for label, segment in (("in-sample", train), ("out-of-sample", test)):
+        closed = int(segment["metrics"]["closed_trades"])
+        if closed < MINIMUM_CLOSED_TRADES_FOR_DESCRIPTIVE_METRICS:
+            warnings.append(
+                f"The {label} segment has only {closed} closed trades; "
+                f"at least {MINIMUM_CLOSED_TRADES_FOR_DESCRIPTIVE_METRICS} are required to meet the basic descriptive sample floor."
+            )
     change_diagnostics = {
         "in_sample": diagnose_price_changes(train_rows),
         "out_of_sample": diagnose_price_changes(test_rows),
@@ -493,6 +518,14 @@ def run_backtest(
         },
         "in_sample": train,
         "out_of_sample": test,
+        "evaluation_quality": {
+            "in_sample": train["trade_sample_quality"],
+            "out_of_sample": test["trade_sample_quality"],
+            "interpretation": (
+                "The minimum trade count is a basic reporting screen only; even reaching it "
+                "does not establish statistical significance, predictive edge, or profitability."
+            ),
+        },
         "forward_return_study": forward_study,
         "price_change_diagnostics": change_diagnostics,
         "warnings": warnings,
@@ -621,11 +654,33 @@ def run_walk_forward_backtest(
         if total_closed else None
     )
     fold_drawdowns = [float(fold["out_of_sample"]["max_drawdown_pct"]) for fold in results]
+    trade_active_folds = [
+        fold for fold in results
+        if int(fold["out_of_sample"]["positions_closed"]) > 0
+    ]
+    trade_active_returns = [
+        float(fold["out_of_sample"]["metrics"]["return_pct"])
+        for fold in trade_active_folds
+    ]
+    sorted_active_returns = sorted(trade_active_returns)
+    active_median_return = None
+    if sorted_active_returns:
+        middle = len(sorted_active_returns) // 2
+        active_median_return = (
+            sorted_active_returns[middle]
+            if len(sorted_active_returns) % 2
+            else (sorted_active_returns[middle - 1] + sorted_active_returns[middle]) / 2.0
+        )
     warnings = []
     if total_closed == 0:
         warnings.append("No positions closed across the walk-forward test folds; return consistency is not established.")
     if total_opened == 0:
         warnings.append("No simulated positions opened across the walk-forward test folds.")
+    if total_closed < MINIMUM_CLOSED_TRADES_FOR_DESCRIPTIVE_METRICS:
+        warnings.append(
+            f"Only {total_closed} closed trades were observed across all walk-forward test folds; "
+            f"at least {MINIMUM_CLOSED_TRADES_FOR_DESCRIPTIVE_METRICS} are required to meet the basic descriptive sample floor."
+        )
 
     return {
         "mode": "EXPANDING_WALK_FORWARD_PAPER_BACKTEST",
@@ -650,6 +705,12 @@ def run_walk_forward_backtest(
             "total_test_observations": total_observations,
             "positions_opened": total_opened,
             "positions_closed": total_closed,
+            "folds_with_closed_trades": len(trade_active_folds),
+            "folds_without_closed_trades": len(results) - len(trade_active_folds),
+            "mean_trade_active_fold_return_pct": round(sum(trade_active_returns) / len(trade_active_returns), 5) if trade_active_returns else None,
+            "median_trade_active_fold_return_pct": round(active_median_return, 5) if active_median_return is not None else None,
+            "profitable_trade_active_fold_rate_pct": round(100 * sum(value > 0 for value in trade_active_returns) / len(trade_active_returns), 3) if trade_active_returns else None,
+            "trade_sample_quality": trade_sample_quality(total_closed),
             "weighted_win_rate_pct": round(weighted_win_rate, 4) if weighted_win_rate is not None else None,
             "mean_fold_max_drawdown_pct": round(sum(fold_drawdowns) / len(fold_drawdowns), 4) if fold_drawdowns else None,
             "worst_fold_max_drawdown_pct": round(max(fold_drawdowns), 4) if fold_drawdowns else None,
@@ -731,6 +792,16 @@ def main() -> int:
     )
     report = run_backtest(histories, config, args.train_ratio)
     report["source"] = "public Gamma market discovery and public CLOB /prices-history endpoint"
+    report["data"]["market_universe_selection"] = (
+        "explicit_token_ids" if args.tokens else
+        "current_active_gamma_markets_ranked_by_current_reported_24h_volume"
+    )
+    if not args.tokens:
+        report["limitations"].append(
+            "The default universe is selected from currently active markets using current reported 24-hour volume; "
+            "resolved/delisted markets and historical point-in-time membership are not reconstructed, so "
+            "survivorship and selection bias may affect historical results."
+        )
     report["fetched_tokens"] = len(tokens)
     report["data"]["history_fidelity_minutes"] = args.fidelity
     report["data"]["lookback_days"] = args.days
@@ -764,6 +835,8 @@ def main() -> int:
         "price_change_diagnostics": report["price_change_diagnostics"],
         "forward_return_study": report.get("forward_return_study"),
         "warnings": report["warnings"],
+        "evaluation_quality": report.get("evaluation_quality"),
+        "walk_forward_aggregate": report.get("walk_forward_evaluation", {}).get("aggregate_out_of_sample"),
         "threshold_sensitivity": report.get("threshold_sensitivity"),
         "token_fetch_errors": len(errors),
         "note": "Paper simulation only; results do not guarantee future performance.",

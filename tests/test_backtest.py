@@ -36,6 +36,7 @@ class BacktestTests(unittest.TestCase):
         self.assertEqual(report["in_sample"]["metrics"]["cash"] >= 0, True)
         self.assertEqual(report["out_of_sample"]["metrics"]["cash"] >= 0, True)
         self.assertEqual(report["out_of_sample"]["open_positions_at_end"] <= 5, True)
+        self.assertEqual(report["evaluation_quality"]["out_of_sample"]["status"], "BELOW_MINIMUM_SAMPLE")
         self.assertIn("does not guarantee future performance", " ".join(report["limitations"]).lower())
 
     def test_fetch_price_history_uses_interval_and_filters_requested_window(self):
@@ -84,6 +85,8 @@ class BacktestTests(unittest.TestCase):
         self.assertEqual([row["signal_delta"] for row in results], [0.005, 0.03])
         self.assertIn("return_pct", results[0]["in_sample"])
         self.assertIn("return_pct", results[1]["out_of_sample"])
+        self.assertIn("trade_sample_quality", results[0]["out_of_sample"])
+        self.assertEqual(results[0]["out_of_sample"]["trade_sample_quality"]["status"], "BELOW_MINIMUM_SAMPLE")
 
     def test_forward_returns_compares_signals_with_same_window_baseline(self):
         # Signal: price increases from 0.50 to 0.56; one-hour later it falls.
@@ -217,7 +220,31 @@ class BacktestTests(unittest.TestCase):
         self.assertEqual(report["aggregate_out_of_sample"]["total_test_observations"], 15)
         self.assertIn("weighted_win_rate_pct", report["aggregate_out_of_sample"])
         self.assertIn("worst_fold_max_drawdown_pct", report["aggregate_out_of_sample"])
+        self.assertIn("folds_with_closed_trades", report["aggregate_out_of_sample"])
+        self.assertIn("folds_without_closed_trades", report["aggregate_out_of_sample"])
+        self.assertIn("mean_trade_active_fold_return_pct", report["aggregate_out_of_sample"])
+        self.assertEqual(report["aggregate_out_of_sample"]["trade_sample_quality"]["status"], "BELOW_MINIMUM_SAMPLE")
         self.assertTrue(all("max_drawdown_pct" in fold["out_of_sample"] for fold in report["folds"]))
+
+
+    def test_walk_forward_separates_trade_active_folds_from_idle_folds(self):
+        # The first OOS fold has one completed trade; the remaining folds are idle.
+        prices = [0.50] * 15 + [0.54, 0.61] + [0.61] * 13
+        history = [
+            {"timestamp": 1_800_000_000 + index * 3600, "token_id": "token-a",
+             "market_id": "market-a", "observed_price": price}
+            for index, price in enumerate(prices)
+        ]
+        report = run_walk_forward_backtest(
+            history, PaperConfig(), folds=3, initial_train_ratio=0.5
+        )
+        aggregate = report["aggregate_out_of_sample"]
+        self.assertEqual(aggregate["folds_with_closed_trades"], 1)
+        self.assertEqual(aggregate["folds_without_closed_trades"], 2)
+        self.assertEqual(aggregate["positions_closed"], 1)
+        self.assertIsNotNone(aggregate["mean_trade_active_fold_return_pct"])
+        self.assertEqual(aggregate["trade_sample_quality"]["status"], "BELOW_MINIMUM_SAMPLE")
+        self.assertTrue(any("basic descriptive sample floor" in warning for warning in report["warnings"]))
 
     def test_walk_forward_requires_two_timestamps_in_every_test_fold(self):
         history = [

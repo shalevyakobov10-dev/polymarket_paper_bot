@@ -24,6 +24,7 @@ from news_monitor import DEFAULT_FEEDS, NewsCollector, NewsMarketMatcher, summar
 from research_features import build_market_feature_rows, read_recent_jsonl, summarize_feature_rows
 from independent_model_evaluation import evaluate_feature_files, forecast_current_feature_files
 from learning_journal import LearningJournal
+from model_governance import ModelGovernanceLedger
 from resilience import exponential_backoff_seconds, parse_retry_after
 
 GAMMA_URL = "https://gamma-api.polymarket.com/markets"
@@ -53,6 +54,7 @@ RESEARCH_FEATURES = DATA_DIR / "research_features.jsonl"
 MODEL_FORECASTS = DATA_DIR / "model_forecasts.jsonl"
 MODEL_FEEDBACK = DATA_DIR / "model_feedback.jsonl"
 MODEL_LEARNING_EVALUATIONS = DATA_DIR / "model_learning_evaluations.jsonl"
+MODEL_GOVERNANCE = DATA_DIR / "model_governance.jsonl"
 try:
     RESEARCH_FEATURES_SNAPSHOT_SECONDS = min(3600, max(60, int(os.getenv("RESEARCH_FEATURES_SNAPSHOT_SECONDS", "900"))))
 except (ValueError, TypeError):
@@ -148,6 +150,7 @@ _research_feature_last_written: dict[str, float] = {}
 _research_feature_schedule_loaded = False
 _learning_lock = threading.RLock()
 _learning_journal: LearningJournal | None = None
+_model_governance_ledger: ModelGovernanceLedger | None = None
 _learning_state = {
     "enabled": True,
     "worker_running": False,
@@ -596,6 +599,14 @@ def get_learning_journal() -> LearningJournal:
         return _learning_journal
 
 
+def get_model_governance_ledger() -> ModelGovernanceLedger:
+    global _model_governance_ledger
+    with _learning_lock:
+        if _model_governance_ledger is None:
+            _model_governance_ledger = ModelGovernanceLedger(MODEL_GOVERNANCE)
+        return _model_governance_ledger
+
+
 def model_learning_worker_loop() -> None:
     """Periodically refit on resolved history and score stored forecasts after resolution."""
     failure_count = 0
@@ -631,6 +642,10 @@ def model_learning_worker_loop() -> None:
                 evaluation = independent_model_evaluation_payload()
                 evaluation["model_version"] = forecast.get("model_version")
                 evaluation_record = journal.record_evaluation(evaluation)
+                get_model_governance_ledger().assess_and_record(
+                    evaluation,
+                    model_version=str(forecast.get("model_version") or ""),
+                )
                 last_evaluation_stamp = current_stamp
 
             summary = journal.summary()
@@ -1311,6 +1326,7 @@ class Handler(BaseHTTPRequestHandler):
                     self._send(200, {
                         **learning_snapshot,
                         **get_learning_journal().summary(),
+                        **get_model_governance_ledger().snapshot(),
                         "research_only": True,
                         "live_execution_enabled": False,
                         "automatic_parameter_tuning": False,

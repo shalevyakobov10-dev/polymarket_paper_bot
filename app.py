@@ -23,6 +23,7 @@ from global_news import DEFAULT_TOPIC_QUERIES, GDELTCollector
 from news_monitor import DEFAULT_FEEDS, NewsCollector, NewsMarketMatcher, summarize_market_corroboration, summarize_news_freshness
 from research_features import build_market_feature_rows, read_recent_jsonl, summarize_feature_rows
 from independent_model_evaluation import evaluate_feature_files, forecast_current_feature_files
+from learning_journal import LearningJournal
 from resilience import exponential_backoff_seconds, parse_retry_after
 
 GAMMA_URL = "https://gamma-api.polymarket.com/markets"
@@ -35,12 +36,23 @@ try:
     RESOLUTION_POLL_SECONDS = min(3600, max(300, int(os.getenv("RESOLUTION_POLL_SECONDS", "900"))))
 except (ValueError, TypeError):
     RESOLUTION_POLL_SECONDS = 900
+try:
+    MODEL_LEARNING_POLL_SECONDS = min(3600, max(300, int(os.getenv("MODEL_LEARNING_POLL_SECONDS", "900"))))
+except (ValueError, TypeError):
+    MODEL_LEARNING_POLL_SECONDS = 900
+try:
+    MODEL_EVALUATION_SECONDS = min(86400, max(3600, int(os.getenv("MODEL_EVALUATION_SECONDS", "21600"))))
+except (ValueError, TypeError):
+    MODEL_EVALUATION_SECONDS = 21600
 DATA_DIR = Path(os.getenv("DATA_DIR", "data"))
 SNAPSHOTS = DATA_DIR / "market_snapshots.jsonl"
 SIGNALS = DATA_DIR / "candidate_signals.jsonl"
 ORDERBOOK_SNAPSHOTS = DATA_DIR / "orderbook_snapshots.jsonl"
 RESOLUTIONS = DATA_DIR / "resolved_markets.jsonl"
 RESEARCH_FEATURES = DATA_DIR / "research_features.jsonl"
+MODEL_FORECASTS = DATA_DIR / "model_forecasts.jsonl"
+MODEL_FEEDBACK = DATA_DIR / "model_feedback.jsonl"
+MODEL_LEARNING_EVALUATIONS = DATA_DIR / "model_learning_evaluations.jsonl"
 try:
     RESEARCH_FEATURES_SNAPSHOT_SECONDS = min(3600, max(60, int(os.getenv("RESEARCH_FEATURES_SNAPSHOT_SECONDS", "900"))))
 except (ValueError, TypeError):
@@ -134,6 +146,28 @@ _gdelt_state = {
 _latest_market_questions: list[dict] = []
 _research_feature_last_written: dict[str, float] = {}
 _research_feature_schedule_loaded = False
+_learning_lock = threading.RLock()
+_learning_journal: LearningJournal | None = None
+_learning_state = {
+    "enabled": True,
+    "worker_running": False,
+    "last_poll_at": None,
+    "last_success_at": None,
+    "last_error": None,
+    "consecutive_failures": 0,
+    "retry_delay_seconds": 0.0,
+    "next_retry_at": None,
+    "poll_interval_seconds": MODEL_LEARNING_POLL_SECONDS,
+    "evaluation_interval_seconds": MODEL_EVALUATION_SECONDS,
+    "model_status": "starting",
+    "model_version": None,
+    "training_markets": 0,
+    "forecasts_saved_last_cycle": 0,
+    "feedback_scored_last_cycle": 0,
+    "last_evaluation_at": None,
+    "last_evaluation_status": None,
+    "live_execution_enabled": False,
+}
 _resolution_collector: ResolutionCollector | None = None
 _resolution_state = {
     "enabled": True,
@@ -550,6 +584,102 @@ def independent_model_evaluation_payload() -> dict:
     )
 
 
+def get_learning_journal() -> LearningJournal:
+    global _learning_journal
+    with _learning_lock:
+        if _learning_journal is None:
+            _learning_journal = LearningJournal(
+                MODEL_FORECASTS,
+                MODEL_FEEDBACK,
+                MODEL_LEARNING_EVALUATIONS,
+            )
+        return _learning_journal
+
+
+def model_learning_worker_loop() -> None:
+    """Periodically refit on resolved history and score stored forecasts after resolution."""
+    failure_count = 0
+    last_evaluation_stamp = 0.0
+    with _learning_lock:
+        _learning_state["worker_running"] = True
+
+    while True:
+        attempted_at = utc_now()
+        with _learning_lock:
+            _learning_state["last_poll_at"] = attempted_at
+        retry_delay = None
+        try:
+            journal = get_learning_journal()
+            forecast = current_model_forecasts_payload()
+            saved = journal.record_forecasts(
+                forecast.get("forecasts") or [],
+                model_version=str(forecast.get("model_version") or ""),
+                generated_at=str(forecast.get("generated_at") or attempted_at),
+            )
+            resolution_rows = read_recent_jsonl(
+                get_resolution_collector()._rotation_paths(),
+                limit=100_000,
+            )
+            feedback = journal.score_resolved_forecasts(resolution_rows)
+
+            evaluation_record = None
+            current_stamp = time.time()
+            if (
+                last_evaluation_stamp == 0.0
+                or current_stamp - last_evaluation_stamp >= MODEL_EVALUATION_SECONDS
+            ):
+                evaluation = independent_model_evaluation_payload()
+                evaluation["model_version"] = forecast.get("model_version")
+                evaluation_record = journal.record_evaluation(evaluation)
+                last_evaluation_stamp = current_stamp
+
+            summary = journal.summary()
+            training = forecast.get("training") if isinstance(forecast.get("training"), dict) else {}
+            with _learning_lock:
+                _learning_state.update({
+                    "last_success_at": utc_now(),
+                    "last_error": None,
+                    "consecutive_failures": 0,
+                    "retry_delay_seconds": 0.0,
+                    "next_retry_at": None,
+                    "model_status": str(forecast.get("status") or "unknown"),
+                    "model_version": forecast.get("model_version"),
+                    "training_markets": int(training.get("eligible_unique_markets") or 0),
+                    "forecasts_saved_last_cycle": int(saved.get("added") or 0),
+                    "feedback_scored_last_cycle": int(feedback.get("scored_added") or 0),
+                    "feedback_forecasts_scored_total": int(summary.get("forecasts_scored") or 0),
+                    "model_versions_with_feedback": int(summary.get("model_versions_with_feedback") or 0),
+                    "last_evaluation_at": (
+                        evaluation_record.get("evaluated_at")
+                        if evaluation_record else _learning_state.get("last_evaluation_at")
+                    ),
+                    "last_evaluation_status": (
+                        evaluation_record.get("status")
+                        if evaluation_record else _learning_state.get("last_evaluation_status")
+                    ),
+                    "last_evaluation_walk_forward_status": (
+                        evaluation_record.get("walk_forward_status")
+                        if evaluation_record else _learning_state.get("last_evaluation_walk_forward_status")
+                    ),
+                })
+            failure_count = 0
+        except Exception as exc:
+            failure_count += 1
+            retry_delay = _worker_retry_delay(
+                exc, failure_count, base_seconds=MODEL_LEARNING_POLL_SECONDS
+            )
+            with _learning_lock:
+                _learning_state.update({
+                    "last_error": f"Unexpected {type(exc).__name__}: {str(exc)[:300]}",
+                    "consecutive_failures": failure_count,
+                    "retry_delay_seconds": retry_delay,
+                    "next_retry_at": (
+                        datetime.now(timezone.utc) + timedelta(seconds=retry_delay)
+                    ).isoformat(),
+                })
+        time.sleep(retry_delay if retry_delay is not None else MODEL_LEARNING_POLL_SECONDS)
+
+
 def settle_open_paper_positions(
     collector: ResolutionCollector,
     trader: PaperTrader,
@@ -831,6 +961,7 @@ def health_payload(
     stream_snapshot: dict | None = None,
     resolution_snapshot: dict | None = None,
     gdelt_snapshot: dict | None = None,
+    learning_snapshot: dict | None = None,
 ) -> tuple[bool, dict]:
     """Report core market readiness and separately expose optional collector degradation."""
     current = now or datetime.now(timezone.utc)
@@ -890,6 +1021,22 @@ def health_payload(
         gdelt_component["topics_attempted"] = list(gdelt_snapshot.get("topics_attempted") or [])
         components["gdelt"] = gdelt_component
 
+    if learning_snapshot is not None:
+        learning_component = _health_component(
+            name="model_learning",
+            worker_running=bool(learning_snapshot.get("worker_running")),
+            last_success_at=learning_snapshot.get("last_success_at"),
+            stale_after_seconds=max(900, MODEL_LEARNING_POLL_SECONDS * 3),
+            now=current,
+            last_error=learning_snapshot.get("last_error"),
+        )
+        learning_component["model_status"] = learning_snapshot.get("model_status")
+        learning_component["training_markets"] = int(learning_snapshot.get("training_markets") or 0)
+        learning_component["feedback_forecasts_scored_total"] = int(
+            learning_snapshot.get("feedback_forecasts_scored_total") or 0
+        )
+        components["model_learning"] = learning_component
+
     if stream_snapshot is not None:
         stream_worker_running = bool(stream_snapshot.get("worker_running"))
         stream_last_connect = stream_snapshot.get("last_connect_at")
@@ -925,7 +1072,7 @@ def health_payload(
         "next_retry_at": snapshot.get("next_retry_at"),
         "components": components,
         "degraded_components": degraded,
-        "health_policy": "market_data_is_required; news_gdelt_resolution_and_stream_are_reported_as_optional_degraded_components",
+        "health_policy": "market_data_is_required; news_gdelt_resolution_stream_and_model_learning_are_reported_as_optional_degraded_components",
     }
     if not healthy and not payload["last_error"]:
         payload["last_error"] = "No recent successful market poll"
@@ -1079,7 +1226,7 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def do_GET(self):
-        if self.path in ("/", "/status", "/health", "/paper", "/news", "/matches", "/market-stream", "/resolutions", "/forecast-evaluation", "/research-features", "/independent-model-evaluation", "/model-forecasts"):
+        if self.path in ("/", "/status", "/health", "/paper", "/news", "/matches", "/market-stream", "/resolutions", "/forecast-evaluation", "/research-features", "/independent-model-evaluation", "/model-forecasts", "/learning"):
             with _lock:
                 snapshot = dict(_state)
             if self.path == "/health":
@@ -1089,12 +1236,15 @@ class Handler(BaseHTTPRequestHandler):
                 with _lock:
                     stream_snapshot = dict(_market_stream_state)
                     resolution_snapshot = dict(_resolution_state)
+                with _learning_lock:
+                    learning_snapshot = dict(_learning_state)
                 healthy, payload = health_payload(
                     snapshot,
                     news_snapshot=news_snapshot,
                     stream_snapshot=stream_snapshot,
                     resolution_snapshot=resolution_snapshot,
                     gdelt_snapshot=gdelt_snapshot,
+                    learning_snapshot=learning_snapshot,
                 )
                 self._send(200 if healthy else 503, payload)
             elif self.path == "/paper":
@@ -1154,6 +1304,25 @@ class Handler(BaseHTTPRequestHandler):
                         "forecast": None,
                         "execution": "none",
                     })
+            elif self.path == "/learning":
+                try:
+                    with _learning_lock:
+                        learning_snapshot = dict(_learning_state)
+                    self._send(200, {
+                        **learning_snapshot,
+                        **get_learning_journal().summary(),
+                        "research_only": True,
+                        "live_execution_enabled": False,
+                        "automatic_parameter_tuning": False,
+                    })
+                except Exception as exc:
+                    self._send(503, {
+                        "mode": "REALIZED_FORECAST_FEEDBACK_V1",
+                        "error": f"{type(exc).__name__}: {str(exc)[:300]}",
+                        "research_only": True,
+                        "live_execution_enabled": False,
+                        "execution": "none",
+                    })
             elif self.path == "/forecast-evaluation":
                 try:
                     self._send(200, forecast_evaluation_payload())
@@ -1186,12 +1355,15 @@ class Handler(BaseHTTPRequestHandler):
                 with _lock:
                     stream_snapshot = dict(_market_stream_state)
                     resolution_snapshot = dict(_resolution_state)
+                with _learning_lock:
+                    learning_snapshot = dict(_learning_state)
                 self._send(200, {
                     "service": "Polymarket Paper Research Bot",
                     **snapshot,
                     "news": news_snapshot,
                     "market_stream": stream_snapshot,
                     "resolutions": resolution_snapshot,
+                    "model_learning": learning_snapshot,
                 })
         else:
             self._send(404, {"error": "not_found"})
@@ -1205,6 +1377,7 @@ def main() -> None:
     threading.Thread(target=news_worker_loop, daemon=True, name="global-news-poller").start()
     threading.Thread(target=market_stream_worker_loop, daemon=True, name="market-stream-poller").start()
     threading.Thread(target=resolution_worker_loop, daemon=True, name="resolution-poller").start()
+    threading.Thread(target=model_learning_worker_loop, daemon=True, name="model-learning-poller").start()
     port = int(os.getenv("PORT", "8080"))
     server = ThreadingHTTPServer(("0.0.0.0", port), Handler)
     print(f"Paper research worker listening on port {port}; polling every {POLL_SECONDS}s")

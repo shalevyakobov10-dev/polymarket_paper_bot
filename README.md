@@ -51,6 +51,8 @@ Environment variables:
 - `GDELT_TOPICS_PER_POLL` (default `4`; bounded to the configured topic count)
 - `GDELT_MAX_RECORDS_PER_TOPIC` (default `75`, bounded to 1–250)
 - `GDELT_TIMESPAN` (default `1h`; allowed values: `15min`, `30min`, `1h`, `2h`, `4h`, `6h`, `12h`, `1d`)
+- `MODEL_LEARNING_POLL_SECONDS` (default `900`, bounded to 300–3600; retrains from resolved labels and scores matured saved forecasts)
+- `MODEL_EVALUATION_SECONDS` (default `21600`, bounded to 3600–86400; periodic holdout/walk-forward evaluation interval)
 - `RESOLUTION_POLL_SECONDS` (default `900`, bounded to 300–3600 seconds)
 - `RESOLUTION_MARKETS_PER_POLL` (default `100`, bounded to 1–100 closed markets per page)
 - `RESOLUTION_PAGES` (default `2`, bounded to 1–10 pages)
@@ -201,6 +203,17 @@ New entries are evaluated by `risk_manager.py` before the simulator opens a posi
 
 
 The paper simulator has a persistent, latched portfolio drawdown circuit breaker. Once the configured peak-to-current-equity drawdown limit is crossed, new simulated entries remain halted even if equity later recovers; the latch survives restarts and appears in the paper metrics and audit log. Legacy states whose recorded maximum drawdown already crossed the configured limit migrate into the halted state. The only reset currently available clears the complete paper portfolio state; there is no automatic release.
+
+## Continuous model learning and forecast feedback
+
+The background learning worker runs every 15 minutes by default:
+- Fits the existing research model again using only resolved markets whose outcome labels are already known; model versions are fingerprinted from the training history and feature schema.
+- Saves current model forecasts with model version, market probability, forecast timestamp and feature freshness to `data/model_forecasts.jsonl`.
+- After a market resolves, finds the saved forecast nearest 24 hours before resolution (12-hour tolerance), provided it was produced before resolution. It stores Brier score and log loss for both the model and market baseline in `data/model_feedback.jsonl`.
+- Keeps rolling accuracy summaries by model version and records periodic chronological holdout/walk-forward evaluation results in `data/model_learning_evaluations.jsonl`.
+- Exposes worker health, sample counts, per-version realized scoring and latest evaluation at `/learning`; `/health` also reports learning-worker freshness.
+
+This is periodic retraining and measured feedback, not unconstrained self-modifying AI. Hyperparameters and strategy rules are not changed automatically; improvements must be validated on later out-of-sample data. A better Brier score is forecast accuracy evidence only, not proof of executable trading edge or profitability. No real-money order placement, wallet connection or signing is enabled.
 
 ## Public market microstructure and global news data
 

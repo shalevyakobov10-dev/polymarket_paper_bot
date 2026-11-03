@@ -50,6 +50,7 @@ class NewsMonitorTests(unittest.TestCase):
         self.assertEqual(rows[0]["url"], "https://example.org/story/1")
         self.assertIn("Verified context & background.", rows[0]["summary"])
         self.assertEqual(rows[0]["source"], "Example News")
+        self.assertEqual(rows[0]["publisher_id"], "example.org")
         self.assertTrue(rows[0]["id"])
 
     def test_parse_atom_supports_namespaces_and_link_attributes(self):
@@ -253,11 +254,34 @@ class NewsMonitorTests(unittest.TestCase):
         self.assertEqual(summary[0]["distinct_publisher_count"], 3)
         self.assertEqual(summary[0]["matched_headline_count"], 4)
         self.assertEqual(summary[0]["publishers"], ["BBC News", "NPR", "The Guardian"])
+        self.assertEqual(summary[0]["publisher_ids"], ["bbc", "guardian", "npr"])
         self.assertEqual(
             summary[0]["interpretation"],
-            "source_diversity_only_not_independent_event_verification",
+            "normalized_publisher_diversity_only_not_independent_event_verification",
         )
         self.assertEqual(summary[0]["execution"], "none")
+
+    def test_normalizes_rss_sections_and_gdelt_domains_to_one_publisher(self):
+        matches = [
+            {"market_id": "m1", "market_question": "Question", "source": "BBC News - World", "publisher_id": "bbc"},
+            {"market_id": "m1", "market_question": "Question", "source": "www.bbc.com", "publisher_id": "bbc"},
+            {"market_id": "m1", "market_question": "Question", "source": "feeds.bbci.co.uk", "publisher_id": "bbc"},
+            {"market_id": "m1", "market_question": "Question", "source": "Reuters", "publisher_id": "reuters.com"},
+        ]
+        summary = news_monitor.summarize_market_corroboration(matches)
+        self.assertEqual(summary[0]["distinct_publisher_count"], 2)
+        self.assertEqual(summary[0]["matched_headline_count"], 4)
+        self.assertEqual(summary[0]["publisher_ids"], ["bbc", "reuters.com"])
+
+    def test_legacy_match_records_use_normalized_source_fallback(self):
+        matches = [
+            {"market_id": "m1", "source": "BBC News - World"},
+            {"market_id": "m1", "source": "BBC News - Business"},
+            {"market_id": "m1", "source": "NPR - Top Stories"},
+        ]
+        summary = news_monitor.summarize_market_corroboration(matches)
+        self.assertEqual(summary[0]["distinct_publisher_count"], 2)
+        self.assertEqual(summary[0]["publisher_ids"], ["bbc", "npr"])
 
     def test_corroboration_ignores_missing_market_or_source(self):
         matches = [

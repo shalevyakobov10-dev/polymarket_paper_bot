@@ -354,6 +354,14 @@ class NewsMarketMatcher:
                         "news_title": str(news.get("title") or "")[:MAX_TITLE_CHARS],
                         "news_url": str(news.get("url") or "")[:2000],
                         "news_published_at": str(news.get("published_at") or "")[:100],
+                        "topic_categories": sorted({
+                            str(value)[:80] for value in (
+                                news.get("topic_categories")
+                                if isinstance(news.get("topic_categories"), list) else []
+                            ) if str(value).strip()
+                        })[:10],
+                        "source_country": str(news.get("source_country") or "")[:10],
+                        "language": str(news.get("language") or "")[:20],
                         "market_id": market_id,
                         "market_question": candidate["question"],
                         "matched_terms": candidate["matched_terms"],

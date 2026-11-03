@@ -19,7 +19,7 @@ from market_quality import evaluate_order_book_quality
 from market_stream import MarketStreamCollector
 from forecast_evaluation import evaluate_jsonl_files
 from resolution_tracker import ResolutionCollector
-from global_news import GDELTCollector
+from global_news import DEFAULT_TOPIC_QUERIES, GDELTCollector
 from news_monitor import DEFAULT_FEEDS, NewsCollector, NewsMarketMatcher, summarize_market_corroboration, summarize_news_freshness
 from research_features import build_market_feature_rows, read_recent_jsonl, summarize_feature_rows
 from independent_model_evaluation import evaluate_feature_files, forecast_current_feature_files
@@ -123,7 +123,13 @@ _gdelt_state = {
     "last_error": None,
     "items_added_last_poll": 0,
     "items_total_recent": 0,
-    "query_window": "last_1_hour",
+    "query_window": "1h",
+    "topics_configured": len(DEFAULT_TOPIC_QUERIES),
+    "topics_attempted": [],
+    "topics_succeeded": 0,
+    "topics_failed": 0,
+    "topic_results": {},
+    "topic_errors": [],
 }
 _latest_market_questions: list[dict] = []
 _research_feature_last_written: dict[str, float] = {}
@@ -878,6 +884,10 @@ def health_payload(
         )
         gdelt_component["items_total_recent"] = int(gdelt_snapshot.get("items_total_recent") or 0)
         gdelt_component["query_window"] = gdelt_snapshot.get("query_window")
+        gdelt_component["topics_configured"] = int(gdelt_snapshot.get("topics_configured") or 0)
+        gdelt_component["topics_succeeded"] = int(gdelt_snapshot.get("topics_succeeded") or 0)
+        gdelt_component["topics_failed"] = int(gdelt_snapshot.get("topics_failed") or 0)
+        gdelt_component["topics_attempted"] = list(gdelt_snapshot.get("topics_attempted") or [])
         components["gdelt"] = gdelt_component
 
     if stream_snapshot is not None:
@@ -991,7 +1001,7 @@ def news_worker_loop() -> None:
                         if result["feeds_failed"] else None
                     ),
                 })
-                _news_items_cache[:] = result["latest_items"][:100]
+                _news_items_cache[:] = result["latest_items"][:500]
                 if feeds_succeeded > 0:
                     _news_state["last_success_at"] = utc_now()
                     _news_state["last_error"] = None
@@ -1024,12 +1034,18 @@ def news_worker_loop() -> None:
                         "items_added_last_poll": gdelt_result["items_added"],
                         "items_total_recent": gdelt_result["items_total_recent"],
                         "query_window": gdelt_result["query_window"],
+                        "topics_configured": gdelt_result["topics_configured"],
+                        "topics_attempted": list(gdelt_result["topics_attempted"]),
+                        "topics_succeeded": gdelt_result["topics_succeeded"],
+                        "topics_failed": gdelt_result["topics_failed"],
+                        "topic_results": dict(gdelt_result["topic_results"]),
+                        "topic_errors": list(gdelt_result["topic_errors"])[:10],
                     })
                     combined = gdelt_result["latest_items"] + list(_news_items_cache)
                     unique = {}
                     for item in combined:
                         unique.setdefault(str(item.get("id") or item.get("url") or ""), item)
-                    _news_items_cache[:] = list(unique.values())[:100]
+                    _news_items_cache[:] = list(unique.values())[:500]
             except Exception as exc:
                 with _news_lock:
                     _gdelt_state["last_error"] = f"Unexpected {type(exc).__name__}: {str(exc)[:240]}"
@@ -1087,7 +1103,7 @@ class Handler(BaseHTTPRequestHandler):
                 with _news_lock:
                     news_snapshot = {
                         **_news_state,
-                        "items": list(_news_items_cache),
+                        "items": list(_news_items_cache[:500]),
                         "freshness": summarize_news_freshness(_news_items_cache),
                         "gdelt": dict(_gdelt_state),
                     }

@@ -148,6 +148,33 @@ class NewsMonitorTests(unittest.TestCase):
             self.assertEqual(third["added"], [])
             self.assertEqual(len(path.read_text(encoding="utf-8").splitlines()), 1)
 
+    def test_matcher_persists_gdelt_topic_provenance(self):
+        news = {
+            "id": "headline-topic-1",
+            "source": "example.org",
+            "title": "Government sanctions energy company",
+            "summary": "New sanctions target an energy company after a government decision.",
+            "url": "https://example.org/story",
+            "published_at": "Sun, 25 Oct 2026 10:00:00 GMT",
+            "topic_categories": ["geopolitics_security", "energy_commodities"],
+            "source_country": "US",
+            "language": "English",
+        }
+        markets = [{
+            "market_id": "market-sanctions",
+            "question": "Will the government impose sanctions on the energy company?",
+        }]
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "matches.jsonl"
+            result = news_monitor.NewsMarketMatcher(path).match([news], markets)
+        self.assertEqual(len(result["added"]), 1)
+        self.assertEqual(
+            result["added"][0]["topic_categories"],
+            ["energy_commodities", "geopolitics_security"],
+        )
+        self.assertEqual(result["added"][0]["source_country"], "US")
+        self.assertEqual(result["added"][0]["language"], "English")
+
     def test_matcher_ignores_generic_or_unrelated_overlap(self):
         news = {
             "id": "headline-3",

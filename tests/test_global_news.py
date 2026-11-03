@@ -21,6 +21,87 @@ class GDELTCollectorTests(unittest.TestCase):
         self.assertEqual(rows[0]["source_type"], "gdelt_doc_api")
         self.assertEqual(rows[0]["execution"], "none")
 
+    def test_normalize_records_topic_category(self):
+        payload = {"articles": [
+            {"title": "AI chip supply", "url": "https://example.org/ai", "seendate": "20261030T120000Z"}
+        ]}
+        rows = global_news.normalize_gdelt_articles(
+            payload, topic_category="technology_cyber_ai"
+        )
+        self.assertEqual(rows[0]["topic_categories"], ["technology_cyber_ai"])
+
+    def test_fetch_once_rotates_topics_and_merges_cross_topic_duplicates(self):
+        payload = {"articles": [
+            {"title": "Global policy update", "url": "https://example.org/shared", "seendate": "20261030T120000Z", "domain": "example.org"}
+        ]}
+
+        class FakeResponse:
+            status = 200
+            def __enter__(self):
+                return self
+            def __exit__(self, *args):
+                return False
+            def read(self):
+                import json
+                return json.dumps(payload).encode("utf-8")
+
+        with tempfile.TemporaryDirectory() as directory, patch.dict(
+            "os.environ",
+            {
+                "GDELT_TOPICS": "geopolitics_security,macroeconomics_finance",
+                "GDELT_TOPICS_PER_POLL": "2",
+            },
+        ):
+            path = Path(directory) / "gdelt.jsonl"
+            collector = global_news.GDELTCollector(path)
+            with patch("global_news.urlopen", return_value=FakeResponse()) as mocked:
+                result = collector.fetch_once()
+            self.assertEqual(mocked.call_count, 2)
+            self.assertEqual(result["topics_attempted"], [
+                "geopolitics_security", "macroeconomics_finance"
+            ])
+            self.assertEqual(result["topics_succeeded"], 2)
+            self.assertEqual(result["topics_failed"], 0)
+            self.assertEqual(result["items_added"], 1)
+            self.assertEqual(
+                result["latest_items"][0]["topic_categories"],
+                ["geopolitics_security", "macroeconomics_finance"],
+            )
+            self.assertEqual(len(path.read_text(encoding="utf-8").splitlines()), 1)
+
+    def test_fetch_once_isolates_a_failed_topic_when_another_succeeds(self):
+        payload = {"articles": [
+            {"title": "Health update", "url": "https://example.org/health", "seendate": "20261030T120000Z"}
+        ]}
+
+        class FakeResponse:
+            status = 200
+            def __enter__(self):
+                return self
+            def __exit__(self, *args):
+                return False
+            def read(self):
+                import json
+                return json.dumps(payload).encode("utf-8")
+
+        with tempfile.TemporaryDirectory() as directory, patch.dict(
+            "os.environ",
+            {
+                "GDELT_TOPICS": "health_biotech,science_space",
+                "GDELT_TOPICS_PER_POLL": "2",
+            },
+        ):
+            collector = global_news.GDELTCollector(Path(directory) / "gdelt.jsonl")
+            with patch(
+                "global_news.urlopen",
+                side_effect=[RuntimeError("temporary API failure"), FakeResponse()],
+            ):
+                result = collector.fetch_once()
+            self.assertEqual(result["topics_succeeded"], 1)
+            self.assertEqual(result["topics_failed"], 1)
+            self.assertEqual(result["items_added"], 1)
+            self.assertEqual(result["latest_items"][0]["topic_categories"], ["science_space"])
+
     def test_rejects_missing_articles_collection(self):
         with self.assertRaises(ValueError):
             global_news.normalize_gdelt_articles({})

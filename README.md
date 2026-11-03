@@ -194,6 +194,8 @@ Run tests with `python -m unittest discover -s tests -v` (or `python -m pytest -
 New entries are evaluated by `risk_manager.py` before the simulator opens a position. The gate checks valid outcome prices, requested position size, aggregate exposure, concurrent position count, available simulated cash after fees, a daily loss stop that combines realized P&L with current unrealized P&L, and whether an opposing outcome from the same market is already open. The simulator will not hold two different outcomes of the same market at once. Rejected candidates carry a stable reason code. These are simulation safeguards, not a guarantee against losses or a validated strategy.
 
 
+The paper simulator has a persistent, latched portfolio drawdown circuit breaker. Once the configured peak-to-current-equity drawdown limit is crossed, new simulated entries remain halted even if equity later recovers; the latch survives restarts and appears in the paper metrics and audit log. Legacy states whose recorded maximum drawdown already crossed the configured limit migrate into the halted state. The only reset currently available clears the complete paper portfolio state; there is no automatic release.
+
 ## Public market microstructure and global news data
 
 The read-only data layer now combines:

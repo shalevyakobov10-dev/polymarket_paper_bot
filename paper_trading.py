@@ -167,6 +167,10 @@ class PaperTrader:
             "equity_peak": round(self.config.starting_cash, 8),
             "max_drawdown_usd": 0.0,
             "max_drawdown_pct": 0.0,
+            "circuit_breaker_tripped": False,
+            "circuit_breaker_reason": None,
+            "circuit_breaker_at": None,
+            "circuit_breaker_drawdown_pct": None,
             "realized_pnl": 0.0,
             "total_fees": 0.0,
             "closed_trades": 0,
@@ -196,6 +200,16 @@ class PaperTrader:
             raise ValueError(f"Could not read paper state file {self.state_path}: {exc}") from exc
         if not isinstance(loaded, dict) or loaded.get("schema_version") != 1:
             raise ValueError("Paper state file has an unsupported or malformed schema")
+        breaker_fields = (
+            "circuit_breaker_tripped",
+            "circuit_breaker_reason",
+            "circuit_breaker_at",
+            "circuit_breaker_drawdown_pct",
+        )
+        breaker_fields_present = [field in loaded for field in breaker_fields]
+        if any(breaker_fields_present) and not all(breaker_fields_present):
+            raise ValueError("Paper state has incomplete circuit-breaker fields; refusing to guess its state")
+        has_circuit_breaker_state = all(breaker_fields_present)
         required = {"cash", "starting_cash", "positions", "last_prices", "realized_pnl"}
         if not required.issubset(loaded):
             raise ValueError("Paper state file is missing required fields; refusing to reset it")
@@ -213,6 +227,36 @@ class PaperTrader:
         loaded.setdefault("max_drawdown_usd", 0.0)
         loaded.setdefault("max_drawdown_pct", 0.0)
         loaded.setdefault("recent_events", [])
+        if not has_circuit_breaker_state:
+            # Migrate legacy states conservatively. If the historical maximum
+            # drawdown already crossed the configured limit, do not silently
+            # resume entries after upgrading the simulator.
+            historical_drawdown = loaded.get("max_drawdown_pct", 0.0)
+            if (
+                isinstance(historical_drawdown, bool)
+                or not isinstance(historical_drawdown, (int, float))
+                or not math.isfinite(float(historical_drawdown))
+            ):
+                raise ValueError("Legacy paper state has an invalid maximum drawdown")
+            migrated_tripped = (
+                float(historical_drawdown) + 1e-9
+                >= self.config.max_portfolio_drawdown_pct
+            )
+            migrated_at = loaded.get("updated_at") or loaded.get("created_at") or iso_time()
+            try:
+                parse_time(str(migrated_at))
+            except (TypeError, ValueError, OverflowError):
+                migrated_at = iso_time()
+            loaded.update({
+                "circuit_breaker_tripped": migrated_tripped,
+                "circuit_breaker_reason": (
+                    "max_portfolio_drawdown_reached" if migrated_tripped else None
+                ),
+                "circuit_breaker_at": str(migrated_at) if migrated_tripped else None,
+                "circuit_breaker_drawdown_pct": (
+                    round(float(historical_drawdown), 8) if migrated_tripped else None
+                ),
+            })
 
         if loaded["mode"] != "PAPER_ONLY":
             raise ValueError("Persisted portfolio mode is not PAPER_ONLY; refusing to load it")
@@ -239,6 +283,20 @@ class PaperTrader:
         checked_number("equity_peak", minimum=1e-12)
         checked_number("max_drawdown_usd", minimum=0.0)
         checked_number("max_drawdown_pct", minimum=0.0, maximum=100.0)
+        if not isinstance(loaded["circuit_breaker_tripped"], bool):
+            raise ValueError("Paper state circuit_breaker_tripped must be a boolean")
+        if loaded["circuit_breaker_tripped"]:
+            if not isinstance(loaded["circuit_breaker_reason"], str) or not loaded["circuit_breaker_reason"].strip():
+                raise ValueError("Tripped paper circuit breaker must include a reason")
+            try:
+                parse_time(str(loaded["circuit_breaker_at"] or ""))
+            except (TypeError, ValueError, OverflowError) as exc:
+                raise ValueError("Tripped paper circuit breaker has an invalid timestamp") from exc
+            checked_number("circuit_breaker_drawdown_pct", minimum=0.0, maximum=100.0)
+        elif any(loaded.get(field) is not None for field in (
+            "circuit_breaker_reason", "circuit_breaker_at", "circuit_breaker_drawdown_pct"
+        )):
+            raise ValueError("Untripped paper circuit breaker has inconsistent metadata")
         if not isinstance(loaded["recent_events"], list):
             raise ValueError("Paper state recent_events must be a list")
 
@@ -351,6 +409,16 @@ class PaperTrader:
         self._state["max_drawdown_pct"] = round(
             max(float(self._state.get("max_drawdown_pct", 0.0)), drawdown_pct), 8
         )
+        if (
+            not self._state.get("circuit_breaker_tripped", False)
+            and drawdown_pct + 1e-9 >= self.config.max_portfolio_drawdown_pct
+        ):
+            self._state.update({
+                "circuit_breaker_tripped": True,
+                "circuit_breaker_reason": "max_portfolio_drawdown_reached",
+                "circuit_breaker_at": iso_time(),
+                "circuit_breaker_drawdown_pct": round(drawdown_pct, 8),
+            })
         return drawdown_pct
 
     def _daily_rollover(self, now: datetime) -> None:
@@ -372,6 +440,7 @@ class PaperTrader:
         result: dict[str, list[dict[str, Any]]] = {"candidates": [], "opened": [], "closed": []}
         events: list[dict[str, Any]] = []
         with self._lock:
+            breaker_was_tripped = bool(self._state.get("circuit_breaker_tripped"))
             self._daily_rollover(current_time)
             for row in rows:
                 if not isinstance(row, dict):
@@ -456,6 +525,18 @@ class PaperTrader:
             # state transitions; they use a fresh disposable portfolio for each segment.
             self._state["recent_events"] = (self._state.get("recent_events", []) + events)[-100:]
             self._update_drawdown_metrics()
+            if not breaker_was_tripped and self._state.get("circuit_breaker_tripped"):
+                breaker_event = {
+                    "event_type": "portfolio_drawdown_circuit_breaker_tripped",
+                    "timestamp": self._state.get("circuit_breaker_at") or iso_time(current_time),
+                    "reason": self._state.get("circuit_breaker_reason"),
+                    "drawdown_pct": self._state.get("circuit_breaker_drawdown_pct"),
+                    "execution": "none",
+                }
+                events.append(breaker_event)
+                self._state["recent_events"] = (
+                    self._state.get("recent_events", []) + [breaker_event]
+                )[-100:]
             if persist_state:
                 self._save()
                 for event in events:
@@ -463,6 +544,8 @@ class PaperTrader:
         return result
 
     def _try_open(self, key: str, row: dict[str, Any], observed_price: float, now: datetime, delta: float) -> tuple[dict[str, Any] | None, str]:
+        if self._state.get("circuit_breaker_tripped"):
+            return None, "portfolio_drawdown_circuit_breaker_latched"
         market_quality = evaluate_order_book_quality(
             row.get("orderbook"),
             now=now,
@@ -513,7 +596,13 @@ class PaperTrader:
                 for position in positions.values()
             )
         )
+        breaker_was_tripped = bool(self._state.get("circuit_breaker_tripped"))
         current_drawdown_pct = self._update_drawdown_metrics()
+        if self._state.get("circuit_breaker_tripped"):
+            return None, (
+                "portfolio_drawdown_circuit_breaker_latched"
+                if breaker_was_tripped else "max_portfolio_drawdown_reached"
+            )
         decision = evaluate_paper_entry(
             price=observed_price,
             requested_notional=spend,
@@ -950,6 +1039,11 @@ class PaperTrader:
                 "drawdown_limit_reached": (
                     current_drawdown_pct + 1e-9 >= self.config.max_portfolio_drawdown_pct
                 ),
+                "circuit_breaker_tripped": bool(state.get("circuit_breaker_tripped")),
+                "circuit_breaker_reason": state.get("circuit_breaker_reason"),
+                "circuit_breaker_at": state.get("circuit_breaker_at"),
+                "circuit_breaker_drawdown_pct": state.get("circuit_breaker_drawdown_pct"),
+                "new_entries_halted": bool(state.get("circuit_breaker_tripped")),
             }
             state["positions_list"] = positions
             # Keep detailed price history out of the public status response.
@@ -957,7 +1051,11 @@ class PaperTrader:
             return state
 
     def reset(self) -> dict[str, Any]:
-        """Reset only the simulated portfolio; it cannot affect a real account."""
+        """Reset the paper portfolio and clear its latched simulator circuit breaker.
+
+        This resets the complete simulated account state; there is no automatic
+        breaker release after an equity recovery.
+        """
         with self._lock:
             self._state = self._new_state()
             self._save()

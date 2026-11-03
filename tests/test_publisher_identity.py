@@ -19,6 +19,32 @@ class PublisherIdentityTests(unittest.TestCase):
         self.assertEqual(publisher_identity("www.dw.com"), "dw")
         self.assertEqual(publisher_identity("www.france24.com"), "france24")
 
+    def test_global_wire_services_and_publishers_unify_brand_and_domain(self):
+        cases = [
+            ("Reuters", "www.reuters.com", "reuters"),
+            ("Associated Press", "apnews.com", "ap"),
+            ("Agence France Presse", "www.afp.com", "afp"),
+            ("CNN International", "edition.cnn.com", "cnn"),
+            ("Bloomberg", "www.bloomberg.com", "bloomberg"),
+            ("Financial Times", "www.ft.com", "ft"),
+            ("The New York Times", "www.nytimes.com", "nyt"),
+            ("The Washington Post", "www.washingtonpost.com", "washpost"),
+            ("The Wall Street Journal", "www.wsj.com", "wsj"),
+            ("The Economist", "www.economist.com", "economist"),
+            ("CBC News", "www.cbc.ca", "cbc"),
+            ("NHK World", "www.nhk.or.jp", "nhk"),
+            ("The Hindu", "www.thehindu.com", "the-hindu"),
+            ("South China Morning Post", "www.scmp.com", "scmp"),
+            ("Anadolu Agency", "www.aa.com.tr", "anadolu"),
+            ("The Jerusalem Post", "www.jpost.com", "jpost"),
+            ("Haaretz", "www.haaretz.com", "haaretz"),
+            ("Nikkei Asia", "asia.nikkei.com", "nikkei"),
+        ]
+        for label, domain, expected in cases:
+            with self.subTest(label=label):
+                self.assertEqual(publisher_identity(label), expected)
+                self.assertEqual(publisher_identity(domain), expected)
+
     def test_article_domain_is_used_when_source_label_is_generic(self):
         self.assertEqual(
             publisher_identity("Unknown feed", "https://rss.example.org/feed", "https://news.example.org/story"),

@@ -290,7 +290,7 @@ class FeatureModelEvaluationTests(unittest.TestCase):
             })
         first = model_eval.forecast_current_feature_rows(feature_rows, resolutions, now=now)
         changed_resolutions = [dict(row) for row in resolutions]
-        changed_resolutions[0] = {**changed_resolutions[0], "resolved_yes": 0}
+        changed_resolutions[0] = {**changed_resolutions[0], "resolved_yes": 1}
         second = model_eval.forecast_current_feature_rows(feature_rows, changed_resolutions, now=now)
         self.assertNotEqual(first["model_version"], second["model_version"])
 

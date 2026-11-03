@@ -979,6 +979,11 @@ def forecast_current_feature_rows(
                 str(row.get("forecast_timestamp") or ""),
                 str(row.get("resolved_at") or ""),
                 int(row.get("outcome_yes") or 0),
+                float(row.get("market_probability_yes") or 0.0),
+                {
+                    name: row.get("features", {}).get(name)
+                    for name in FEATURE_NAMES
+                },
             ]
             for row in training
         ],

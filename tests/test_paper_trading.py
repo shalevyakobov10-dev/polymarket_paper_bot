@@ -121,6 +121,13 @@ class PaperTraderTests(unittest.TestCase):
             for event in events
         ))
 
+    def test_partial_circuit_breaker_state_is_rejected(self):
+        state = self.bot._new_state()
+        state.pop("circuit_breaker_at")
+        self.state_path.write_text(json.dumps(state), encoding="utf-8")
+        with self.assertRaisesRegex(ValueError, "incomplete circuit-breaker fields"):
+            PaperTrader(self.state_path, self.config)
+
     def test_legacy_state_migrates_to_latched_breaker_if_old_max_drawdown_crossed_limit(self):
         cfg = PaperConfig(**{
             **self.config.__dict__,
@@ -131,6 +138,13 @@ class PaperTraderTests(unittest.TestCase):
         legacy = bot._new_state()
         legacy["max_drawdown_pct"] = 5.0
         legacy["max_drawdown_usd"] = 5.0
+        for field in (
+            "circuit_breaker_tripped",
+            "circuit_breaker_reason",
+            "circuit_breaker_at",
+            "circuit_breaker_drawdown_pct",
+        ):
+            legacy.pop(field)
         legacy_path.write_text(json.dumps(legacy), encoding="utf-8")
 
         migrated = PaperTrader(legacy_path, cfg).snapshot()["metrics"]

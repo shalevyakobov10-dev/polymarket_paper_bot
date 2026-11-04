@@ -332,3 +332,4 @@ The scheduled/manual historical backtest workflow is also serialized with a shar
 After a process restart, the operator must call `recover_interrupted_submissions()` during exclusive recovery before starting an execution worker. It converts any stranded `submission_pending` record to `submission_unknown`; it never resets an attempt to prepared. The journal serializes concurrent writers with SQLite transactions and rejects reuse of an ID with different order terms.
 
 This remains a safety scaffold only. The repository has a read-only authenticated account monitor, but no order-placement adapter, signing workflow, or order-placement call. The local client order ID is not claimed to be a venue-supported idempotency field.
+\n- חלון טריות צילום הסיכון מוגבל לתקרה קשיחה של 300 שניות; caller יכול להחמיר את החלון אך אינו יכול להרחיב אותו. נוסף test שמוודא שחלון של 24 שעות נחסם.\n

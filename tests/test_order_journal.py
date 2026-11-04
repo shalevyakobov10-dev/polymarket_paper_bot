@@ -76,6 +76,7 @@ class OrderJournalTests(unittest.TestCase):
         self.assertEqual(recovered["status"], "submission_unknown")
         self.assertEqual(recovered["last_reason_code"], "process_restart_during_submission")
         self.assertEqual(recovered["submission_attempts"], 1)
+        self.assertEqual(restarted.recover_interrupted_submissions(), 0)
         with self.assertRaisesRegex(RuntimeError, "duplicate or unsafe"):
             restarted.begin_submission("journal-order-001")
 

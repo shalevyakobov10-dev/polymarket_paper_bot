@@ -102,6 +102,12 @@ The scorecard reports Brier score, log loss, 50% threshold accuracy, calibration
 
 **Important:** this first evaluation stage measures the historical calibration of Polymarket's own implied Yes prices. It is not an independent news/sentiment model, it is not evidence of a profitable strategy, and it does not estimate executable trading returns. It currently supports binary Yes/No markets only. Historical samples accumulate only while the research worker is collecting snapshots; resolved markets that were never observed before resolution are excluded. This separation is intentional: first establish a reliable, leak-free baseline before attempting to train or evaluate an independent model.
 
+## Official Polymarket SDK integration
+
+Read-only CLOB order-book snapshots are fetched through the official `polymarket-client` Python SDK, pinned to `0.16.0` in `requirements.txt`. The adapter uses only `PublicClient`; it does not instantiate an authenticated client, read wallet credentials, sign orders, or submit orders. Every snapshot retains a local receive timestamp for freshness checks and separately records the exchange timestamp/hash when supplied.
+
+The SDK is in the 0.x beta series. The exact dependency pin prevents unreviewed minor-version API changes from silently changing the bot. A future authenticated execution adapter must be a separate, explicitly reviewed component; this read-only integration does not enable live trading.
+
 ## Independent feature-model evaluation
 
 The `/model-forecasts` endpoint is a separate research-only inference layer. It fits only from at least 80 unique historical binary markets whose outcomes were resolved before the forecast timestamp and whose training set contains both classes. It scores fresh unresolved markets only (maximum feature age 60 minutes). Its model-vs-market probability differences are exploratory disagreements, not validated trading edges, and the endpoint always returns `NO_ACTION_RESEARCH_ONLY`.

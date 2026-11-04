@@ -193,8 +193,8 @@ class OrderIntentLedger:
             record = self._state["intents"].get(key)
             if record is None:
                 raise KeyError("unknown order intent")
-            if record["status"] not in {"submission_started", "unknown"}:
-                raise ValueError("only ambiguous submissions can be reconciled")
+            if record["status"] not in {"submission_started", "unknown", "reconciled_open"}:
+                raise ValueError("only ambiguous or still-open submissions can be reconciled")
             record["status"] = f"reconciled_{outcome}"
             record["result"] = {
                 "outcome": outcome,

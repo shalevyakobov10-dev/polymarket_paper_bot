@@ -1,3 +1,5 @@
+import hashlib
+import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -191,6 +193,44 @@ class NewsMonitorTests(unittest.TestCase):
         matches = news_monitor.match_news_to_markets(news, markets)
         self.assertEqual([row["market_id"] for row in matches], ["fed-cut"])
         self.assertEqual(matches[0]["term_document_frequency"]["cut"], 1)
+
+    def test_matcher_reprocesses_legacy_pairs_once_and_deduplicates_latest_revision(self):
+        news = {
+            "id": "legacy-story",
+            "source": "Example Finance",
+            "title": "Fed signals interest-rate cuts",
+            "summary": "The Federal Reserve signaled a possible cut in interest rates.",
+            "url": "https://example.org/fed",
+        }
+        markets = [{
+            "market_id": "market-fed",
+            "question": "Will the Fed cut interest rates in December?",
+        }]
+        pair_id = hashlib.sha256(b"legacy-story|market-fed").hexdigest()
+        legacy_record = {
+            "pair_id": pair_id,
+            "news_id": "legacy-story",
+            "market_id": "market-fed",
+            "method": "keyword_overlap_v1",
+            "matched_at": "2026-11-03T10:00:00+00:00",
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "matches.jsonl"
+            path.write_text(json.dumps(legacy_record) + "\\n", encoding="utf-8")
+            matcher = news_monitor.NewsMarketMatcher(path)
+            upgraded = matcher.match([news], markets)
+            self.assertEqual(len(upgraded["added"]), 1)
+            self.assertEqual(upgraded["added"][0]["method"], "market_corpus_idf_keyword_v2")
+
+            repeated = matcher.match([news], markets)
+            self.assertEqual(repeated["added"], [])
+
+            restarted = news_monitor.NewsMarketMatcher(path)
+            self.assertEqual(len(restarted.recent), 1)
+            self.assertEqual(restarted.recent[0]["method"], "market_corpus_idf_keyword_v2")
+            again = restarted.match([news], markets)
+            self.assertEqual(again["added"], [])
+            self.assertEqual(len(path.read_text(encoding="utf-8").splitlines()), 2)
 
     def test_matcher_deduplicates_pairs_across_calls_and_restarts(self):
         news = {

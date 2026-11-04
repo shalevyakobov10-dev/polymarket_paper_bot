@@ -206,7 +206,8 @@ def run_supervisor(
                     )
                     continue
 
-            stopping.wait(config.poll_interval_seconds)
+            if stopping.wait(config.poll_interval_seconds):
+                break
 
         return 0
     finally:

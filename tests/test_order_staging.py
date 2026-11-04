@@ -261,6 +261,8 @@ class OrderStagingTests(unittest.TestCase):
         self.assertEqual(second["intent_status"], "prepared")
         self.assertFalse(second["intent_created"])
         self.assertTrue(second["intent_reused"])
+        saved = self.journal.get_intent("staged-order-001")
+        self.assertEqual(second["preflight_report"], saved["preflight_report"])
         self.assertEqual(len(self.journal.list_events("staged-order-001")), events_before)
 
 

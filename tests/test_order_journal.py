@@ -161,6 +161,26 @@ class OrderJournalTests(unittest.TestCase):
         self.assertEqual(self.journal.list_events("journal-order-001")[-1]["event_type"],
                          "order_observation_cancelled")
 
+    def test_duplicate_terminal_snapshot_does_not_append_second_event(self):
+        self.journal.create_intent(new_intent())
+        self.journal.begin_submission("journal-order-001")
+        self.journal.record_submission_response(
+            "journal-order-001", outcome="accepted", exchange_order_id="venue-123"
+        )
+        first = self.journal.record_order_observation(
+            "journal-order-001", outcome="filled",
+            matched_client_order_id="journal-order-001",
+            exchange_order_id="venue-123", cumulative_filled_size=12,
+        )
+        before = len(self.journal.list_events("journal-order-001"))
+        replay = self.journal.record_order_observation(
+            "journal-order-001", outcome="filled",
+            matched_client_order_id="journal-order-001",
+            exchange_order_id="venue-123", cumulative_filled_size=12,
+        )
+        self.assertEqual(replay, first)
+        self.assertEqual(len(self.journal.list_events("journal-order-001")), before)
+
     def test_stale_fill_snapshot_cannot_reduce_persisted_cumulative_fill(self):
         self.journal.create_intent(new_intent())
         self.journal.begin_submission("journal-order-001")

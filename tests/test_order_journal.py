@@ -325,6 +325,25 @@ class OrderJournalTests(unittest.TestCase):
         self.assertEqual(sync_state["error_code"], "ConnectionError")
         self.assertFalse(sync_state["fresh"])
 
+    def test_failed_sync_wins_exact_timestamp_tie_against_delayed_success(self):
+        attempted_at = datetime.now(timezone.utc)
+        self.journal.save_account_risk_snapshot(
+            complete_risk_snapshot(captured_at_utc=attempted_at.isoformat())
+        )
+        self.journal.record_account_risk_snapshot_failure(
+            error_code="TimeoutError",
+            attempted_at=attempted_at,
+        )
+        # Simulate a successful fetch that began at the same instant but was
+        # written after the failure. Equal timestamps must not clear the failure.
+        self.journal.save_account_risk_snapshot(
+            complete_risk_snapshot(captured_at_utc=attempted_at.isoformat())
+        )
+        state = self.journal.get_latest_account_risk_sync_state(max_age_seconds=60)
+        self.assertEqual(state["status"], "failed")
+        self.assertEqual(state["error_code"], "TimeoutError")
+        self.assertFalse(state["fresh"])
+
     def test_failed_latest_sync_blocks_atomic_intent_commit(self):
         snapshot_id = self.journal.save_account_risk_snapshot(complete_risk_snapshot())
         intent = new_intent()

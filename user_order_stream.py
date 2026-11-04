@@ -5,7 +5,12 @@ polymarket-client SDK. It never creates, signs, posts, or cancels orders.
 """
 from __future__ import annotations
 
+import argparse
+import asyncio
+import json
+import logging
 import os
+from pathlib import Path
 from decimal import Decimal, InvalidOperation
 from typing import Any
 
@@ -222,6 +227,7 @@ async def consume_user_order_stream(
     *,
     max_events: int | None = None,
     initial_snapshot: bool = True,
+    logger: logging.Logger | None = None,
 ) -> dict[str, Any]:
     """Subscribe first, refresh open orders, then consume the authenticated user stream.
 
@@ -238,6 +244,7 @@ async def consume_user_order_stream(
     if not isinstance(initial_snapshot, bool):
         raise ValueError("initial_snapshot must be a bool")
 
+    log = logger or logging.getLogger(__name__)
     handle = await client.subscribe(UserSpec())
     processor = OrderUserEventProcessor(journal)
     counts = {
@@ -260,6 +267,12 @@ async def consume_user_order_stream(
         snapshot = None
         if initial_snapshot:
             snapshot = await reconcile_open_orders_snapshot(client, journal)
+            log.info(
+                "initial open-order snapshot status=%s orders=%s unresolved=%s",
+                snapshot["status"],
+                snapshot["venue_open_orders"],
+                len(snapshot["unresolved_missing_orders"]),
+            )
             current_dropped = getattr(handle, "dropped", None)
             if isinstance(current_dropped, bool) or not isinstance(current_dropped, int):
                 raise UserEventGapError("SDK user-stream dropped-event counter became invalid")
@@ -277,6 +290,10 @@ async def consume_user_order_stream(
 
             counts["received"] += 1
             result = processor.process(event)["result"]
+            if result in {"manual_review", "rejected_malformed_order_observation"}:
+                log.warning("user order event requires attention: result=%s", result)
+            elif result == "updated":
+                log.debug("user order event persisted")
             if result == "updated":
                 counts["updated"] += 1
             elif result == "duplicate_observation":
@@ -309,6 +326,7 @@ async def monitor_user_orders_from_env(
     private_key: str | None = None,
     wallet: str | None = None,
     max_events: int | None = None,
+    logger: logging.Logger | None = None,
 ) -> dict[str, Any]:
     """Run a read-only account monitor using secrets supplied by the environment.
 
@@ -330,4 +348,32 @@ async def monitor_user_orders_from_env(
             client,
             journal,
             max_events=max_events,
+            logger=logger,
         )
+
+def main() -> None:
+    """CLI entry point for a separately supervised, read-only account monitor."""
+    parser = argparse.ArgumentParser(description="Read-only Polymarket account order monitor")
+    parser.add_argument("--database", default=os.environ.get("ORDER_JOURNAL_DB"),
+                        help="SQLite journal path (default: DATA_DIR/order_journal.sqlite3)")
+    args = parser.parse_args()
+    data_dir = Path(os.environ.get("DATA_DIR", "data"))
+    database_path = Path(args.database) if args.database else data_dir / "order_journal.sqlite3"
+    logging.basicConfig(level=os.environ.get("LOG_LEVEL", "INFO").upper(),
+                        format="%(asctime)s %(levelname)s %(name)s %(message)s")
+    logger = logging.getLogger("polymarket.user_order_monitor")
+    journal = OrderJournal(database_path)
+    logger.info("starting read-only Polymarket user-order monitor")
+    try:
+        summary = asyncio.run(monitor_user_orders_from_env(journal, logger=logger))
+    except KeyboardInterrupt:
+        logger.info("user-order monitor stopped by operator")
+        return
+    except UserEventGapError:
+        logger.exception("user stream lost events; process exiting for supervised restart")
+        raise
+    logger.info("user-order monitor stopped; summary=%s", json.dumps(summary, sort_keys=True))
+
+
+if __name__ == "__main__":
+    main()

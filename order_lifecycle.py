@@ -136,6 +136,31 @@ def _validated_copy(intent: dict[str, Any]) -> dict[str, Any]:
     expected_attempts = 0 if state["status"] == "prepared" else 1
     if attempts != expected_attempts:
         raise ValueError("submission status and attempt count are inconsistent")
+    status = state["status"]
+    external_id = state.get("exchange_order_id")
+    if external_id is not None:
+        _required_text(external_id, "exchange_order_id")
+    reason = state.get("last_reason_code")
+    if reason is not None:
+        _reason_code(reason, default="invalid_reason")
+    if status in {"open", "partially_filled", "filled", "cancelled", "manual_review"}:
+        if external_id is None:
+            raise ValueError("resolved venue order state requires exchange_order_id")
+    if status in {"prepared", "submission_pending", "submission_unknown", "open", "rejected"}:
+        if filled != 0:
+            raise ValueError("this order state must have zero filled_size")
+    if status == "partially_filled" and not Decimal("0") < filled < size:
+        raise ValueError("partially_filled state has inconsistent filled_size")
+    if status == "filled" and filled != size:
+        raise ValueError("filled state must have filled_size equal to order size")
+    if status == "manual_review" and reason != "client_order_id_mismatch":
+        raise ValueError("manual_review state must retain its mismatch reason")
+    if status == "prepared" and (external_id is not None or reconciliations != 0):
+        raise ValueError("prepared intent has inconsistent venue or reconciliation metadata")
+    if status == "submission_pending" and (external_id is not None or reconciliations != 0):
+        raise ValueError("pending submission has inconsistent reconciliation metadata")
+    if status == "submission_unknown" and external_id is not None:
+        raise ValueError("unknown submission cannot have a confirmed exchange_order_id")
     if state.get("automatic_retry_permitted") is not False:
         raise ValueError("automatic retries must remain disabled")
     if state.get("execution") != "none":

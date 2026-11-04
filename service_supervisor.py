@@ -27,7 +27,8 @@ LOGGER = logging.getLogger("polymarket.supervisor")
 class SupervisorConfig:
     app_command: tuple[str, ...]
     monitor_command: tuple[str, ...] | None
-    child_env: dict[str, str]
+    app_env: dict[str, str]
+    monitor_env: dict[str, str] | None
     poll_interval_seconds: float = 1.0
     monitor_restart_base_seconds: float = 2.0
     monitor_restart_max_seconds: float = 60.0
@@ -61,9 +62,20 @@ def build_supervisor_config(
     database_path = Path(
         source.get("ORDER_JOURNAL_DB", str(data_dir / "order_journal.sqlite3"))
     ).expanduser()
-    child_env = dict(source)
-    child_env["DATA_DIR"] = str(data_dir)
-    child_env["ORDER_JOURNAL_DB"] = str(database_path)
+    monitor_env = dict(source)
+    monitor_env["DATA_DIR"] = str(data_dir)
+    monitor_env["ORDER_JOURNAL_DB"] = str(database_path)
+
+    # The public HTTP research worker has no need to inherit account secrets.
+    app_env = dict(monitor_env)
+    for secret_name in (
+        "POLYMARKET_PRIVATE_KEY",
+        "POLYMARKET_API_KEY",
+        "POLYMARKET_API_SECRET",
+        "POLYMARKET_API_PASSPHRASE",
+        "POLYMARKET_SECRET",
+    ):
+        app_env.pop(secret_name, None)
 
     executable = python_executable or sys.executable
     app_command = (executable, "app.py")
@@ -96,7 +108,8 @@ def build_supervisor_config(
     return SupervisorConfig(
         app_command=app_command,
         monitor_command=monitor_command,
-        child_env=child_env,
+        app_env=app_env,
+        monitor_env=monitor_env if monitor_enabled else None,
         poll_interval_seconds=min(poll_interval, 10.0),
     )
 
@@ -150,7 +163,7 @@ def run_supervisor(
     try:
         app_process = popen_factory(
             list(config.app_command),
-            env=dict(config.child_env),
+            env=dict(config.app_env),
         )
         log.info("started paper HTTP worker")
         if config.monitor_command is None:
@@ -158,7 +171,7 @@ def run_supervisor(
         else:
             monitor_process = popen_factory(
                 list(config.monitor_command),
-                env=dict(config.child_env),
+                env=dict(config.monitor_env or {}),
             )
             log.info("started optional read-only account order monitor")
 
@@ -189,7 +202,7 @@ def run_supervisor(
                         break
                     monitor_process = popen_factory(
                         list(config.monitor_command or ()),
-                        env=dict(config.child_env),
+                        env=dict(config.monitor_env or {}),
                     )
                     continue
 

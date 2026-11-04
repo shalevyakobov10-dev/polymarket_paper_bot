@@ -204,7 +204,7 @@ def stage_buy_order_intent(
         "intent_reused": not created_now,
         "submission_attempts": saved["submission_attempts"],
         "account_risk_snapshot_id": saved.get("account_risk_snapshot_id"),
-        "preflight_report": report,
+        "preflight_report": saved.get("preflight_report", report),
         "order_submission_allowed": False,
         "order_signing_allowed": False,
         "execution": "none",

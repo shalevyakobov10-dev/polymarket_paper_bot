@@ -32,6 +32,84 @@ def _blocked(*blockers: str, **extra: Any) -> dict[str, Any]:
     }
 
 
+def _snapshot_decimal(
+    snapshot: dict[str, Any],
+    field: str,
+    *,
+    allow_negative: bool = False,
+) -> Decimal:
+    value = snapshot.get(field)
+    if isinstance(value, bool) or value is None:
+        raise ValueError(f"missing_or_invalid_{field}")
+    try:
+        parsed = Decimal(str(value))
+    except (InvalidOperation, TypeError, ValueError):
+        raise ValueError(f"invalid_{field}") from None
+    if not parsed.is_finite() or (not allow_negative and parsed < 0):
+        raise ValueError(f"out_of_bounds_{field}")
+    return parsed
+
+
+def _validate_snapshot_economics(snapshot: dict[str, Any]) -> None:
+    """Recheck persisted snapshots, including legacy rows written before schema hardening."""
+    required = (
+        "collateral_decimals",
+        "collateral_balance_base_units",
+        "collateral_balance_usd",
+        "open_buy_commitment_usd",
+        "conservative_available_collateral_usd",
+        "collateral_shortfall_usd",
+        "current_open_exposure_usd",
+        "open_position_value_usd",
+        "open_position_cost_usd",
+        "open_position_risk_exposure_usd",
+        "open_unrealized_pnl_usd",
+        "current_open_positions",
+        "current_open_orders",
+    )
+    missing = [field for field in required if field not in snapshot]
+    if missing:
+        raise ValueError("missing_fields:" + ",".join(missing))
+
+    decimals = snapshot["collateral_decimals"]
+    if isinstance(decimals, bool) or not isinstance(decimals, int) or not 0 <= decimals <= 18:
+        raise ValueError("invalid_collateral_decimals")
+    raw_balance = snapshot["collateral_balance_base_units"]
+    if (
+        not isinstance(raw_balance, str)
+        or not raw_balance.isascii()
+        or not raw_balance.isdigit()
+    ):
+        raise ValueError("invalid_collateral_balance_base_units")
+
+    for field in ("current_open_positions", "current_open_orders"):
+        value = snapshot[field]
+        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+            raise ValueError(f"invalid_{field}")
+
+    balance = _snapshot_decimal(snapshot, "collateral_balance_usd")
+    commitment = _snapshot_decimal(snapshot, "open_buy_commitment_usd")
+    available = _snapshot_decimal(snapshot, "conservative_available_collateral_usd")
+    shortfall = _snapshot_decimal(snapshot, "collateral_shortfall_usd")
+    exposure = _snapshot_decimal(snapshot, "current_open_exposure_usd")
+    market_value = _snapshot_decimal(snapshot, "open_position_value_usd")
+    cost = _snapshot_decimal(snapshot, "open_position_cost_usd")
+    position_risk = _snapshot_decimal(snapshot, "open_position_risk_exposure_usd")
+    _snapshot_decimal(snapshot, "open_unrealized_pnl_usd", allow_negative=True)
+
+    base_units_balance = Decimal(int(raw_balance)) / (Decimal(10) ** decimals)
+    if balance != base_units_balance:
+        raise ValueError("collateral_balance_base_units_mismatch")
+    if available != max(Decimal("0"), balance - commitment):
+        raise ValueError("available_collateral_commitment_mismatch")
+    if shortfall != max(Decimal("0"), commitment - balance):
+        raise ValueError("collateral_shortfall_mismatch")
+    if position_risk < max(market_value, cost):
+        raise ValueError("position_risk_exposure_below_market_value_or_cost")
+    if exposure != position_risk + commitment:
+        raise ValueError("open_exposure_commitment_mismatch")
+
+
 def _assets_for_condition(snapshot: dict[str, Any], field: str, condition_id: str) -> set[str]:
     mapping = snapshot.get(field)
     if not isinstance(mapping, dict):
@@ -101,6 +179,7 @@ def stage_buy_order_intent(
         return _blocked("account_risk_snapshot_not_read_only")
 
     try:
+        _validate_snapshot_economics(snapshot)
         position_assets = _assets_for_condition(
             snapshot, "open_position_assets_by_condition", market_condition_id
         )

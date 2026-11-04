@@ -4,7 +4,7 @@ A Python research service that polls public Polymarket Gamma market data, record
 
 ## Safety and limitations
 
-- **Paper/research only:** no wallet integration, order submission, deposits, or withdrawals. The `/execution-readiness` endpoint is an informational checklist; no environment variable or API request can enable live execution. `live_order_preflight.py` validates proposed BUY limits and risk constraints without network access; even a passing preflight never authorizes signing or order submission.
+- **Paper/research only:** no wallet integration, order submission, deposits, or withdrawals. The `/execution-readiness` endpoint is an informational checklist; no environment variable or API request can enable live execution. `live_order_preflight.py` validates proposed BUY limits and risk constraints without network access; even a passing preflight never authorizes signing or order submission. `order_lifecycle.py` is a local-only lifecycle helper: it records one initial attempt, keeps ambiguous outcomes blocked for reconciliation, and never authorizes automatic resubmission. It is not wired to a live API and does not assert that Polymarket supports its local client ID as a native idempotency key.
 - Candidate signals are experimental observations, not investment advice or evidence of profitability.
 - Public API connectivity, hosting, and long-running operation must be verified in the target environment.
 - Backtests and paper results do not guarantee future performance.
@@ -300,3 +300,10 @@ Fold-level studies remain descriptive and do not change the fixed paper strategy
 Each directional forward-return event study now reports how many unique outcome tokens and market IDs contributed to the scored observations, market-ID coverage, the share of events contributed by the most active token and top three tokens, and a market-equal-weighted mean return when market IDs are available. This helps reveal when a seemingly large event count is concentrated in one token or market. These are descriptive clustering diagnostics, not a statistical independence test; repeated events can remain correlated even across different IDs.
 
 The scheduled/manual historical backtest workflow is also serialized with a shared concurrency group. A newer historical run cancels an older in-progress run so multiple expensive public-data backtests do not overlap unnecessarily.
+
+
+## Future order lifecycle safeguards (not connected to execution)
+
+`order_lifecycle.py` provides pure, local state transitions for a future execution adapter. Before any network request, the caller must durably persist the returned `submission_pending` state. A timeout, connection loss, invalid response, or other ambiguous result becomes `submission_unknown`; the helper forbids a second submission attempt and requires reconciliation using the exact local client order ID. A temporary "not found" lookup remains unknown because indexing can lag. A matching venue result can reconcile the order; a mismatched client ID moves it to manual review.
+
+This is a safety scaffold only. It has no HTTP client, signer, persistence backend, Polymarket adapter, or order-placement call. The local client order ID is not claimed to be a venue-supported idempotency field.

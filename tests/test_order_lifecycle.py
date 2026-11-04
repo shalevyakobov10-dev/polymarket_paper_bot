@@ -263,6 +263,45 @@ class OrderLifecycleTests(unittest.TestCase):
                 exchange_order_id="venue-order-77", cumulative_filled_size=10,
             )
 
+    def test_terminal_status_replays_are_idempotent(self):
+        pending = begin_submission(intent())
+        opened = record_submission_response(
+            pending, outcome="accepted", exchange_order_id="venue-order-77"
+        )
+        filled = record_order_observation(
+            opened, outcome="filled",
+            matched_client_order_id="local-order-0001",
+            exchange_order_id="venue-order-77", cumulative_filled_size=10,
+        )
+        repeated_fill = record_order_observation(
+            filled, outcome="filled",
+            matched_client_order_id="local-order-0001",
+            exchange_order_id="venue-order-77", cumulative_filled_size=10,
+        )
+        self.assertEqual(repeated_fill, filled)
+
+        pending_cancel = begin_submission(intent(client_order_id="local-order-0002"))
+        opened_cancel = record_submission_response(
+            pending_cancel, outcome="accepted", exchange_order_id="venue-order-88"
+        )
+        cancelled = record_order_observation(
+            opened_cancel, outcome="cancelled",
+            matched_client_order_id="local-order-0002",
+            exchange_order_id="venue-order-88", cumulative_filled_size=2,
+        )
+        repeated_cancel = record_order_observation(
+            cancelled, outcome="cancelled",
+            matched_client_order_id="local-order-0002",
+            exchange_order_id="venue-order-88", cumulative_filled_size=2,
+        )
+        self.assertEqual(repeated_cancel, cancelled)
+        with self.assertRaisesRegex(RuntimeError, "terminal order"):
+            record_order_observation(
+                cancelled, outcome="partially_filled",
+                matched_client_order_id="local-order-0002",
+                exchange_order_id="venue-order-88", cumulative_filled_size=3,
+            )
+
     def test_identity_mismatch_requires_manual_review(self):
         pending = begin_submission(intent())
         opened = record_submission_response(

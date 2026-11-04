@@ -370,12 +370,31 @@ async def reconcile_open_orders_snapshot(
             "reason": history_result.get("reason", "order_absent_from_open_and_trade_history"),
         })
 
+    trade_history_filled_orders = sum(
+        1 for item in history_results.values() if item.get("result") == "filled"
+    )
+    trade_history_partial_orders = sum(
+        1 for item in history_results.values()
+        if item.get("result") == "partial_fill_confirmed_terminal_unknown"
+    )
+    trade_history_manual_reviews = sum(
+        1 for item in history_results.values() if item.get("result") == "manual_review"
+    )
+    trade_history_unresolved_orders = sum(
+        1 for item in history_results.values()
+        if item.get("result") in {"unresolved", "terminal_status_unconfirmed"}
+    )
+
     return {
         "snapshot_complete": True,
         "status": "open_orders_refreshed" if not unresolved else "snapshot_has_unresolved_absences",
         **counts,
-        "account_trade_history_checked": True,
+        "account_trade_history_checked": bool(initially_missing),
         "trade_records_inspected": trade_records_inspected,
+        "trade_history_filled_orders": trade_history_filled_orders,
+        "trade_history_partial_orders": trade_history_partial_orders,
+        "trade_history_manual_reviews": trade_history_manual_reviews,
+        "trade_history_unresolved_orders": trade_history_unresolved_orders,
         "unresolved_missing_orders": unresolved,
         "execution": "none",
     }

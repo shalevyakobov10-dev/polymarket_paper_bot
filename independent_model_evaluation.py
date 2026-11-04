@@ -20,6 +20,7 @@ FEATURE_NAMES = (
     "book_usable",
     "depth_imbalance_top5",
     "log_spread_bps",
+    "log_clob_book_age_seconds",
     "log_news_matches_24h",
     "log_news_topic_category_count_24h",
     "log_news_unique_source_label_count_24h",
@@ -68,7 +69,14 @@ def extract_model_features(row: dict[str, Any]) -> dict[str, float | None]:
     clipped = min(0.99, max(0.01, probability))
     logit_market = math.log(clipped / (1.0 - clipped))
 
-    book_usable = row.get("clob_book_usable") is True
+    # A geometrically valid bid/ask is not sufficient: only consume it when the
+    # independent quality gate explicitly approved freshness, spread and depth.
+    # Missing quality metadata fails closed rather than trusting legacy raw flags.
+    book_usable = (
+        row.get("clob_book_usable") is True
+        and row.get("clob_book_quality_eligible") is True
+    )
+    book_age = _number(row.get("clob_book_age_seconds")) if book_usable else None
     midpoint = _number(row.get("clob_midpoint")) if book_usable else None
     spread = _number(row.get("clob_spread_bps")) if book_usable else None
     imbalance = _number(row.get("clob_depth_imbalance_top5")) if book_usable else None
@@ -126,6 +134,9 @@ def extract_model_features(row: dict[str, Any]) -> dict[str, float | None]:
             min(1.0, max(-1.0, imbalance)) if imbalance is not None else None
         ),
         "log_spread_bps": math.log1p(spread) if spread is not None and spread >= 0 else None,
+        "log_clob_book_age_seconds": (
+            math.log1p(book_age) if book_age is not None and book_age >= 0 else None
+        ),
         "log_news_matches_24h": math.log1p(max(0.0, news_count or 0.0)),
         "log_news_topic_category_count_24h": math.log1p(max(0.0, topic_count or 0.0)),
         "log_news_unique_source_label_count_24h": math.log1p(max(0.0, source_count or 0.0)),
@@ -1032,7 +1043,7 @@ def forecast_current_feature_rows(
     version_digest = hashlib.sha256(
         json.dumps(version_material, sort_keys=True, separators=(",", ":")).encode("utf-8")
     ).hexdigest()[:20]
-    model_version = f"feature-logistic-v2-{version_digest}" if training else None
+    model_version = f"feature-logistic-v3-{version_digest}" if training else None
 
     resolved_before_now = set()
     for resolution in resolutions:

@@ -440,6 +440,8 @@ class UserOrderStreamTests(unittest.TestCase):
         self.assertEqual(state["status"], "manual_review")
         self.assertEqual(state["last_reason_code"], "order_terms_mismatch")
         self.assertEqual(state["last_mismatch_fields"], ["token_id", "side"])
+        self.assertEqual(result["status"], "snapshot_requires_manual_review")
+        self.assertEqual(result["trade_history_manual_reviews"], 1)
         self.assertEqual(result["unresolved_missing_orders"], [])
 
     def test_incomplete_account_trade_pagination_does_not_mutate_missing_order(self):

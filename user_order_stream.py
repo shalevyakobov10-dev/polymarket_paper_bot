@@ -276,6 +276,14 @@ async def reconcile_open_orders_snapshot(
             matched_total += amount
 
         if mismatch is not None:
+            if mismatch[0] == "multiple_order_matches_in_trade":
+                # Do not double count a single trade row that associates the
+                # same order as both taker and maker (or repeats it ambiguously).
+                history_results[local_id] = {
+                    "result": "unresolved",
+                    "reason": "trade_history_has_ambiguous_order_reference",
+                }
+                continue
             # The venue links a trade to this order ID but its asset or side
             # conflicts with the durable intent. Escalate; do not count the fill.
             current_fill = str(intent["filled_size"])
@@ -286,8 +294,8 @@ async def reconcile_open_orders_snapshot(
                 matched_client_order_id=local_id,
                 exchange_order_id=exchange_id,
                 cumulative_filled_size=current_fill,
-                observed_token_id=mismatch[1] if mismatch[0] != "multiple_order_matches_in_trade" else asset_id,
-                observed_side=mismatch[0] if mismatch[0] != "multiple_order_matches_in_trade" else order_side,
+                observed_token_id=mismatch[1],
+                observed_side=mismatch[0],
             )
             history_results[local_id] = {
                 "result": "manual_review",

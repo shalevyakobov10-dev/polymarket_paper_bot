@@ -10,6 +10,7 @@ import json
 import math
 import sqlite3
 from datetime import datetime, timezone
+from decimal import Decimal, InvalidOperation
 from uuid import uuid4
 from contextlib import contextmanager
 from pathlib import Path
@@ -285,17 +286,66 @@ class OrderJournal:
             return intent.copy(), True
 
 
+    @staticmethod
+    def _snapshot_decimal(
+        value: Any,
+        field: str,
+        *,
+        allow_negative: bool = False,
+    ) -> Decimal:
+        if isinstance(value, bool) or value is None:
+            raise ValueError(f"account risk snapshot field {field} must be a finite decimal")
+        try:
+            parsed = Decimal(str(value))
+        except (InvalidOperation, TypeError, ValueError):
+            raise ValueError(
+                f"account risk snapshot field {field} must be a finite decimal"
+            ) from None
+        if not parsed.is_finite() or (not allow_negative and parsed < 0):
+            raise ValueError(f"account risk snapshot field {field} is outside valid bounds")
+        return parsed
+
+    @staticmethod
+    def _validate_snapshot_asset_map(value: Any, field: str) -> dict[str, list[str]]:
+        if not isinstance(value, dict):
+            raise ValueError(f"account risk snapshot field {field} must be a mapping")
+        normalized: dict[str, list[str]] = {}
+        for condition_id, assets in value.items():
+            if not isinstance(condition_id, str) or not condition_id.strip():
+                raise ValueError(f"account risk snapshot field {field} has an invalid condition ID")
+            if not isinstance(assets, list):
+                raise ValueError(f"account risk snapshot field {field} values must be lists")
+            clean_assets: list[str] = []
+            for asset_id in assets:
+                if not isinstance(asset_id, str) or not asset_id.strip():
+                    raise ValueError(f"account risk snapshot field {field} has an invalid asset ID")
+                clean_assets.append(asset_id.strip())
+            if len(clean_assets) != len(set(clean_assets)):
+                raise ValueError(f"account risk snapshot field {field} contains duplicate asset IDs")
+            normalized[condition_id.strip()] = sorted(clean_assets)
+        return dict(sorted(normalized.items()))
+
     def save_account_risk_snapshot(self, snapshot: dict[str, Any]) -> str:
-        """Append one complete, read-only account risk snapshot for audited staging."""
+        """Append a complete, internally consistent, read-only account risk snapshot."""
         if not isinstance(snapshot, dict) or snapshot.get("snapshot_complete") is not True:
             raise ValueError("only complete account risk snapshots can be persisted")
         if snapshot.get("execution") != "none":
             raise ValueError("account risk snapshot must remain read-only")
+
         required = (
             "captured_at_utc",
+            "collateral_decimals",
+            "collateral_balance_base_units",
             "collateral_balance_usd",
+            "open_buy_commitment_usd",
             "conservative_available_collateral_usd",
+            "collateral_shortfall_usd",
             "current_open_exposure_usd",
+            "open_position_value_usd",
+            "open_position_cost_usd",
+            "open_position_risk_exposure_usd",
+            "open_unrealized_pnl_usd",
+            "open_sell_remaining_shares",
             "current_open_positions",
             "current_open_orders",
             "open_position_assets_by_condition",
@@ -303,6 +353,7 @@ class OrderJournal:
         )
         if any(field not in snapshot for field in required):
             raise ValueError("account risk snapshot is missing required fields")
+
         captured_raw = snapshot["captured_at_utc"]
         if not isinstance(captured_raw, str) or not captured_raw.strip():
             raise ValueError("captured_at_utc must be a non-empty ISO timestamp")
@@ -313,8 +364,84 @@ class OrderJournal:
         if captured.tzinfo is None or captured.utcoffset() is None:
             raise ValueError("captured_at_utc must be timezone-aware")
         captured_utc = captured.astimezone(timezone.utc)
+        if (captured_utc - datetime.now(timezone.utc)).total_seconds() > 60:
+            raise ValueError("captured_at_utc must not be more than 60 seconds in the future")
+
+        decimals = snapshot["collateral_decimals"]
+        if isinstance(decimals, bool) or not isinstance(decimals, int) or not 0 <= decimals <= 18:
+            raise ValueError("collateral_decimals must be an integer between 0 and 18")
+        raw_balance = snapshot["collateral_balance_base_units"]
+        if (
+            not isinstance(raw_balance, str)
+            or not raw_balance.isascii()
+            or not raw_balance.isdigit()
+        ):
+            raise ValueError("collateral_balance_base_units must be a nonnegative integer string")
+
+        count_fields = ("current_open_positions", "current_open_orders")
+        for field in count_fields:
+            value = snapshot[field]
+            if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+                raise ValueError(f"account risk snapshot field {field} must be a nonnegative integer")
+
+        amount_fields = (
+            "collateral_balance_usd",
+            "open_buy_commitment_usd",
+            "conservative_available_collateral_usd",
+            "collateral_shortfall_usd",
+            "current_open_exposure_usd",
+            "open_position_value_usd",
+            "open_position_cost_usd",
+            "open_position_risk_exposure_usd",
+            "open_sell_remaining_shares",
+        )
+        amounts = {
+            field: self._snapshot_decimal(snapshot[field], field)
+            for field in amount_fields
+        }
+        amounts["open_unrealized_pnl_usd"] = self._snapshot_decimal(
+            snapshot["open_unrealized_pnl_usd"],
+            "open_unrealized_pnl_usd",
+            allow_negative=True,
+        )
+
+        base_unit_balance = Decimal(int(raw_balance)) / (Decimal(10) ** decimals)
+        if amounts["collateral_balance_usd"] != base_unit_balance:
+            raise ValueError("collateral_balance_usd does not match base-unit balance")
+        expected_available = max(
+            Decimal("0"),
+            amounts["collateral_balance_usd"] - amounts["open_buy_commitment_usd"],
+        )
+        if amounts["conservative_available_collateral_usd"] != expected_available:
+            raise ValueError("conservative available collateral is inconsistent with open BUY commitments")
+        expected_shortfall = max(
+            Decimal("0"),
+            amounts["open_buy_commitment_usd"] - amounts["collateral_balance_usd"],
+        )
+        if amounts["collateral_shortfall_usd"] != expected_shortfall:
+            raise ValueError("collateral shortfall is inconsistent with balance and BUY commitments")
+        if amounts["open_position_risk_exposure_usd"] < max(
+            amounts["open_position_value_usd"],
+            amounts["open_position_cost_usd"],
+        ):
+            raise ValueError("position risk exposure cannot be below market value or cost")
+        expected_exposure = (
+            amounts["open_position_risk_exposure_usd"]
+            + amounts["open_buy_commitment_usd"]
+        )
+        if amounts["current_open_exposure_usd"] != expected_exposure:
+            raise ValueError("current open exposure is inconsistent with positions and BUY commitments")
+
         state = dict(snapshot)
         state["captured_at_utc"] = captured_utc.isoformat()
+        state["open_position_assets_by_condition"] = self._validate_snapshot_asset_map(
+            snapshot["open_position_assets_by_condition"],
+            "open_position_assets_by_condition",
+        )
+        state["open_order_assets_by_condition"] = self._validate_snapshot_asset_map(
+            snapshot["open_order_assets_by_condition"],
+            "open_order_assets_by_condition",
+        )
         serialized = json.dumps(
             state,
             ensure_ascii=False,

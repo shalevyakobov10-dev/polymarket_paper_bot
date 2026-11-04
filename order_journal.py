@@ -77,6 +77,40 @@ class OrderJournal:
                 ON order_events(client_order_id, event_id)
                 """
             )
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS order_exchange_index (
+                    exchange_order_id TEXT PRIMARY KEY,
+                    client_order_id TEXT NOT NULL UNIQUE,
+                    FOREIGN KEY(client_order_id)
+                        REFERENCES order_intents(client_order_id)
+                )
+                """
+            )
+            # Backfill the immutable venue-ID index for databases created by an
+            # earlier draft of this journal. Conflicts stop startup rather than
+            # attaching one venue order to two local intents.
+            rows = connection.execute(
+                "SELECT client_order_id, state_json FROM order_intents"
+            ).fetchall()
+            for row in rows:
+                try:
+                    saved = json.loads(row["state_json"])
+                except (TypeError, json.JSONDecodeError) as exc:
+                    raise ValueError("stored order intent is malformed; cannot rebuild venue index") from exc
+                external_id = saved.get("exchange_order_id")
+                if not external_id or saved.get("status") == "manual_review":
+                    continue
+                existing = connection.execute(
+                    "SELECT client_order_id FROM order_exchange_index WHERE exchange_order_id = ?",
+                    (external_id,),
+                ).fetchone()
+                if existing is not None and existing["client_order_id"] != row["client_order_id"]:
+                    raise ValueError("exchange_order_id is already indexed to another local order")
+                connection.execute(
+                    "INSERT OR IGNORE INTO order_exchange_index(exchange_order_id, client_order_id) VALUES (?, ?)",
+                    (external_id, row["client_order_id"]),
+                )
         finally:
             connection.close()
 
@@ -136,6 +170,21 @@ class OrderJournal:
             """,
             (serialized, state["client_order_id"]),
         )
+        exchange_order_id = state.get("exchange_order_id")
+        if exchange_order_id and state.get("status") != "manual_review":
+            existing = connection.execute(
+                "SELECT client_order_id FROM order_exchange_index WHERE exchange_order_id = ?",
+                (exchange_order_id,),
+            ).fetchone()
+            if existing is not None and existing["client_order_id"] != state["client_order_id"]:
+                raise ValueError("exchange_order_id is already linked to another local order")
+            try:
+                connection.execute(
+                    "INSERT OR IGNORE INTO order_exchange_index(exchange_order_id, client_order_id) VALUES (?, ?)",
+                    (exchange_order_id, state["client_order_id"]),
+                )
+            except sqlite3.IntegrityError as exc:
+                raise ValueError("local order already has a different exchange_order_id") from exc
 
     @staticmethod
     def _append_event(
@@ -188,6 +237,20 @@ class OrderJournal:
             )
             self._append_event(connection, intent, "intent_created")
             return intent.copy()
+
+    def find_client_order_id_by_exchange_order_id(self, exchange_order_id: str) -> str | None:
+        """Return the local intent mapped to a venue order ID, if known."""
+        if not isinstance(exchange_order_id, str) or not exchange_order_id.strip():
+            raise ValueError("exchange_order_id must be a non-empty string")
+        connection = self._connect()
+        try:
+            row = connection.execute(
+                "SELECT client_order_id FROM order_exchange_index WHERE exchange_order_id = ?",
+                (exchange_order_id.strip(),),
+            ).fetchone()
+            return row["client_order_id"] if row is not None else None
+        finally:
+            connection.close()
 
     def get_intent(self, client_order_id: str) -> dict[str, Any] | None:
         connection = self._connect()
@@ -280,6 +343,10 @@ class OrderJournal:
         exchange_order_id: str,
         cumulative_filled_size: float,
         reason_code: str | None = None,
+        observed_token_id: str | None = None,
+        observed_side: str | None = None,
+        observed_original_size: float | None = None,
+        observed_price: float | None = None,
     ) -> dict[str, Any]:
         """Persist a monotonic venue snapshot; duplicate snapshots are no-ops."""
         allowed = {"open", "partially_filled", "filled", "cancelled", "rejected"}
@@ -294,6 +361,10 @@ class OrderJournal:
                 exchange_order_id=exchange_order_id,
                 cumulative_filled_size=cumulative_filled_size,
                 reason_code=reason_code,
+                observed_token_id=observed_token_id,
+                observed_side=observed_side,
+                observed_original_size=observed_original_size,
+                observed_price=observed_price,
             )
             if updated == current:
                 return current

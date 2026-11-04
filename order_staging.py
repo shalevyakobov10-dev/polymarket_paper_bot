@@ -22,15 +22,54 @@ def stage_buy_order_intent(
     side: str,
     limit_price: float,
     size: float,
+    market_condition_id: str,
     preflight_context: Mapping[str, Any],
+    max_account_snapshot_age_seconds: float = 60,
 ) -> dict[str, Any]:
     """Evaluate every preflight gate, then persist a prepared intent only.
 
-    preflight_context must contain the live_order_preflight inputs other than
-    token_id, side, limit_price, and size. If any order term is duplicated in
-    that mapping, it must match the explicit argument. No network client or
-    account secret is accepted by this function.
+    preflight_context contains non-account inputs such as book quality, fees,
+    configured limits, and release gates. Account balance, exposure, position
+    count, and opposing-outcome exposure are always overwritten from the latest
+    persisted complete account snapshot. No network client or secret is accepted.
     """
+    if not isinstance(market_condition_id, str) or not market_condition_id.strip():
+        return {
+            "status": "blocked",
+            "blockers": ["missing_market_condition_id"],
+            "intent_created": False,
+            "order_submission_allowed": False,
+            "order_signing_allowed": False,
+            "execution": "none",
+        }
+
+    try:
+        account_snapshot = journal.get_latest_account_risk_snapshot(
+            max_age_seconds=max_account_snapshot_age_seconds
+        )
+    except (TypeError, ValueError) as exc:
+        return {
+            "status": "blocked",
+            "blockers": ["invalid_account_risk_snapshot_freshness", str(exc)[:180]],
+            "intent_created": False,
+            "order_submission_allowed": False,
+            "order_signing_allowed": False,
+            "execution": "none",
+        }
+    if (
+        not isinstance(account_snapshot, dict)
+        or account_snapshot.get("snapshot_complete") is not True
+        or account_snapshot.get("execution") != "none"
+        or account_snapshot.get("fresh") is not True
+    ):
+        return {
+            "status": "blocked",
+            "blockers": ["account_risk_snapshot_missing_or_stale"],
+            "intent_created": False,
+            "order_submission_allowed": False,
+            "execution": "none",
+        }
+
     if not isinstance(preflight_context, Mapping):
         return {
             "status": "blocked",
@@ -50,6 +89,43 @@ def stage_buy_order_intent(
             "size": size,
         }
         context = dict(preflight_context)
+        # Never trust caller-supplied account metrics. These values must come
+        # from the most recent complete authenticated account snapshot.
+        required_snapshot_fields = (
+            "snapshot_id", "captured_at_utc", "conservative_available_collateral_usd",
+            "current_open_exposure_usd", "current_open_positions", "current_open_orders",
+            "open_unrealized_pnl_usd", "open_position_assets_by_condition",
+            "open_order_assets_by_condition",
+        )
+        if any(field not in account_snapshot for field in required_snapshot_fields):
+            raise ValueError("account risk snapshot is missing required risk fields")
+        positions_by_condition = account_snapshot["open_position_assets_by_condition"]
+        orders_by_condition = account_snapshot["open_order_assets_by_condition"]
+        if not isinstance(positions_by_condition, dict) or not isinstance(orders_by_condition, dict):
+            raise ValueError("account risk snapshot has invalid condition/asset maps")
+        condition_assets = set()
+        for asset_map in (positions_by_condition, orders_by_condition):
+            assets = asset_map.get(market_condition_id, [])
+            if not isinstance(assets, (list, tuple, set)) or any(
+                not isinstance(asset, str) or not asset.strip() for asset in assets
+            ):
+                raise ValueError("account risk snapshot has malformed condition assets")
+            condition_assets.update(assets)
+        positions = account_snapshot["current_open_positions"]
+        open_orders = account_snapshot["current_open_orders"]
+        if (
+            isinstance(positions, bool) or not isinstance(positions, int) or positions < 0
+            or isinstance(open_orders, bool) or not isinstance(open_orders, int) or open_orders < 0
+        ):
+            raise ValueError("account risk snapshot has invalid position/order counts")
+        opposing_open = any(asset != token_id for asset in condition_assets)
+        context.update({
+            "available_collateral_usd": account_snapshot["conservative_available_collateral_usd"],
+            "current_open_exposure_usd": account_snapshot["current_open_exposure_usd"],
+            "current_open_positions": positions + open_orders,
+            "open_unrealized_pnl_usd": account_snapshot["open_unrealized_pnl_usd"],
+            "opposing_market_outcome_open": opposing_open,
+        })
         for name, value in terms.items():
             if name in context and str(context[name]) != str(value):
                 return {
@@ -123,7 +199,20 @@ def stage_buy_order_intent(
     # Preserve the passing preflight with the initial append-only intent event.
     existing_before = journal.get_intent(client_order_id)
     intent["preflight_report"] = report
-    saved = journal.create_intent(intent)
+    intent["market_condition_id"] = market_condition_id.strip()
+    intent["account_risk_snapshot_id"] = account_snapshot["snapshot_id"]
+    intent["account_risk_snapshot_captured_at_utc"] = account_snapshot["captured_at_utc"]
+    try:
+        saved = journal.create_intent(intent)
+    except (TypeError, ValueError) as exc:
+        return {
+            "status": "blocked",
+            "blockers": ["existing_intent_conflict", str(exc)[:180]],
+            "intent_created": False,
+            "order_submission_allowed": False,
+            "order_signing_allowed": False,
+            "execution": "none",
+        }
     created_now = existing_before is None
     return {
         "status": "prepared_not_authorized" if saved["status"] == "prepared"
@@ -134,6 +223,8 @@ def stage_buy_order_intent(
         "intent_reused": not created_now,
         "submission_attempts": saved["submission_attempts"],
         "preflight_report": report,
+        "account_risk_snapshot_id": account_snapshot["snapshot_id"],
+        "account_risk_snapshot_age_seconds": account_snapshot["age_seconds"],
         "order_submission_allowed": False,
         "order_signing_allowed": False,
         "execution": "none",

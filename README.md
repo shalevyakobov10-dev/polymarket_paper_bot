@@ -6,6 +6,7 @@ A Python research service that polls public Polymarket Gamma market data, record
 
 - **Paper/research only:** no wallet integration, order submission, deposits, or withdrawals. The `/execution-readiness` endpoint is an informational checklist; no environment variable or API request can enable live execution. `live_order_preflight.py` validates proposed BUY limits and risk constraints without network access; even a passing preflight never authorizes signing or order submission.
 - Candidate signals are experimental observations, not investment advice or evidence of profitability.
+- `order_intent_ledger.py` is a validation-only, single-process durable idempotency state machine for a future adapter. It persists an intent before submission and blocks blind retries after an ambiguous outcome; it does not send orders.
 - Public API connectivity, hosting, and long-running operation must be verified in the target environment.
 - Backtests and paper results do not guarantee future performance.
 - Never commit passwords, API tokens, private keys, or other secrets.

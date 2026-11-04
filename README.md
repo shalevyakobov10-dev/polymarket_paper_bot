@@ -262,3 +262,13 @@ When a tracked binary market receives a definitive Yes/No resolution from the pu
 The service also opens a read-only connection to Polymarket's public CLOB market channel. It subscribes to a bounded set of outcome token IDs selected from the tracked active markets, handles the application-level `PING` heartbeat, reconnects between bounded sessions, and persists normalized book, price-change and trade-price events to `market_stream_events.jsonl`. The current cap is controlled by `MARKET_WS_MAX_TOKENS` (default 80, maximum 200). The `/market-stream` endpoint reports connection and ingestion health.
 
 This stream improves market-data latency for the selected tokens; it does not cover every Polymarket market, every world event, or guarantee zero-latency delivery. REST snapshots and the public stream are research inputs only. No account credentials or order-placement capability are used.
+
+
+## Paper fill quality diagnostics
+
+Every depth-aware paper fill now reports:
+- `fill_ratio` and `completion_status` (`filled`, `partial`, or `unfilled`) so visible partial depth is explicit.
+- `best_visible_price` and `book_walk_cost_bps`, measuring the adverse VWAP difference from the best displayed level when sweeping the visible book.
+- `visible_depth_usd` for buys or `visible_depth_shares` for sells, limited to the configured top levels and any supplied price limit.
+
+These are snapshot diagnostics, not measured market impact or a guarantee of an executable fill. They do not model queue priority, hidden liquidity, cancellations, latency, or replenishment. A partial or unfilled result remains ineligible: the paper portfolio still opens/closes only when the full requested size is visible under the current simulation rules.

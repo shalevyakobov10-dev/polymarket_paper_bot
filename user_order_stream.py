@@ -18,6 +18,7 @@ from typing import Any
 from polymarket import AsyncSecureClient
 from polymarket.streams import UserSpec
 
+from account_risk_snapshot import collect_account_risk_snapshot
 from order_journal import OrderJournal
 
 
@@ -176,11 +177,13 @@ async def reconcile_open_orders_snapshot(
     """
     processor = OrderUserEventProcessor(journal)
     seen_exchange_ids: set[str] = set()
+    venue_open_order_records: list[Any] = []
     counts = {"venue_open_orders": 0, "updated": 0, "duplicate": 0,
               "manual_review": 0, "untracked": 0, "malformed": 0}
 
     async for page in client.list_open_orders():
         for order in page.items:
+            venue_open_order_records.append(order)
             exchange_order_id = str(getattr(order, "id", "") or "").strip()
             if exchange_order_id:
                 seen_exchange_ids.add(exchange_order_id)
@@ -395,9 +398,30 @@ async def reconcile_open_orders_snapshot(
             else "open_orders_refreshed"
         )
     )
+    account_risk_snapshot: dict[str, Any] | None = None
+    account_risk_snapshot_id: str | None = None
+    account_risk_snapshot_error: str | None = None
+    try:
+        account_risk_snapshot = await collect_account_risk_snapshot(
+            client,
+            open_orders=venue_open_order_records,
+        )
+        account_risk_snapshot_id = journal.save_account_risk_snapshot(
+            account_risk_snapshot
+        )
+    except Exception as exc:
+        # User-order event processing should remain available when a separate
+        # collateral/position endpoint is degraded. No new staging can occur
+        # without a fresh persisted risk snapshot.
+        account_risk_snapshot_error = f"{type(exc).__name__}: {str(exc)[:180]}"
+
     return {
         "snapshot_complete": True,
         "status": snapshot_status,
+        "account_risk_snapshot_complete": account_risk_snapshot is not None,
+        "account_risk_snapshot_id": account_risk_snapshot_id,
+        "account_risk_snapshot_error": account_risk_snapshot_error,
+        "account_risk_snapshot": account_risk_snapshot,
         **counts,
         "account_trade_history_checked": bool(initially_missing),
         "trade_records_inspected": trade_records_inspected,

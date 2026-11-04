@@ -18,7 +18,7 @@ jobs:
       - name: Install runtime dependencies
         run: python -m pip install -r requirements.txt
       - name: Compile
-        run: python -m py_compile app.py paper_trading.py news_monitor.py market_data.py market_quality.py market_stream.py global_news.py risk_manager.py resilience.py backtest.py forecast_evaluation.py resolution_tracker.py research_features.py independent_model_evaluation.py learning_journal.py model_governance.py publisher_identity.py paper_fees.py execution_readiness.py live_order_preflight.py order_lifecycle.py order_journal.py user_order_stream.py order_staging.py
+        run: python -m py_compile app.py paper_trading.py news_monitor.py market_data.py market_quality.py market_stream.py global_news.py risk_manager.py resilience.py backtest.py forecast_evaluation.py resolution_tracker.py research_features.py independent_model_evaluation.py learning_journal.py model_governance.py publisher_identity.py paper_fees.py execution_readiness.py live_order_preflight.py order_lifecycle.py order_journal.py user_order_stream.py order_staging.py service_supervisor.py supervisor_status.py
       - name: Unit tests
         run: python -m unittest discover -s tests -v
       - name: Build Docker image
@@ -53,6 +53,7 @@ jobs:
           curl --silent --show-error --fail http://127.0.0.1:18080/model-forecasts > /tmp/paper-model-forecasts.json
           curl --silent --show-error --fail http://127.0.0.1:18080/learning > /tmp/paper-learning.json
           curl --silent --show-error --fail http://127.0.0.1:18080/execution-readiness > /tmp/paper-execution-readiness.json
+          curl --silent --show-error --fail http://127.0.0.1:18080/service-supervisor > /tmp/paper-service-supervisor.json
           python - <<'PY'
           import json
           from pathlib import Path
@@ -70,6 +71,7 @@ jobs:
           model_forecasts = json.loads(Path("/tmp/paper-model-forecasts.json").read_text())
           learning = json.loads(Path("/tmp/paper-learning.json").read_text())
           execution_readiness = json.loads(Path("/tmp/paper-execution-readiness.json").read_text())
+          supervisor = json.loads(Path("/tmp/paper-service-supervisor.json").read_text())
           assert "items" in news and "feeds_configured" in news, "news endpoint schema mismatch"
           assert health.get("mode") == "paper_only", "health endpoint must remain paper-only"
           assert health.get("status") in {"healthy", "degraded", "unhealthy"}, "health endpoint status schema mismatch"
@@ -101,5 +103,12 @@ jobs:
           assert execution_readiness.get("live_execution_enabled") is False, "live execution must remain disabled"
           assert execution_readiness.get("order_submission_allowed") is False, "live orders must remain blocked"
           assert execution_readiness.get("execution") == "none", "execution-readiness must not submit orders"
-          print("Container smoke check passed: public research endpoints, /learning, and fail-closed /execution-readiness returned valid JSON.")
+          assert supervisor.get("supervised") is True, "process supervisor status must be available in Docker"
+          assert supervisor.get("service_state") in {"starting", "running"}, "supervisor service state must be starting or running"
+          assert supervisor.get("monitor_enabled") is False, "account monitor must remain disabled in smoke test"
+          assert supervisor.get("monitor_state") == "disabled", "disabled monitor state mismatch"
+          assert supervisor.get("order_submission_allowed") is False, "supervisor status must never enable orders"
+          assert supervisor.get("execution") == "none", "supervisor status must remain read-only"
+          assert "POLYMARKET_PRIVATE_KEY" not in supervisor, "supervisor status must not expose secrets"
+          print("Container smoke check passed: research, learning, execution-readiness, and sanitized supervisor status endpoints returned valid JSON.")
           PY

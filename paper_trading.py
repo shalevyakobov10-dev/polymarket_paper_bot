@@ -68,6 +68,7 @@ class PaperConfig:
     stop_loss_pct: float = 0.10
     max_hold_hours: float = 24.0
     simulated_slippage: float = 0.005
+    max_entry_price_impact_bps: float = 200.0
     fee_rate: float = 0.0
     daily_loss_limit_usd: float = 5.0
     max_portfolio_drawdown_pct: float = 20.0
@@ -90,6 +91,7 @@ class PaperConfig:
             "stop_loss_pct": "PAPER_STOP_LOSS_PCT",
             "max_hold_hours": "PAPER_MAX_HOLD_HOURS",
             "simulated_slippage": "PAPER_SLIPPAGE_RATE",
+            "max_entry_price_impact_bps": "PAPER_MAX_ENTRY_PRICE_IMPACT_BPS",
             "fee_rate": "PAPER_FEE_RATE",
             "daily_loss_limit_usd": "PAPER_DAILY_LOSS_LIMIT_USD",
             "max_portfolio_drawdown_pct": "PAPER_MAX_PORTFOLIO_DRAWDOWN_PCT",
@@ -127,6 +129,8 @@ class PaperConfig:
             raise ValueError("Take-profit must be in (0, 1] and stop-loss in (0, 1)")
         if not 0 <= config.simulated_slippage < 0.5 or not 0 <= config.fee_rate < 0.5:
             raise ValueError("Slippage and fee rate must be in [0, 0.5)")
+        if not 0 < config.max_entry_price_impact_bps <= 5000:
+            raise ValueError("Maximum entry book impact must be in (0, 5000] basis points")
         if config.daily_loss_limit_usd <= 0:
             raise ValueError("Daily loss limit must be positive")
         if not 0.0 < config.max_portfolio_drawdown_pct <= 100.0:
@@ -570,6 +574,7 @@ class PaperTrader:
         exposure = sum(float(position.get("gross_cost", 0.0)) for position in positions.values())
         entry_reference_price = observed_price
         entry_price_source = "gamma_outcome_price_fallback"
+        entry_limit_price = None
         initial_mark_price = observed_price
         initial_mark_source = "gamma_outcome_price_fallback"
         available_cash = float(self._state["cash"])
@@ -626,8 +631,18 @@ class PaperTrader:
         entry_fill_details = None
         initial_mark_fill_details = None
         if market_quality.get("reason") == "approved_market_quality":
+            best_ask = finite_float(orderbook.get("best_ask"))
+            if best_ask is None or not 0.0 < best_ask < 1.0:
+                return None, "invalid_best_ask_for_entry_limit"
+            entry_limit_price = min(
+                0.999999,
+                best_ask * (1.0 + self.config.max_entry_price_impact_bps / 10000.0),
+            )
             entry_fill_details = simulate_orderbook_fill(
-                row.get("orderbook"), side="buy", target_notional_usd=spend
+                row.get("orderbook"),
+                side="buy",
+                target_notional_usd=spend,
+                limit_price=entry_limit_price,
             )
             if not entry_fill_details.get("eligible"):
                 return None, str(entry_fill_details.get("reason") or "entry_book_depth_unavailable")
@@ -688,6 +703,9 @@ class PaperTrader:
             "opened_at": iso_time(now),
             "entry_signal_price": round(observed_price, 8),
             "entry_reference_price": round(entry_reference_price, 8),
+            "entry_limit_price": (
+                round(entry_limit_price, 8) if entry_limit_price is not None else None
+            ),
             "entry_price_source": entry_price_source,
             "entry_price": round(entry_price, 8),
             "mark_price": round(initial_mark_price, 8),

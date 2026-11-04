@@ -454,6 +454,41 @@ class PaperTraderTests(unittest.TestCase):
         self.assertEqual(result["opened"], [])
         self.assertEqual(result["candidates"][0]["skip_reason"], "missing_orderbook")
 
+    def test_entry_fill_is_rejected_when_depth_requires_price_above_fok_cap(self):
+        cfg = PaperConfig(**{
+            **self.config.__dict__,
+            "require_orderbook": True,
+            "max_entry_price_impact_bps": 100.0,
+        })
+        bot = PaperTrader(Path(self.temp.name) / "fok_cap_state.json", cfg)
+        bot.process_snapshot([self.row(0.50)], self.now)
+        book = {
+            "token_id": "token-1",
+            "observed_at": (self.now + timedelta(minutes=5)).isoformat(),
+            "best_bid": 0.52,
+            "best_ask": 0.54,
+            "spread_bps": 377.36,
+            "bid_depth_usd_top5": 20.0,
+            "ask_depth_usd_top5": 18.0,
+            "bids_top5": [{"price": 0.52, "size": 100.0}],
+            "asks_top5": [
+                {"price": 0.54, "size": 2.0},
+                {"price": 0.56, "size": 100.0},
+            ],
+            "book_usable": True,
+            "crossed_book": False,
+        }
+        result = bot.process_snapshot(
+            [{**self.row(0.54), "orderbook": book}],
+            self.now + timedelta(minutes=5),
+        )
+        self.assertEqual(result["opened"], [])
+        self.assertEqual(
+            result["candidates"][0]["skip_reason"],
+            "insufficient_visible_ask_depth",
+        )
+        self.assertEqual(bot.snapshot()["metrics"]["open_positions"], 0)
+
     def test_orderbook_gate_accepts_fresh_liquid_book(self):
         cfg = PaperConfig(**{**self.config.__dict__, "require_orderbook": True})
         bot = PaperTrader(Path(self.temp.name) / "quality_valid_state.json", cfg)
@@ -503,6 +538,7 @@ class PaperTraderTests(unittest.TestCase):
         opened = opened_result["opened"][0]
         self.assertEqual(opened["entry_price_source"], "clob_top5_depth_vwap")
         self.assertAlmostEqual(opened["entry_reference_price"], 0.55)
+        self.assertAlmostEqual(opened["entry_limit_price"], 0.55 * 1.02)
         self.assertAlmostEqual(opened["entry_price"], 0.55 * 1.005)
         self.assertAlmostEqual(opened["mark_price"], 0.53)
         self.assertEqual(opened["mark_source"], "clob_top5_depth_vwap")

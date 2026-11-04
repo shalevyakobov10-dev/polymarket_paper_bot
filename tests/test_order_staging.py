@@ -250,7 +250,7 @@ class OrderStagingTests(unittest.TestCase):
         self.assertEqual(replay["status"], "blocked")
         self.assertIn("order_intent_conflict_or_corrupt_journal", replay["blockers"])
         saved = self.journal.get_intent("staged-order-001")
-        self.assertEqual(saved["preflight_report"]["book_age_seconds"], 1)
+        self.assertEqual(saved["preflight_report"]["preflight_input_evidence"]["book_age_seconds"], 1)
         self.assertEqual(len(self.journal.list_events("staged-order-001")), 1)
 
     def test_replaying_same_staged_intent_is_idempotent(self):

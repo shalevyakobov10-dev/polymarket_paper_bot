@@ -356,8 +356,12 @@ class UserOrderStreamTests(unittest.TestCase):
             )
         )
         self.assertFalse(result["account_risk_snapshot_complete"])
-        self.assertIn("RuntimeError", result["account_risk_snapshot_error"])
+        self.assertEqual(result["account_risk_snapshot_error"], "RuntimeError")
         self.assertIsNone(self.journal.get_latest_account_risk_snapshot())
+        sync_state = self.journal.get_latest_account_risk_sync_state()
+        self.assertEqual(sync_state["status"], "failed")
+        self.assertEqual(sync_state["error_code"], "RuntimeError")
+        self.assertFalse(sync_state["fresh"])
 
     def test_rest_open_order_snapshot_refreshes_cumulative_fills(self):
         open_order = SimpleNamespace(

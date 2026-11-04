@@ -238,7 +238,7 @@ class FeatureModelEvaluationTests(unittest.TestCase):
             feature_rows, resolutions, now=now, max_feature_age_seconds=3600
         )
         self.assertEqual(result["status"], "model_fitted")
-        self.assertTrue(result["model_version"].startswith("feature-logistic-v2-"))
+        self.assertTrue(result["model_version"].startswith("feature-logistic-v3-"))
         self.assertEqual(result["model"]["version"], result["model_version"])
         self.assertTrue(all(row["model_version"] == result["model_version"] for row in result["forecasts"]))
         self.assertEqual(result["training"]["eligible_unique_markets"], 100)
@@ -252,6 +252,47 @@ class FeatureModelEvaluationTests(unittest.TestCase):
         ))
         self.assertEqual(result["decision"], "NO_ACTION_RESEARCH_ONLY")
         self.assertFalse(result["live_execution_enabled"])
+
+    def test_extract_model_features_requires_quality_eligible_fresh_orderbook(self):
+        approved = model_eval.extract_model_features({
+            "gamma_yes_probability": 0.5,
+            "clob_book_usable": True,
+            "clob_book_quality_eligible": True,
+            "clob_book_age_seconds": 30,
+            "clob_midpoint": 0.6,
+            "clob_spread_bps": 200,
+            "clob_depth_imbalance_top5": 0.4,
+        })
+        self.assertEqual(approved["book_usable"], 1.0)
+        self.assertAlmostEqual(approved["book_midpoint_minus_market"], 0.1)
+        self.assertAlmostEqual(approved["log_clob_book_age_seconds"], math.log1p(30))
+
+        stale_or_rejected = model_eval.extract_model_features({
+            "gamma_yes_probability": 0.5,
+            "clob_book_usable": True,
+            "clob_book_quality_eligible": False,
+            "clob_book_age_seconds": 600,
+            "clob_midpoint": 0.9,
+            "clob_spread_bps": 10,
+            "clob_depth_imbalance_top5": 1.0,
+        })
+        self.assertEqual(stale_or_rejected["book_usable"], 0.0)
+        self.assertIsNone(stale_or_rejected["book_midpoint_minus_market"])
+        self.assertIsNone(stale_or_rejected["log_spread_bps"])
+        self.assertIsNone(stale_or_rejected["depth_imbalance_top5"])
+        self.assertIsNone(stale_or_rejected["log_clob_book_age_seconds"])
+
+    def test_extract_model_features_fails_closed_when_book_quality_metadata_is_missing(self):
+        features = model_eval.extract_model_features({
+            "gamma_yes_probability": 0.5,
+            "clob_book_usable": True,
+            "clob_book_age_seconds": 5,
+            "clob_midpoint": 0.7,
+            "clob_spread_bps": 100,
+            "clob_depth_imbalance_top5": 0.5,
+        })
+        self.assertEqual(features["book_usable"], 0.0)
+        self.assertIsNone(features["book_midpoint_minus_market"])
 
     def test_extract_model_features_includes_market_aware_news_diagnostics(self):
         features = model_eval.extract_model_features({

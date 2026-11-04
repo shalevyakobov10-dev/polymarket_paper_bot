@@ -1,6 +1,7 @@
 import tempfile
 import threading
 import unittest
+from datetime import datetime, timezone
 from pathlib import Path
 
 from order_journal import OrderJournal
@@ -236,6 +237,38 @@ class OrderJournalTests(unittest.TestCase):
         self.assertEqual(sum(1 for _state, created in results if created), 1)
         self.assertEqual(sum(1 for _state, created in results if not created), 1)
         self.assertEqual(len(self.journal.list_events("journal-order-001")), 1)
+
+
+    def test_staged_intent_must_reference_latest_snapshot_inside_commit(self):
+        def snapshot():
+            return {
+                "snapshot_complete": True,
+                "captured_at_utc": datetime.now(timezone.utc).isoformat(),
+                "collateral_balance_usd": "100",
+                "conservative_available_collateral_usd": "100",
+                "current_open_exposure_usd": "0",
+                "current_open_positions": 0,
+                "current_open_orders": 0,
+                "open_position_assets_by_condition": {},
+                "open_order_assets_by_condition": {},
+                "execution": "none",
+            }
+
+        first_snapshot_id = self.journal.save_account_risk_snapshot(snapshot())
+        intent = new_intent()
+        intent["market_condition_id"] = "condition-1"
+        intent["account_risk_snapshot_id"] = first_snapshot_id
+        saved, created = self.journal.create_intent_with_status(intent)
+        self.assertTrue(created)
+        self.assertEqual(saved["account_risk_snapshot_id"], first_snapshot_id)
+
+        self.journal.save_account_risk_snapshot(snapshot())
+        stale_intent = new_intent(client_order_id="journal-order-stale")
+        stale_intent["market_condition_id"] = "condition-1"
+        stale_intent["account_risk_snapshot_id"] = first_snapshot_id
+        with self.assertRaisesRegex(ValueError, "snapshot changed before intent commit"):
+            self.journal.create_intent_with_status(stale_intent)
+        self.assertIsNone(self.journal.get_intent("journal-order-stale"))
 
     def test_exchange_order_id_index_survives_restart(self):
         self.journal.create_intent(new_intent())

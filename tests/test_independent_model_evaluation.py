@@ -421,6 +421,22 @@ class FeatureModelEvaluationTests(unittest.TestCase):
         self.assertEqual(result["training"]["eligible_unique_markets"], 80)
         self.assertEqual(result["forecasts"], [])
 
+    def test_dataset_provenance_is_deterministic_and_sensitive_to_selected_features(self):
+        samples = synthetic_samples()
+        first = model_eval.build_evaluation_dataset_provenance(samples)
+        reordered = model_eval.build_evaluation_dataset_provenance(list(reversed(samples)))
+        self.assertEqual(first["fingerprint"], reordered["fingerprint"])
+        self.assertEqual(first["samples_n"], len(samples))
+        self.assertEqual(first["feature_names"], list(model_eval.FEATURE_NAMES))
+        changed = [dict(row, features=dict(row["features"])) for row in samples]
+        changed[0]["features"]["log_volume_24h"] += 0.25
+        second = model_eval.build_evaluation_dataset_provenance(changed)
+        self.assertNotEqual(first["fingerprint"], second["fingerprint"])
+        changed_label = [dict(row) for row in samples]
+        changed_label[0]["outcome_yes"] = 1 - changed_label[0]["outcome_yes"]
+        third = model_eval.build_evaluation_dataset_provenance(changed_label)
+        self.assertNotEqual(first["fingerprint"], third["fingerprint"])
+
     def test_invalid_evaluation_configuration_is_rejected(self):
         with self.assertRaises(ValueError):
             model_eval.evaluate_feature_model([], train_fraction=0.95)

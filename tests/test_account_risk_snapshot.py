@@ -131,9 +131,10 @@ class AccountRiskSnapshotTests(unittest.TestCase):
         self.assertEqual(result["collateral_balance_usd"], "100")
         self.assertEqual(Decimal(result["open_buy_commitment_usd"]), Decimal("4.0"))
         self.assertEqual(Decimal(result["conservative_available_collateral_usd"]), Decimal("96.0"))
-        self.assertEqual(result["current_open_exposure_usd"], "13.5")
+        self.assertEqual(result["current_open_exposure_usd"], "14.5")
         self.assertEqual(result["open_position_value_usd"], "9.5")
         self.assertEqual(Decimal(result["open_position_cost_usd"]), Decimal("8.0"))
+        self.assertEqual(result["open_position_risk_exposure_usd"], "10.5")
         self.assertEqual(result["open_unrealized_pnl_usd"], "1.5")
         self.assertEqual(result["current_open_positions"], 2)
         self.assertEqual(result["current_open_orders"], 2)
@@ -146,6 +147,43 @@ class AccountRiskSnapshotTests(unittest.TestCase):
             },
         )
         self.assertEqual(result["execution"], "none")
+
+
+    def test_exposure_uses_per_position_higher_of_market_value_or_cost_basis(self):
+        client = FakeAccountClient(
+            positions_by_status={
+                "OPEN": [page([
+                    position(
+                        condition_id="condition-down",
+                        asset_id="token-down",
+                        size="10",
+                        value="3",
+                        cost="9",
+                        unrealized="-6",
+                    ),
+                    position(
+                        condition_id="condition-up",
+                        asset_id="token-up",
+                        size="10",
+                        value="12",
+                        cost="8",
+                        unrealized="4",
+                    ),
+                ])],
+                "REDEEMABLE": [],
+            }
+        )
+        open_orders = [
+            order(order_id="resting-buy", original="4", matched="0", price="0.5")
+        ]
+        result = asyncio.run(
+            collect_account_risk_snapshot(client, open_orders=open_orders)
+        )
+        self.assertEqual(result["open_position_value_usd"], "15")
+        self.assertEqual(result["open_position_cost_usd"], "17")
+        # max(3, 9) + max(12, 8) + remaining BUY commitment (2).
+        self.assertEqual(result["open_position_risk_exposure_usd"], "21")
+        self.assertEqual(result["current_open_exposure_usd"], "23")
 
     def test_fetches_all_open_order_pages_when_not_supplied(self):
         client = FakeAccountClient(

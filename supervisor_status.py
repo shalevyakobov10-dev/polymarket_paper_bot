@@ -29,6 +29,7 @@ def build_supervisor_status(
     monitor_state: str,
     restart_count: int = 0,
     last_exit_code: int | None = None,
+    app_exit_code: int | None = None,
     next_restart_at: str | None = None,
     updated_at: str | None = None,
 ) -> dict[str, Any]:
@@ -48,6 +49,10 @@ def build_supervisor_status(
         isinstance(last_exit_code, bool) or not isinstance(last_exit_code, int)
     ):
         raise ValueError("last_exit_code must be an integer or null")
+    if app_exit_code is not None and (
+        isinstance(app_exit_code, bool) or not isinstance(app_exit_code, int)
+    ):
+        raise ValueError("app_exit_code must be an integer or null")
 
     timestamp = updated_at or datetime.now(timezone.utc).isoformat()
     if not isinstance(timestamp, str) or not timestamp.strip():
@@ -78,6 +83,7 @@ def build_supervisor_status(
         "monitor_state": monitor_state,
         "monitor_restart_count": restart_count,
         "monitor_last_exit_code": last_exit_code,
+        "app_exit_code": app_exit_code,
         "monitor_next_restart_at": next_restart_at,
         "updated_at": parsed.astimezone(timezone.utc).isoformat(),
         "execution": "none",
@@ -144,6 +150,7 @@ def read_supervisor_status(path: str | Path) -> dict[str, Any]:
             monitor_state=raw.get("monitor_state"),
             restart_count=raw.get("monitor_restart_count", 0),
             last_exit_code=raw.get("monitor_last_exit_code"),
+            app_exit_code=raw.get("app_exit_code"),
             next_restart_at=raw.get("monitor_next_restart_at"),
             updated_at=raw.get("updated_at"),
         )
@@ -156,6 +163,7 @@ def read_supervisor_status(path: str | Path) -> dict[str, Any]:
             "monitor_state": "unknown",
             "monitor_restart_count": 0,
             "monitor_last_exit_code": None,
+            "app_exit_code": None,
             "monitor_next_restart_at": None,
             "updated_at": None,
             "execution": "none",

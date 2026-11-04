@@ -31,6 +31,12 @@ def _decimal(value: Any, field: str, *, allow_negative: bool = False) -> Decimal
     return parsed
 
 
+
+def _decimal_text(value: Decimal) -> str:
+    """Serialize Decimal values without insignificant trailing zeros."""
+    return format(value.normalize(), "f") if value else "0"
+
+
 async def _collect_positions(client: Any) -> list[Any]:
     unique: dict[tuple[str, str], Any] = {}
     for status in ("OPEN", "REDEEMABLE"):
@@ -168,18 +174,18 @@ async def collect_account_risk_snapshot(
         "captured_at_utc": timestamp.isoformat(),
         "collateral_decimals": collateral_decimals,
         "collateral_balance_base_units": str(raw_balance),
-        "collateral_balance_usd": str(collateral_usd),
-        "open_buy_commitment_usd": str(open_buy_commitment),
-        "conservative_available_collateral_usd": str(conservative_available),
-        "collateral_shortfall_usd": str(collateral_shortfall),
-        "current_open_exposure_usd": str(projected_exposure),
-        "open_position_value_usd": str(position_value),
-        "open_position_cost_usd": str(position_cost),
-        "open_unrealized_pnl_usd": str(unrealized_pnl),
+        "collateral_balance_usd": _decimal_text(collateral_usd),
+        "open_buy_commitment_usd": _decimal_text(open_buy_commitment),
+        "conservative_available_collateral_usd": _decimal_text(conservative_available),
+        "collateral_shortfall_usd": _decimal_text(collateral_shortfall),
+        "current_open_exposure_usd": _decimal_text(projected_exposure),
+        "open_position_value_usd": _decimal_text(position_value),
+        "open_position_cost_usd": _decimal_text(position_cost),
+        "open_unrealized_pnl_usd": _decimal_text(unrealized_pnl),
         "current_open_positions": len(positions),
         "current_open_orders": len(unique_orders),
         "open_buy_orders_commitment_usd": str(open_buy_commitment),
-        "open_sell_remaining_shares": str(open_sell_remaining),
+        "open_sell_remaining_shares": _decimal_text(open_sell_remaining),
         "open_position_assets_by_condition": {
             key: sorted(values) for key, values in sorted(position_assets_by_condition.items())
         },

@@ -22,15 +22,54 @@ def stage_buy_order_intent(
     side: str,
     limit_price: float,
     size: float,
+    market_condition_id: str,
     preflight_context: Mapping[str, Any],
+    max_account_snapshot_age_seconds: float = 60,
 ) -> dict[str, Any]:
     """Evaluate every preflight gate, then persist a prepared intent only.
 
-    preflight_context must contain the live_order_preflight inputs other than
-    token_id, side, limit_price, and size. If any order term is duplicated in
-    that mapping, it must match the explicit argument. No network client or
-    account secret is accepted by this function.
+    preflight_context contains non-account inputs such as book quality, fees,
+    configured limits, and release gates. Account balance, exposure, position
+    count, and opposing-outcome exposure are always overwritten from the latest
+    persisted complete account snapshot. No network client or secret is accepted.
     """
+    if not isinstance(market_condition_id, str) or not market_condition_id.strip():
+        return {
+            "status": "blocked",
+            "blockers": ["missing_market_condition_id"],
+            "intent_created": False,
+            "order_submission_allowed": False,
+            "order_signing_allowed": False,
+            "execution": "none",
+        }
+
+    try:
+        account_snapshot = journal.get_latest_account_risk_snapshot(
+            max_age_seconds=max_account_snapshot_age_seconds
+        )
+    except (TypeError, ValueError) as exc:
+        return {
+            "status": "blocked",
+            "blockers": ["invalid_account_risk_snapshot_freshness", str(exc)[:180]],
+            "intent_created": False,
+            "order_submission_allowed": False,
+            "order_signing_allowed": False,
+            "execution": "none",
+        }
+    if (
+        not isinstance(account_snapshot, dict)
+        or account_snapshot.get("snapshot_complete") is not True
+        or account_snapshot.get("execution") != "none"
+        or account_snapshot.get("fresh") is not True
+    ):
+        return {
+            "status": "blocked",
+            "blockers": ["account_risk_snapshot_missing_or_stale"],
+            "intent_created": False,
+            "order_submission_allowed": False,
+            "execution": "none",
+        }
+
     if not isinstance(preflight_context, Mapping):
         return {
             "status": "blocked",
@@ -50,6 +89,25 @@ def stage_buy_order_intent(
             "size": size,
         }
         context = dict(preflight_context)
+        # Never trust caller-supplied account metrics. These values must come
+        # from the most recent complete authenticated account snapshot.
+        positions_by_condition = account_snapshot.get("open_position_assets_by_condition")
+        orders_by_condition = account_snapshot.get("open_order_assets_by_condition")
+        if not isinstance(positions_by_condition, dict) or not isinstance(orders_by_condition, dict):
+            raise ValueError("account risk snapshot has invalid condition/asset maps")
+        condition_assets = set(positions_by_condition.get(market_condition_id, []))
+        condition_assets.update(orders_by_condition.get(market_condition_id, []))
+        opposing_open = any(asset != token_id for asset in condition_assets)
+        context.update({
+            "available_collateral_usd": account_snapshot["conservative_available_collateral_usd"],
+            "current_open_exposure_usd": account_snapshot["current_open_exposure_usd"],
+            "current_open_positions": (
+                int(account_snapshot["current_open_positions"])
+                + int(account_snapshot["current_open_orders"])
+            ),
+            "open_unrealized_pnl_usd": account_snapshot["open_unrealized_pnl_usd"],
+            "opposing_market_outcome_open": opposing_open,
+        })
         for name, value in terms.items():
             if name in context and str(context[name]) != str(value):
                 return {
@@ -134,6 +192,8 @@ def stage_buy_order_intent(
         "intent_reused": not created_now,
         "submission_attempts": saved["submission_attempts"],
         "preflight_report": report,
+        "account_risk_snapshot_id": account_snapshot["snapshot_id"],
+        "account_risk_snapshot_age_seconds": account_snapshot["age_seconds"],
         "order_submission_allowed": False,
         "order_signing_allowed": False,
         "execution": "none",

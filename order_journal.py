@@ -16,6 +16,7 @@ from order_lifecycle import (
     begin_submission as transition_begin_submission,
     reconcile_submission as transition_reconcile_submission,
     record_submission_response as transition_record_submission_response,
+    record_order_observation as transition_record_order_observation,
     submission_policy,
 )
 
@@ -268,6 +269,37 @@ class OrderJournal:
                 reason_code=reason_code,
             ),
         )
+
+
+    def record_order_observation(
+        self,
+        client_order_id: str,
+        *,
+        outcome: str,
+        matched_client_order_id: str,
+        exchange_order_id: str,
+        cumulative_filled_size: float,
+        reason_code: str | None = None,
+    ) -> dict[str, Any]:
+        """Persist a monotonic venue snapshot; duplicate snapshots are no-ops."""
+        allowed = {"open", "partially_filled", "filled", "cancelled", "rejected"}
+        if outcome not in allowed:
+            raise ValueError(f"outcome must be one of {sorted(allowed)}")
+        with self._transaction() as connection:
+            current = self._load(connection, client_order_id)
+            updated = transition_record_order_observation(
+                current,
+                outcome=outcome,
+                matched_client_order_id=matched_client_order_id,
+                exchange_order_id=exchange_order_id,
+                cumulative_filled_size=cumulative_filled_size,
+                reason_code=reason_code,
+            )
+            if updated == current:
+                return current
+            self._save(connection, updated)
+            self._append_event(connection, updated, f"order_observation_{outcome}")
+            return updated
 
     def recover_interrupted_submissions(self) -> int:
         """Mark crash-interrupted pending attempts ambiguous; never reset to prepared.

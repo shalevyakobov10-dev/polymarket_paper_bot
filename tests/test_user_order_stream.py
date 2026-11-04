@@ -149,10 +149,15 @@ class DelayedFakeHandle(FakeHandle):
 
 
 class FakeClient:
-    def __init__(self, handle, pages=(), trade_pages_by_asset=None):
+    def __init__(
+        self, handle, pages=(), trade_pages_by_asset=None,
+        positions_by_status=None, collateral_balance=100_000_000,
+    ):
         self.handle = handle
         self.pages = list(pages)
         self.trade_pages_by_asset = trade_pages_by_asset or {}
+        self.positions_by_status = positions_by_status or {}
+        self.collateral_balance = collateral_balance
         self.spec = None
 
     async def subscribe(self, spec):
@@ -164,6 +169,16 @@ class FakeClient:
 
     def list_account_trades(self, *, asset_id):
         return FakePaginator(self.trade_pages_by_asset.get(asset_id, ()))
+
+    async def get_balance_allowance(self, *, asset_type):
+        if asset_type != "COLLATERAL":
+            raise AssertionError("risk snapshot must read collateral balance only")
+        return SimpleNamespace(balance=self.collateral_balance)
+
+    def list_positions(self, *, status, full_history):
+        if full_history is not True:
+            raise AssertionError("risk snapshot must request full position history")
+        return FakePaginator(self.positions_by_status.get(status, ()))
 
 
 
@@ -304,6 +319,45 @@ class UserOrderStreamTests(unittest.TestCase):
         self.assertTrue(handle.closed)
         self.assertEqual(self.journal.get_intent("local-123")["filled_size"], "0")
 
+
+
+    def test_complete_reconciliation_persists_account_risk_snapshot(self):
+        open_order = SimpleNamespace(
+            id="venue-123", market="condition-456", asset_id="token-456",
+            side="BUY", original_size="12", size_matched="5", price="0.37",
+        )
+        page_obj = SimpleNamespace(items=(open_order,), limit_reached=False, has_more=False)
+        import asyncio
+
+        result = asyncio.run(
+            reconcile_open_orders_snapshot(
+                FakeClient(FakeHandle(), [page_obj]), self.journal
+            )
+        )
+        self.assertTrue(result["account_risk_snapshot_complete"])
+        self.assertIsNotNone(result["account_risk_snapshot_id"])
+        latest = self.journal.get_latest_account_risk_snapshot(max_age_seconds=60)
+        self.assertEqual(latest["snapshot_id"], result["account_risk_snapshot_id"])
+        self.assertEqual(latest["collateral_balance_usd"], "100")
+        self.assertEqual(latest["current_open_orders"], 1)
+        self.assertEqual(latest["open_buy_commitment_usd"], "2.59")
+        self.assertTrue(latest["fresh"])
+
+    def test_account_risk_endpoint_failure_does_not_invent_or_persist_snapshot(self):
+        class BrokenRiskClient(FakeClient):
+            async def get_balance_allowance(self, *, asset_type):
+                raise RuntimeError("simulated balance endpoint outage")
+
+        import asyncio
+
+        result = asyncio.run(
+            reconcile_open_orders_snapshot(
+                BrokenRiskClient(FakeHandle(), []), self.journal
+            )
+        )
+        self.assertFalse(result["account_risk_snapshot_complete"])
+        self.assertIn("RuntimeError", result["account_risk_snapshot_error"])
+        self.assertIsNone(self.journal.get_latest_account_risk_snapshot())
 
     def test_rest_open_order_snapshot_refreshes_cumulative_fills(self):
         open_order = SimpleNamespace(

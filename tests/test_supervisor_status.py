@@ -65,6 +65,21 @@ class SupervisorStatusTests(unittest.TestCase):
             self.assertFalse(corrupt["supervised"])
             self.assertEqual(corrupt["status_error"], "status_file_invalid")
 
+    def test_status_keeps_main_worker_exit_code_separate_from_monitor_exit_code(self):
+        payload = build_supervisor_status(
+            service_state="app_failed",
+            monitor_enabled=True,
+            monitor_state="stopped",
+            last_exit_code=7,
+            app_exit_code=17,
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            target = Path(directory) / "status.json"
+            write_supervisor_status(target, payload)
+            loaded = read_supervisor_status(target)
+        self.assertEqual(loaded["monitor_last_exit_code"], 7)
+        self.assertEqual(loaded["app_exit_code"], 17)
+
     def test_status_builder_rejects_invalid_or_inconsistent_state(self):
         common = {
             "service_state": "running",

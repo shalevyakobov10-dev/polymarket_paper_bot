@@ -216,7 +216,7 @@ class NewsMonitorTests(unittest.TestCase):
         }
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "matches.jsonl"
-            path.write_text(json.dumps(legacy_record) + "\\n", encoding="utf-8")
+            path.write_text(json.dumps(legacy_record) + "\n", encoding="utf-8")
             matcher = news_monitor.NewsMarketMatcher(path)
             upgraded = matcher.match([news], markets)
             self.assertEqual(len(upgraded["added"]), 1)

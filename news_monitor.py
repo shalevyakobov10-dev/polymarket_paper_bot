@@ -6,6 +6,7 @@ place orders, or treat a headline as a verified event or trading signal.
 from __future__ import annotations
 
 import hashlib
+import math
 from concurrent.futures import ThreadPoolExecutor
 import html
 import json

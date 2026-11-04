@@ -1,6 +1,7 @@
 import json
 import tempfile
 import unittest
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from supervisor_status import (
@@ -64,6 +65,28 @@ class SupervisorStatusTests(unittest.TestCase):
             corrupt = read_supervisor_status(target)
             self.assertFalse(corrupt["supervised"])
             self.assertEqual(corrupt["status_error"], "status_file_invalid")
+
+    def test_status_freshness_distinguishes_live_heartbeat_from_stale_file(self):
+        now = datetime(2026, 11, 4, 20, 0, 0, tzinfo=timezone.utc)
+        payload = build_supervisor_status(
+            service_state="running",
+            monitor_enabled=False,
+            monitor_state="disabled",
+            updated_at=(now - timedelta(seconds=10)).isoformat(),
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            target = Path(directory) / "status.json"
+            write_supervisor_status(target, payload)
+            fresh = read_supervisor_status(target, now=now, stale_after_seconds=45)
+            stale = read_supervisor_status(
+                target,
+                now=now + timedelta(seconds=60),
+                stale_after_seconds=45,
+            )
+        self.assertTrue(fresh["status_fresh"])
+        self.assertEqual(fresh["status_age_seconds"], 10)
+        self.assertFalse(stale["status_fresh"])
+        self.assertEqual(stale["status_age_seconds"], 70)
 
     def test_status_keeps_main_worker_exit_code_separate_from_monitor_exit_code(self):
         payload = build_supervisor_status(

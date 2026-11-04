@@ -172,7 +172,7 @@ class OrderStagingTests(unittest.TestCase):
 
     def test_snapshot_position_count_and_exposure_override_caller_values(self):
         other = OrderJournal(Path(self.temp.name) / "exposure.sqlite3")
-        other.save_account_risk_snapshot(account_snapshot(exposure="95", positions=5))
+        other.save_account_risk_snapshot(account_snapshot(exposure="96", positions=5))
         context = preflight_context()
         context["current_open_exposure_usd"] = 0
         context["current_open_positions"] = 0

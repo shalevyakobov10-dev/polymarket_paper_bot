@@ -336,6 +336,12 @@ class UserOrderStreamTests(unittest.TestCase):
         )
         self.assertTrue(result["account_risk_snapshot_complete"])
         self.assertIsNotNone(result["account_risk_snapshot_id"])
+        self.assertEqual(result["account_risk_sync_state"]["status"], "success")
+        self.assertEqual(
+            result["account_risk_sync_state"]["snapshot_id"],
+            result["account_risk_snapshot_id"],
+        )
+        self.assertTrue(result["account_risk_sync_state"]["fresh"])
         latest = self.journal.get_latest_account_risk_snapshot(max_age_seconds=60)
         self.assertEqual(latest["snapshot_id"], result["account_risk_snapshot_id"])
         self.assertEqual(latest["collateral_balance_usd"], "100")

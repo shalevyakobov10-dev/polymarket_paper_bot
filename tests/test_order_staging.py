@@ -241,6 +241,18 @@ class OrderStagingTests(unittest.TestCase):
                          self.snapshot_id)
         self.assertEqual(len(self.journal.list_events("staged-order-001")), 1)
 
+    def test_same_client_id_cannot_reuse_changed_market_preflight_evidence(self):
+        first = self.stage()
+        self.assertTrue(first["intent_created"])
+        context = preflight_context()
+        context["book_age_seconds"] = 2
+        replay = self.stage(preflight_context=context)
+        self.assertEqual(replay["status"], "blocked")
+        self.assertIn("order_intent_conflict_or_corrupt_journal", replay["blockers"])
+        saved = self.journal.get_intent("staged-order-001")
+        self.assertEqual(saved["preflight_report"]["book_age_seconds"], 1)
+        self.assertEqual(len(self.journal.list_events("staged-order-001")), 1)
+
     def test_replaying_same_staged_intent_is_idempotent(self):
         first = self.stage()
         events_before = len(self.journal.list_events("staged-order-001"))

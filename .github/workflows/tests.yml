@@ -104,6 +104,7 @@ jobs:
           assert execution_readiness.get("order_submission_allowed") is False, "live orders must remain blocked"
           assert execution_readiness.get("execution") == "none", "execution-readiness must not submit orders"
           assert supervisor.get("supervised") is True, "process supervisor status must be available in Docker"
+          assert supervisor.get("status_fresh") is True, "process supervisor heartbeat must be fresh"
           assert supervisor.get("service_state") in {"starting", "running"}, "supervisor service state must be starting or running"
           assert supervisor.get("monitor_enabled") is False, "account monitor must remain disabled in smoke test"
           assert supervisor.get("monitor_state") == "disabled", "disabled monitor state mismatch"

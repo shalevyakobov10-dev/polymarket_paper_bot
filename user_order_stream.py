@@ -202,22 +202,173 @@ async def reconcile_open_orders_snapshot(
                 "SDK open-order paginator reached its depth limit; do not treat this snapshot as complete"
             )
 
-    missing = []
+    initially_missing = [
+        intent for intent in journal.list_active_intents()
+        if intent.get("exchange_order_id")
+        and intent["exchange_order_id"] not in seen_exchange_ids
+    ]
+
+    # Query account trade history by asset, then correlate each trade back to
+    # the local exchange order ID. Collect every page before applying any
+    # history-derived transition so a truncated/failed history read cannot
+    # partially settle an absent order.
+    trades_by_asset: dict[str, list[Any]] = {}
+    trade_records_inspected = 0
+    for asset_id in sorted({str(intent["token_id"]) for intent in initially_missing}):
+        unique_trades: dict[str, Any] = {}
+        async for page in client.list_account_trades(asset_id=asset_id):
+            if getattr(page, "limit_reached", False):
+                raise OrderSnapshotIncompleteError(
+                    "SDK account-trade paginator reached its depth limit; trade history is incomplete"
+                )
+            for trade in page.items:
+                trade_id = str(getattr(trade, "id", "") or "").strip()
+                if not trade_id:
+                    raise OrderSnapshotIncompleteError(
+                        "Account trade history contains a record without a stable trade ID"
+                    )
+                existing_trade = unique_trades.get(trade_id)
+                if existing_trade is not None and existing_trade != trade:
+                    raise OrderSnapshotIncompleteError(
+                        "Account trade history repeated a trade ID with conflicting contents"
+                    )
+                unique_trades[trade_id] = trade
+        trades_by_asset[asset_id] = list(unique_trades.values())
+        trade_records_inspected += len(unique_trades)
+
+    history_results: dict[str, dict[str, Any]] = {}
+    for intent in initially_missing:
+        local_id = intent["client_order_id"]
+        exchange_id = intent["exchange_order_id"]
+        asset_id = str(intent["token_id"])
+        order_side = str(intent["side"]).upper()
+        matched_total = Decimal("0")
+        mismatch: tuple[str, str] | None = None
+
+        for trade in trades_by_asset.get(asset_id, []):
+            if str(getattr(trade, "status", "")).upper() == "FAILED":
+                continue
+            trade_asset = str(getattr(trade, "asset_id", "") or "")
+            matched_amounts: list[tuple[Decimal, str, str]] = []
+            if str(getattr(trade, "taker_order_id", "") or "") == exchange_id:
+                matched_amounts.append((
+                    _decimal(getattr(trade, "size", None), "trade.size"),
+                    trade_asset,
+                    str(getattr(trade, "side", "") or "").upper(),
+                ))
+            for maker_order in getattr(trade, "maker_orders", ()) or ():
+                if str(getattr(maker_order, "order_id", "") or "") == exchange_id:
+                    matched_amounts.append((
+                        _decimal(getattr(maker_order, "matched_amount", None), "maker_order.matched_amount"),
+                        str(getattr(maker_order, "asset_id", "") or ""),
+                        str(getattr(maker_order, "side", "") or "").upper(),
+                    ))
+
+            if len(matched_amounts) > 1:
+                mismatch = ("multiple_order_matches_in_trade", trade_asset)
+                break
+            if not matched_amounts:
+                continue
+            amount, matched_asset, matched_side = matched_amounts[0]
+            if matched_asset != asset_id or matched_side != order_side:
+                mismatch = (matched_side or "unknown_side", matched_asset or "unknown_asset")
+                break
+            matched_total += amount
+
+        if mismatch is not None:
+            # The venue links a trade to this order ID but its asset or side
+            # conflicts with the durable intent. Escalate; do not count the fill.
+            current_fill = str(intent["filled_size"])
+            safe_outcome = "open" if Decimal(current_fill) == 0 else "partially_filled"
+            reviewed = journal.record_order_observation(
+                local_id,
+                outcome=safe_outcome,
+                matched_client_order_id=local_id,
+                exchange_order_id=exchange_id,
+                cumulative_filled_size=current_fill,
+                observed_token_id=mismatch[1] if mismatch[0] != "multiple_order_matches_in_trade" else asset_id,
+                observed_side=mismatch[0] if mismatch[0] != "multiple_order_matches_in_trade" else order_side,
+            )
+            history_results[local_id] = {
+                "result": "manual_review",
+                "reason": reviewed.get("last_reason_code"),
+            }
+            continue
+
+        original_size = _decimal(intent["size"], "order_size")
+        current_fill = _decimal(intent["filled_size"], "filled_size")
+        if matched_total > original_size:
+            history_results[local_id] = {
+                "result": "unresolved",
+                "reason": "trade_history_exceeds_original_size",
+                "trade_history_filled_size": str(matched_total),
+            }
+            continue
+        if matched_total < current_fill:
+            history_results[local_id] = {
+                "result": "unresolved",
+                "reason": "trade_history_below_journal_fill",
+                "trade_history_filled_size": str(matched_total),
+            }
+            continue
+
+        if matched_total == original_size:
+            updated = journal.record_order_observation(
+                local_id,
+                outcome="filled",
+                matched_client_order_id=local_id,
+                exchange_order_id=exchange_id,
+                cumulative_filled_size=str(matched_total),
+                reason_code="reconciled_from_account_trade_history",
+            )
+            history_results[local_id] = {
+                "result": "filled",
+                "status": updated["status"],
+                "filled_size": updated["filled_size"],
+            }
+        elif matched_total > current_fill:
+            updated = journal.record_order_observation(
+                local_id,
+                outcome="partially_filled",
+                matched_client_order_id=local_id,
+                exchange_order_id=exchange_id,
+                cumulative_filled_size=str(matched_total),
+                reason_code="partial_fill_from_account_trade_history",
+            )
+            history_results[local_id] = {
+                "result": "partial_fill_confirmed_terminal_unknown",
+                "status": updated["status"],
+                "filled_size": updated["filled_size"],
+            }
+        else:
+            history_results[local_id] = {
+                "result": "terminal_status_unconfirmed",
+                "trade_history_filled_size": str(matched_total),
+            }
+
+    unresolved = []
     for intent in journal.list_active_intents():
-        exchange_order_id = intent.get("exchange_order_id")
-        if exchange_order_id and exchange_order_id not in seen_exchange_ids:
-            missing.append({
-                "client_order_id": intent["client_order_id"],
-                "exchange_order_id": exchange_order_id,
-                "status": intent["status"],
-                "filled_size": intent["filled_size"],
-            })
+        exchange_id = intent.get("exchange_order_id")
+        if not exchange_id or exchange_id in seen_exchange_ids:
+            continue
+        history_result = history_results.get(intent["client_order_id"], {})
+        unresolved.append({
+            "client_order_id": intent["client_order_id"],
+            "exchange_order_id": exchange_id,
+            "status": intent["status"],
+            "filled_size": intent["filled_size"],
+            "terminal_status_confirmed": False,
+            "trade_history_result": history_result.get("result", "not_checked"),
+            "reason": history_result.get("reason", "order_absent_from_open_and_trade_history"),
+        })
 
     return {
         "snapshot_complete": True,
-        "status": "open_orders_refreshed" if not missing else "snapshot_has_unresolved_absences",
+        "status": "open_orders_refreshed" if not unresolved else "snapshot_has_unresolved_absences",
         **counts,
-        "unresolved_missing_orders": missing,
+        "account_trade_history_checked": True,
+        "trade_records_inspected": trade_records_inspected,
+        "unresolved_missing_orders": unresolved,
         "execution": "none",
     }
 

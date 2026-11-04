@@ -7,12 +7,16 @@ preflight values. This module cannot sign, submit, retry, or cancel orders.
 """
 from __future__ import annotations
 
+import math
 from collections.abc import Mapping
 from typing import Any
 
 from live_order_preflight import evaluate_live_order_preflight
 from order_journal import OrderJournal
 from order_lifecycle import create_order_intent
+
+
+MAX_ACCOUNT_RISK_SNAPSHOT_AGE_SECONDS = 300.0
 
 
 def _blocked(*blockers: str, **extra: Any) -> dict[str, Any]:
@@ -52,7 +56,7 @@ def stage_buy_order_intent(
     limit_price: float,
     size: float,
     preflight_context: Mapping[str, Any],
-    max_account_snapshot_age_seconds: float = 300.0,
+    max_account_snapshot_age_seconds: float = MAX_ACCOUNT_RISK_SNAPSHOT_AGE_SECONDS,
 ) -> dict[str, Any]:
     """Evaluate all gates and stage a prepared intent against a fresh account snapshot.
 
@@ -66,6 +70,14 @@ def stage_buy_order_intent(
         return _blocked("missing_market_condition_id")
     if not isinstance(token_id, str) or not token_id.strip():
         return _blocked("missing_token_id")
+    if (
+        isinstance(max_account_snapshot_age_seconds, bool)
+        or not isinstance(max_account_snapshot_age_seconds, (int, float))
+        or not math.isfinite(float(max_account_snapshot_age_seconds))
+        or not 0 < float(max_account_snapshot_age_seconds)
+        <= MAX_ACCOUNT_RISK_SNAPSHOT_AGE_SECONDS
+    ):
+        return _blocked("account_risk_snapshot_freshness_window_out_of_policy")
 
     try:
         snapshot = journal.get_latest_account_risk_snapshot(

@@ -36,7 +36,7 @@ class ExecutionReadinessTests(unittest.TestCase):
             item for item in execution_readiness_payload()["blockers"]
             if item["code"] == "live_order_adapter_not_implemented"
         )
-        self.assertIn("read orders and user events", adapter_blocker["detail"])
+        self.assertIn("read open orders and user events", adapter_blocker["detail"])
         self.assertIn("no reviewed order-placement adapter", adapter_blocker["detail"])
         self.assertIn("account_eligibility_not_verified", codes)
         self.assertIn("jurisdiction_and_legal_review_not_verified", codes)

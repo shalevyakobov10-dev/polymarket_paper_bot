@@ -12,6 +12,9 @@ on:
 permissions:
   contents: read
   actions: write
+concurrency:
+  group: historical-paper-backtest
+  cancel-in-progress: true
 jobs:
   run-backtest:
     runs-on: ubuntu-latest

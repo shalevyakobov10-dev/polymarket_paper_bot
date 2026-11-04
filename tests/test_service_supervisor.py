@@ -97,8 +97,11 @@ class SupervisorTests(unittest.TestCase):
         self.assertIsNotNone(config.monitor_command)
         self.assertEqual(config.monitor_command[:2], ("python-test", "user_order_stream.py"))
         self.assertNotIn("synthetic-test-secret", config.monitor_command)
-        self.assertEqual(config.child_env["ORDER_JOURNAL_DB"],
+        self.assertEqual(config.app_env["ORDER_JOURNAL_DB"],
                          "/persist/data/order_journal.sqlite3")
+        self.assertNotIn("POLYMARKET_PRIVATE_KEY", config.app_env)
+        self.assertEqual(config.monitor_env["POLYMARKET_PRIVATE_KEY"],
+                         "synthetic-test-secret")
         self.assertEqual(config.monitor_command[-1], "120.0")
 
     def test_invalid_monitor_flag_and_interval_fail_closed(self):
@@ -143,6 +146,7 @@ class SupervisorTests(unittest.TestCase):
         self.assertEqual(event.wait_calls, [2.0, 0.25])
         self.assertTrue(app.terminated)
         self.assertTrue(restarted_monitor.terminated)
+        self.assertNotIn("POLYMARKET_PRIVATE_KEY", commands[0][1])
         self.assertEqual(commands[1][1]["POLYMARKET_PRIVATE_KEY"],
                          "synthetic-test-secret")
 

@@ -175,8 +175,10 @@ def evaluate_forward_returns(
     from return statistics. This is a descriptive event study, not a strategy
     simulation, and neither direction is selected or promoted automatically.
     """
-    if isinstance(threshold, bool) or not math.isfinite(float(threshold)) or not 0 < float(threshold) < 1:
+    threshold_value = number(threshold)
+    if isinstance(threshold, bool) or threshold_value is None or not 0 < threshold_value < 1:
         raise ValueError("threshold must be finite and in (0, 1)")
+    threshold = threshold_value
     if not horizons_hours or any(
         isinstance(horizon, bool) or not isinstance(horizon, int) or horizon <= 0
         for horizon in horizons_hours

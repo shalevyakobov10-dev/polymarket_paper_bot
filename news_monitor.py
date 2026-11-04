@@ -424,7 +424,14 @@ class NewsMarketMatcher:
             latest_records.values(),
             key=lambda row: str(row.get("matched_at") or ""),
         )
-        self.recent = ordered[-self.max_recent:]
+        # Do not expose older matcher-version candidates while the live news
+        # worker is replaying the recent news cache through the current version.
+        # Their pair IDs/methods remain indexed so valid matches can be upgraded
+        # exactly once, while legacy false positives disappear from the API view.
+        current_records = [
+            row for row in ordered if str(row.get("method") or "") == MATCHER_METHOD
+        ]
+        self.recent = current_records[-self.max_recent:]
         self.latest_method_by_pair = {
             pair_id: str(record.get("method") or "")
             for pair_id, record in latest_records.items()

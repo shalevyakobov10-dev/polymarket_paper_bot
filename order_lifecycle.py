@@ -156,7 +156,7 @@ def _validated_copy(intent: dict[str, Any]) -> dict[str, Any]:
     if status == "cancelled" and filled >= size:
         raise ValueError("cancelled state must retain an unfilled remainder")
     if status == "manual_review" and reason not in {
-        "client_order_id_mismatch", "exchange_order_id_mismatch"
+        "client_order_id_mismatch", "exchange_order_id_mismatch", "order_terms_mismatch"
     }:
         raise ValueError("manual_review state must retain its mismatch reason")
     conflicting_id = state.get("last_conflicting_exchange_order_id")
@@ -322,6 +322,10 @@ def record_order_observation(
     exchange_order_id: str,
     cumulative_filled_size: float,
     reason_code: str | None = None,
+    observed_token_id: str | None = None,
+    observed_side: str | None = None,
+    observed_original_size: float | None = None,
+    observed_price: float | None = None,
 ) -> dict[str, Any]:
     """Apply a venue status snapshot using monotonic cumulative fill quantity.
 
@@ -348,6 +352,27 @@ def record_order_observation(
         state["status"] = "manual_review"
         state["last_reason_code"] = "exchange_order_id_mismatch"
         state["last_conflicting_exchange_order_id"] = observed_exchange_id
+        return state
+
+    mismatches: list[str] = []
+    if observed_token_id is not None:
+        if _required_text(observed_token_id, "observed_token_id") != state["token_id"]:
+            mismatches.append("token_id")
+    if observed_side is not None:
+        venue_side = _required_text(observed_side, "observed_side").upper()
+        if venue_side not in {"BUY", "SELL"} or venue_side != state["side"]:
+            mismatches.append("side")
+    if observed_original_size is not None:
+        if _decimal(observed_original_size, "observed_original_size") != _decimal(state["size"], "size"):
+            mismatches.append("original_size")
+    if observed_price is not None:
+        if _decimal(observed_price, "observed_price") != _decimal(state["limit_price"], "limit_price"):
+            mismatches.append("price")
+    if mismatches:
+        state["status"] = "manual_review"
+        state["last_reason_code"] = "order_terms_mismatch"
+        state["last_conflicting_exchange_order_id"] = observed_exchange_id
+        state["last_mismatch_fields"] = mismatches
         return state
 
     if outcome not in {"open", "partially_filled", "filled", "cancelled", "rejected"}:

@@ -91,20 +91,38 @@ def stage_buy_order_intent(
         context = dict(preflight_context)
         # Never trust caller-supplied account metrics. These values must come
         # from the most recent complete authenticated account snapshot.
-        positions_by_condition = account_snapshot.get("open_position_assets_by_condition")
-        orders_by_condition = account_snapshot.get("open_order_assets_by_condition")
+        required_snapshot_fields = (
+            "snapshot_id", "captured_at_utc", "conservative_available_collateral_usd",
+            "current_open_exposure_usd", "current_open_positions", "current_open_orders",
+            "open_unrealized_pnl_usd", "open_position_assets_by_condition",
+            "open_order_assets_by_condition",
+        )
+        if any(field not in account_snapshot for field in required_snapshot_fields):
+            raise ValueError("account risk snapshot is missing required risk fields")
+        positions_by_condition = account_snapshot["open_position_assets_by_condition"]
+        orders_by_condition = account_snapshot["open_order_assets_by_condition"]
         if not isinstance(positions_by_condition, dict) or not isinstance(orders_by_condition, dict):
             raise ValueError("account risk snapshot has invalid condition/asset maps")
-        condition_assets = set(positions_by_condition.get(market_condition_id, []))
-        condition_assets.update(orders_by_condition.get(market_condition_id, []))
+        condition_assets = set()
+        for asset_map in (positions_by_condition, orders_by_condition):
+            assets = asset_map.get(market_condition_id, [])
+            if not isinstance(assets, (list, tuple, set)) or any(
+                not isinstance(asset, str) or not asset.strip() for asset in assets
+            ):
+                raise ValueError("account risk snapshot has malformed condition assets")
+            condition_assets.update(assets)
+        positions = account_snapshot["current_open_positions"]
+        open_orders = account_snapshot["current_open_orders"]
+        if (
+            isinstance(positions, bool) or not isinstance(positions, int) or positions < 0
+            or isinstance(open_orders, bool) or not isinstance(open_orders, int) or open_orders < 0
+        ):
+            raise ValueError("account risk snapshot has invalid position/order counts")
         opposing_open = any(asset != token_id for asset in condition_assets)
         context.update({
             "available_collateral_usd": account_snapshot["conservative_available_collateral_usd"],
             "current_open_exposure_usd": account_snapshot["current_open_exposure_usd"],
-            "current_open_positions": (
-                int(account_snapshot["current_open_positions"])
-                + int(account_snapshot["current_open_orders"])
-            ),
+            "current_open_positions": positions + open_orders,
             "open_unrealized_pnl_usd": account_snapshot["open_unrealized_pnl_usd"],
             "opposing_market_outcome_open": opposing_open,
         })

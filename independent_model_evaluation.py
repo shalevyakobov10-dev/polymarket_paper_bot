@@ -1220,6 +1220,40 @@ def forecast_current_feature_files(
     )
 
 
+def build_evaluation_dataset_provenance(samples: list[dict[str, Any]]) -> dict[str, Any]:
+    """Return a deterministic fingerprint and time bounds for the exact selected sample set."""
+    canonical = []
+    for sample in samples:
+        if not isinstance(sample, dict):
+            continue
+        features = sample.get("features")
+        features = features if isinstance(features, dict) else {}
+        canonical.append({
+            "market_id": str(sample.get("market_id") or ""),
+            "forecast_timestamp": str(sample.get("forecast_timestamp") or ""),
+            "resolved_at": str(sample.get("resolved_at") or ""),
+            "market_probability_yes": _number(sample.get("market_probability_yes")),
+            "outcome_yes": sample.get("outcome_yes"),
+            "features": {name: _number(features.get(name)) for name in FEATURE_NAMES},
+        })
+    canonical.sort(key=lambda row: (row["forecast_timestamp"], row["market_id"]))
+    serialized = json.dumps(
+        canonical, sort_keys=True, separators=(",", ":"), allow_nan=False
+    )
+    forecast_times = [row["forecast_timestamp"] for row in canonical if row["forecast_timestamp"]]
+    resolved_times = [row["resolved_at"] for row in canonical if row["resolved_at"]]
+    return {
+        "fingerprint": hashlib.sha256(serialized.encode("utf-8")).hexdigest(),
+        "samples_n": len(canonical),
+        "feature_names": list(FEATURE_NAMES),
+        "forecast_start": min(forecast_times) if forecast_times else None,
+        "forecast_end": max(forecast_times) if forecast_times else None,
+        "resolution_start": min(resolved_times) if resolved_times else None,
+        "resolution_end": max(resolved_times) if resolved_times else None,
+        "fingerprint_scope": "selected_point_in_time_samples_including_features_labels_and_market_baselines",
+    }
+
+
 def evaluate_feature_files(
     feature_paths: Iterable[str | Path],
     resolution_paths: Iterable[str | Path],
@@ -1245,6 +1279,7 @@ def evaluate_feature_files(
         "feature_rows_loaded": len(feature_rows),
         "resolutions_loaded": len(resolutions),
         "samples_selected": len(samples),
+        "dataset_provenance": build_evaluation_dataset_provenance(samples),
         "real_money_execution": "not_implemented",
         "live_execution_enabled": False,
         "data_requirements": {

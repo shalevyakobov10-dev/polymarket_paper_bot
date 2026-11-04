@@ -131,6 +131,58 @@ class ModelGovernanceTests(unittest.TestCase):
             )
             self.assertEqual(restarted.snapshot()["governance_evaluations_retained"], 2)
 
+    def test_fingerprint_changes_when_calibration_or_dataset_provenance_changes(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "governance.jsonl"
+            ledger = ModelGovernanceLedger(path)
+            first = ledger.assess_and_record(
+                strong_evaluation(), model_version="candidate-v2"
+            )
+            calibration_changed = strong_evaluation()
+            calibration_changed["feature_model"]["calibration"]["expected_calibration_error"] = 0.024
+            second = ledger.assess_and_record(
+                calibration_changed, model_version="candidate-v2"
+            )
+            provenance_changed = strong_evaluation()
+            provenance_changed["dataset_provenance"] = {
+                "fingerprint": "a" * 64,
+                "samples_n": 160,
+            }
+            third = ledger.assess_and_record(
+                provenance_changed, model_version="candidate-v2"
+            )
+            self.assertNotEqual(
+                first["evaluation_fingerprint"], second["evaluation_fingerprint"]
+            )
+            self.assertNotEqual(
+                second["evaluation_fingerprint"], third["evaluation_fingerprint"]
+            )
+            self.assertEqual(
+                ledger.snapshot()["governance_evaluations_retained"], 3
+            )
+
+    def test_audit_record_retains_dataset_and_temporal_provenance(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "governance.jsonl"
+            ledger = ModelGovernanceLedger(path)
+            evaluation = strong_evaluation()
+            evaluation["dataset_provenance"] = {
+                "fingerprint": "b" * 64,
+                "samples_n": 160,
+                "forecast_start": "2026-01-01T00:00:00+00:00",
+                "forecast_end": "2026-06-01T00:00:00+00:00",
+            }
+            evaluation["test_forecast_start"] = "2026-04-01T00:00:00+00:00"
+            evaluation["latest_training_label_available_at"] = "2026-03-31T00:00:00+00:00"
+            evaluation["horizon_hours"] = 24.0
+            evaluation["tolerance_hours"] = 12.0
+            record = ledger.assess_and_record(evaluation, model_version="candidate-v2")
+            self.assertEqual(record["evaluation_provenance"]["fingerprint"], "b" * 64)
+            self.assertLess(
+                record["evaluation_window"]["latest_training_label_available_at"],
+                record["evaluation_window"]["test_forecast_start"],
+            )
+
     def test_duplicate_evaluations_do_not_grow_audit_log(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "governance.jsonl"

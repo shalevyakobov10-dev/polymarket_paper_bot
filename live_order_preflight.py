@@ -101,6 +101,8 @@ def evaluate_live_order_preflight(
     if price is not None and tick is not None and tick > 0:
         if price % tick != 0:
             blockers.append("limit_price_not_on_tick")
+    if minimum is not None and minimum <= 0:
+        blockers.append("invalid_minimum_order_size")
     if size_value is not None and minimum is not None and minimum > 0:
         if size_value < minimum:
             blockers.append("below_minimum_order_size")

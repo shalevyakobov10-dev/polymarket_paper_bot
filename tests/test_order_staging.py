@@ -119,6 +119,30 @@ class OrderStagingTests(unittest.TestCase):
         self.assertEqual(len(events), 1)
         self.assertIn("preflight_report", events[0]["state"])
 
+    def test_failed_latest_account_risk_sync_invalidates_still_young_snapshot(self):
+        self.journal.record_account_risk_snapshot_failure(error_code="TimeoutError")
+        old_snapshot = self.journal.get_latest_account_risk_snapshot(max_age_seconds=300)
+        self.assertTrue(old_snapshot["fresh"])
+        result = self.stage()
+        self.assertEqual(result["status"], "blocked")
+        self.assertIn(
+            "account_risk_snapshot_last_sync_failed",
+            result["blockers"],
+        )
+        self.assertIsNone(self.journal.get_intent("staged-order-001"))
+
+    def test_new_successful_account_snapshot_restores_staging_after_failed_sync(self):
+        self.journal.record_account_risk_snapshot_failure(error_code="TimeoutError")
+        blocked = self.stage()
+        self.assertEqual(blocked["status"], "blocked")
+        self.assertEqual(blocked["blockers"][0], "account_risk_snapshot_last_sync_failed")
+
+        new_snapshot_id = self.journal.save_account_risk_snapshot(account_snapshot())
+        recovered = self.stage()
+        self.assertEqual(recovered["status"], "prepared_not_authorized")
+        self.assertTrue(recovered["intent_created"])
+        self.assertEqual(recovered["account_risk_snapshot_id"], new_snapshot_id)
+
     def test_missing_account_risk_snapshot_blocks_without_creating_intent(self):
         other = OrderJournal(Path(self.temp.name) / "empty.sqlite3")
         result = stage_buy_order_intent(
@@ -210,6 +234,10 @@ class OrderStagingTests(unittest.TestCase):
             self.journal,
             "get_latest_account_risk_snapshot",
             return_value=legacy,
+        ), patch.object(
+            self.journal,
+            "get_latest_account_risk_sync_state",
+            return_value={"status": "success", "fresh": True, "snapshot_id": "legacy-snapshot"},
         ):
             result = self.stage()
         self.assertEqual(result["status"], "blocked")
@@ -233,6 +261,10 @@ class OrderStagingTests(unittest.TestCase):
             self.journal,
             "get_latest_account_risk_snapshot",
             return_value=inconsistent,
+        ), patch.object(
+            self.journal,
+            "get_latest_account_risk_sync_state",
+            return_value={"status": "success", "fresh": True, "snapshot_id": "legacy-inconsistent"},
         ):
             result = self.stage()
         self.assertEqual(result["status"], "blocked")

@@ -452,7 +452,13 @@ class PaperTraderTests(unittest.TestCase):
         bot.process_snapshot([self.row(0.50)], self.now)
         result = bot.process_snapshot([self.row(0.54)], self.now + timedelta(minutes=5))
         self.assertEqual(result["opened"], [])
-        self.assertEqual(result["candidates"][0]["skip_reason"], "missing_orderbook")
+        candidate = result["candidates"][0]
+        self.assertEqual(candidate["skip_reason"], "missing_orderbook")
+        quality = candidate["execution_diagnostics"]["market_quality_assessment"]
+        self.assertFalse(quality["eligible"])
+        self.assertEqual(quality["reason"], "missing_orderbook")
+        self.assertEqual(quality["execution"], "none")
+        self.assertNotIn("entry_fill_assessment", candidate["execution_diagnostics"])
 
     def test_entry_fill_is_rejected_when_depth_requires_price_above_fok_cap(self):
         cfg = PaperConfig(**{

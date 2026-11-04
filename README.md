@@ -279,3 +279,10 @@ These are snapshot diagnostics, not measured market impact or a guarantee of an 
 The `/paper` response includes an `execution_diagnostics` summary derived from the retained `recent_events` window (up to the most recent 100 state events). It reports skipped candidate counts by reason, market-quality rejection reasons, entry fill completion states, and averages for rejected partial-fill ratios, book-walk cost and visible ask depth when those observations exist.
 
 This is intentionally a bounded recent-window diagnostic, not a lifetime ledger or a strategy-performance metric. Missing assessments remain unreported rather than inferred. Opened positions and unrelated events are excluded from the skipped-candidate counts. All values remain paper/research only; `execution` is always `none`.
+
+
+## Directional price-move event study
+
+The historical backtest's `forward_return_study` now reports two separate descriptive hypotheses for each horizon: long after a positive price move (momentum) and long after a negative price move (contrarian/rebound). Both are compared with the same all-observation baseline, use the first observed price at or after the horizon, and exclude signals without a full in-window future observation from return statistics while retaining their detected-signal counts.
+
+The original positive-move fields remain as backward-compatible aliases. This is an event study, not a simulated portfolio or executable fill model. It does not pick the better direction, tune thresholds, or change paper entries. Small event counts are explicitly not evidence of a predictive edge; any strategy change requires a newly collected chronological holdout and realistic cost/fill validation.

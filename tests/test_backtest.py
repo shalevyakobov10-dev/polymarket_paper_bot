@@ -104,6 +104,62 @@ class BacktestTests(unittest.TestCase):
         self.assertGreater(stats["all_observation_baseline"]["n"], 0)
         self.assertIsNotNone(stats["signal_minus_baseline_mean_return_pct"])
 
+    def test_forward_returns_reports_both_momentum_and_contrarian_long_directions(self):
+        prices = [0.50, 0.56, 0.50, 0.56, 0.50, 0.48, 0.52]
+        history = [
+            {
+                "timestamp": 1_800_000_000 + index * 3600,
+                "token_id": "token-a",
+                "observed_price": price,
+            }
+            for index, price in enumerate(prices)
+        ]
+        result = evaluate_forward_returns(
+            history, threshold=0.03, horizons_hours=(1,)
+        )
+        stats = result["horizons"]["1h"]
+        self.assertEqual(stats["positive_move_signals_detected"], 3)
+        self.assertEqual(stats["negative_move_signals_detected"], 2)
+        self.assertEqual(stats["positive_move_forward_returns"]["n"], 2)
+        self.assertEqual(stats["negative_move_long_forward_returns"]["n"], 2)
+        self.assertLess(
+            stats["positive_move_forward_returns"]["mean_return_pct"], 0.0
+        )
+        self.assertGreater(
+            stats["negative_move_long_forward_returns"]["mean_return_pct"], 0.0
+        )
+        self.assertEqual(
+            stats["signals_detected"], stats["positive_move_signals_detected"]
+        )
+        self.assertEqual(
+            stats["signal_forward_returns"], stats["positive_move_forward_returns"]
+        )
+        self.assertEqual(
+            result["directional_hypotheses"]["positive_move"],
+            "long_after_price_rise_momentum",
+        )
+        self.assertIn("Descriptive research only", result["interpretation"])
+
+    def test_forward_returns_counts_directional_signals_without_future_returns(self):
+        history = [
+            {"timestamp": 1_800_000_000, "token_id": "token-a", "observed_price": 0.50},
+            {"timestamp": 1_800_003_600, "token_id": "token-a", "observed_price": 0.56},
+        ]
+        stats = evaluate_forward_returns(
+            history, threshold=0.03, horizons_hours=(1,)
+        )["horizons"]["1h"]
+        self.assertEqual(stats["positive_move_signals_detected"], 1)
+        self.assertEqual(stats["positive_move_forward_returns"]["n"], 0)
+        self.assertEqual(stats["negative_move_signals_detected"], 0)
+
+    def test_forward_returns_rejects_invalid_threshold_and_horizons(self):
+        with self.assertRaises(ValueError):
+            evaluate_forward_returns([], threshold=0.0)
+        with self.assertRaises(ValueError):
+            evaluate_forward_returns([], threshold=0.03, horizons_hours=(0,))
+        with self.assertRaises(ValueError):
+            evaluate_forward_returns([], threshold=float("nan"))
+
     def test_forward_returns_uses_prior_price_for_first_holdout_observation(self):
         history = [
             {"timestamp": 1_800_000_000, "token_id": "token-a", "observed_price": 0.56},

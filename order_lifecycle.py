@@ -331,8 +331,11 @@ def record_order_observation(
     review rather than attaching activity to the wrong local order.
     """
     state = _validated_copy(intent)
-    if state["status"] not in {"open", "partially_filled"}:
-        raise RuntimeError("only active known orders can accept status observations")
+    terminal_snapshot = state["status"] in {"filled", "cancelled", "rejected"}
+    if state["status"] not in {
+        "open", "partially_filled", "filled", "cancelled", "rejected"
+    }:
+        raise RuntimeError("only known venue orders can accept status observations")
 
     matched_id = _required_text(matched_client_order_id, "matched_client_order_id")
     observed_exchange_id = _required_text(exchange_order_id, "exchange_order_id")
@@ -380,6 +383,11 @@ def record_order_observation(
         target_status = "partially_filled"
     else:
         target_status = outcome
+
+    if terminal_snapshot:
+        if target_status == state["status"] and reported_fill == previous_fill:
+            return state
+        raise RuntimeError("terminal order cannot accept conflicting status observations")
 
     state["status"] = target_status
     state["filled_size"] = str(reported_fill)

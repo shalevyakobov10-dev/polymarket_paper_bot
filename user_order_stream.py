@@ -345,12 +345,14 @@ async def reconcile_open_orders_snapshot(
             )
             history_results[local_id] = {
                 "result": "partial_fill_confirmed_terminal_unknown",
+                "reason": "partial_fill_confirmed_but_terminal_state_not_proven",
                 "status": updated["status"],
                 "filled_size": updated["filled_size"],
             }
         else:
             history_results[local_id] = {
                 "result": "terminal_status_unconfirmed",
+                "reason": "order_missing_from_open_list_without_full_fill_evidence",
                 "trade_history_filled_size": str(matched_total),
             }
 

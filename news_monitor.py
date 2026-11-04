@@ -187,6 +187,10 @@ _STOP_WORDS = {
 def _tokens(value: str) -> set[str]:
     tokens = set()
     for raw in re.findall(r"[a-z0-9]{3,}", (value or "").lower()):
+        # Drop stop words before stemming so short words such as "news" do not
+        # turn into misleading content terms (for example, "new").
+        if raw in _STOP_WORDS:
+            continue
         token = raw
         if len(token) > 5 and token.endswith("ing"):
             token = token[:-3]
@@ -194,7 +198,7 @@ def _tokens(value: str) -> set[str]:
             token = token[:-2]
         elif len(token) > 4 and token.endswith("ies"):
             token = token[:-3] + "y"
-        elif len(token) > 4 and token.endswith("s") and not token.endswith("ss"):
+        elif len(token) > 3 and token.endswith("s") and not token.endswith("ss"):
             token = token[:-1]
         if len(token) >= 3 and token not in _STOP_WORDS:
             tokens.add(token)

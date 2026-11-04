@@ -25,6 +25,7 @@ from research_features import build_market_feature_rows, read_recent_jsonl, summ
 from independent_model_evaluation import evaluate_feature_files, forecast_current_feature_files
 from learning_journal import LearningJournal
 from model_governance import ModelGovernanceLedger
+from execution_readiness import execution_readiness_payload
 from resilience import exponential_backoff_seconds, parse_retry_after
 
 GAMMA_URL = "https://gamma-api.polymarket.com/markets"
@@ -1241,7 +1242,7 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def do_GET(self):
-        if self.path in ("/", "/status", "/health", "/paper", "/news", "/matches", "/market-stream", "/resolutions", "/forecast-evaluation", "/research-features", "/independent-model-evaluation", "/model-forecasts", "/learning"):
+        if self.path in ("/", "/status", "/health", "/paper", "/news", "/matches", "/market-stream", "/resolutions", "/forecast-evaluation", "/research-features", "/independent-model-evaluation", "/model-forecasts", "/learning", "/execution-readiness"):
             with _lock:
                 snapshot = dict(_state)
             if self.path == "/health":
@@ -1319,6 +1320,8 @@ class Handler(BaseHTTPRequestHandler):
                         "forecast": None,
                         "execution": "none",
                     })
+            elif self.path == "/execution-readiness":
+                self._send(200, execution_readiness_payload())
             elif self.path == "/learning":
                 try:
                     with _learning_lock:

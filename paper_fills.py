@@ -67,6 +67,12 @@ def simulate_orderbook_fill(
             "average_price": None,
             "levels_used": 0,
             "limit_price": parsed_limit_price,
+            "best_visible_price": None,
+            "fill_ratio": 0.0,
+            "completion_status": "unfilled",
+            "book_walk_cost_bps": None,
+            "visible_depth_usd": 0.0 if normalized_side == "buy" else None,
+            "visible_depth_shares": 0.0 if normalized_side == "sell" else None,
             "execution": "none",
             "research_only": True,
         }
@@ -82,6 +88,7 @@ def simulate_orderbook_fill(
         parsed_levels.append((price, size))
 
     parsed_levels.sort(key=lambda item: item[0], reverse=normalized_side == "sell")
+    best_visible_price = parsed_levels[0][0] if parsed_levels else None
 
     # Reject internally inconsistent snapshots before simulating a fill. The
     # top level in the raw depth must agree with the book's declared best price.
@@ -102,6 +109,12 @@ def simulate_orderbook_fill(
                     "average_price": None,
                     "levels_used": 0,
                     "limit_price": parsed_limit_price,
+                    "best_visible_price": None,
+                    "fill_ratio": 0.0,
+                    "completion_status": "unfilled",
+                    "book_walk_cost_bps": None,
+                    "visible_depth_usd": 0.0 if normalized_side == "buy" else None,
+                    "visible_depth_shares": 0.0 if normalized_side == "sell" else None,
                     "execution": "none",
                     "research_only": True,
                 }
@@ -113,6 +126,13 @@ def simulate_orderbook_fill(
             parsed_levels = [item for item in parsed_levels if item[0] <= parsed_limit_price + 1e-12]
         else:
             parsed_levels = [item for item in parsed_levels if item[0] >= parsed_limit_price - 1e-12]
+
+    if normalized_side == "buy":
+        visible_depth_usd = sum(price * size for price, size in parsed_levels)
+        visible_depth_shares = None
+    else:
+        visible_depth_usd = None
+        visible_depth_shares = sum(size for _, size in parsed_levels)
 
     remaining = requested_notional if normalized_side == "buy" else requested_shares
     filled_shares = 0.0
@@ -141,6 +161,20 @@ def simulate_orderbook_fill(
     average_price = filled_notional / filled_shares if filled_shares > 0 else None
     complete = remaining is not None and remaining <= 1e-8
     if normalized_side == "buy":
+        fill_ratio = filled_notional / requested_notional
+        book_walk_cost_bps = (
+            max(0.0, (average_price / best_visible_price - 1.0) * 10000.0)
+            if average_price is not None and best_visible_price is not None else None
+        )
+    else:
+        fill_ratio = filled_shares / requested_shares
+        book_walk_cost_bps = (
+            max(0.0, (best_visible_price - average_price) / best_visible_price * 10000.0)
+            if average_price is not None and best_visible_price is not None else None
+        )
+    fill_ratio = min(1.0, max(0.0, fill_ratio))
+    completion_status = "filled" if complete else ("partial" if filled_shares > 0 else "unfilled")
+    if normalized_side == "buy":
         unfilled_notional = max(0.0, float(remaining or 0.0))
         unfilled_shares = None
         reason = "filled_visible_ask_depth" if complete else "insufficient_visible_ask_depth"
@@ -160,6 +194,12 @@ def simulate_orderbook_fill(
         "average_price": round(average_price, 10) if average_price is not None else None,
         "worst_price": worst_price,
         "limit_price": round(parsed_limit_price, 10) if parsed_limit_price is not None else None,
+        "best_visible_price": round(best_visible_price, 10) if best_visible_price is not None else None,
+        "fill_ratio": round(fill_ratio, 8),
+        "completion_status": completion_status,
+        "book_walk_cost_bps": round(book_walk_cost_bps, 6) if book_walk_cost_bps is not None else None,
+        "visible_depth_usd": round(visible_depth_usd, 8) if visible_depth_usd is not None else None,
+        "visible_depth_shares": round(visible_depth_shares, 12) if visible_depth_shares is not None else None,
         "levels_used": levels_used,
         "unfilled_notional_usd": round(unfilled_notional, 8) if unfilled_notional is not None else None,
         "unfilled_shares": round(unfilled_shares, 12) if unfilled_shares is not None else None,

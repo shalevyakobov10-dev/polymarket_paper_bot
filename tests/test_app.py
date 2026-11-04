@@ -336,6 +336,8 @@ class ParserTests(unittest.TestCase):
                 with http_urlopen(address, timeout=3) as response:
                     payload = json.loads(response.read().decode("utf-8"))
                 self.assertTrue(payload["supervised"])
+                self.assertTrue(payload["status_fresh"])
+                self.assertIsNotNone(payload["status_age_seconds"])
                 self.assertEqual(payload["service_state"], "running")
                 self.assertEqual(payload["monitor_state"], "restarting")
                 self.assertEqual(payload["monitor_restart_count"], 2)

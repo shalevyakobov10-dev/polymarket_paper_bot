@@ -166,12 +166,23 @@ def evaluate_forward_returns(
     horizons_hours: tuple[int, ...] = (1, 6, 24),
     prior_prices: dict[str, float] | None = None,
 ) -> dict[str, Any]:
-    """Compare post-signal returns with all-observation returns in the same window.
+    """Compare momentum and contrarian-long event returns with a same-window baseline.
 
-    The forward point is the first recorded observation at or after the chosen
-    horizon. Signals and benchmarks that lack a full in-window future point are
-    omitted. This is a descriptive event study, not a portfolio simulation.
+    Positive moves represent a long-after-rise (momentum) hypothesis. Negative
+    moves represent a long-after-drop (contrarian/rebound) hypothesis. The
+    forward point is the first recorded observation at or after the chosen
+    horizon. Signals and benchmarks without a full future point are omitted
+    from return statistics. This is a descriptive event study, not a strategy
+    simulation, and neither direction is selected or promoted automatically.
     """
+    if isinstance(threshold, bool) or not math.isfinite(float(threshold)) or not 0 < float(threshold) < 1:
+        raise ValueError("threshold must be finite and in (0, 1)")
+    if not horizons_hours or any(
+        isinstance(horizon, bool) or not isinstance(horizon, int) or horizon <= 0
+        for horizon in horizons_hours
+    ):
+        raise ValueError("horizons_hours must contain positive integers")
+
     by_token: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for row in rows:
         token_id = str(row.get("token_id") or "")
@@ -185,9 +196,12 @@ def evaluate_forward_returns(
     output = {}
     for horizon in horizons_hours:
         horizon_seconds = int(horizon * 3600)
-        signal_returns: list[float] = []
+        positive_returns: list[float] = []
+        negative_returns: list[float] = []
         baseline_returns: list[float] = []
-        signals_seen = 0
+        positive_signals_seen = 0
+        negative_signals_seen = 0
+
         for token_id, token_rows in by_token.items():
             seed = number((prior_prices or {}).get(token_id))
             previous_price = seed
@@ -198,47 +212,102 @@ def evaluate_forward_returns(
                 target_timestamp = int(row["timestamp"]) + horizon_seconds
                 if future_index < index + 1:
                     future_index = index + 1
-                while future_index < count and int(token_rows[future_index]["timestamp"]) < target_timestamp:
+                while (
+                    future_index < count
+                    and int(token_rows[future_index]["timestamp"]) < target_timestamp
+                ):
                     future_index += 1
                 future_return = None
                 if future_index < count:
                     future_return = float(token_rows[future_index]["price"]) / current_price - 1.0
                     baseline_returns.append(future_return)
-                if previous_price is not None and current_price - previous_price >= threshold:
-                    signals_seen += 1
-                    if future_return is not None:
-                        signal_returns.append(future_return)
+
+                if previous_price is not None:
+                    price_delta = current_price - previous_price
+                    if price_delta >= threshold:
+                        positive_signals_seen += 1
+                        if future_return is not None:
+                            positive_returns.append(future_return)
+                    elif price_delta <= -threshold:
+                        negative_signals_seen += 1
+                        if future_return is not None:
+                            negative_returns.append(future_return)
                 previous_price = current_price
 
         def summarize(values: list[float]) -> dict[str, Any]:
             if not values:
-                return {"n": 0, "mean_return_pct": None, "median_return_pct": None, "positive_rate_pct": None}
+                return {
+                    "n": 0,
+                    "mean_return_pct": None,
+                    "median_return_pct": None,
+                    "positive_rate_pct": None,
+                }
             ordered = sorted(values)
             middle = len(ordered) // 2
-            median = ordered[middle] if len(ordered) % 2 else (ordered[middle - 1] + ordered[middle]) / 2
+            median = (
+                ordered[middle]
+                if len(ordered) % 2
+                else (ordered[middle - 1] + ordered[middle]) / 2
+            )
             return {
                 "n": len(values),
                 "mean_return_pct": round(100 * sum(values) / len(values), 5),
                 "median_return_pct": round(100 * median, 5),
-                "positive_rate_pct": round(100 * sum(1 for value in values if value > 0) / len(values), 3),
+                "positive_rate_pct": round(
+                    100 * sum(1 for value in values if value > 0) / len(values), 3
+                ),
             }
 
-        signal_summary = summarize(signal_returns)
+        def excess_mean(
+            signal_summary: dict[str, Any],
+            baseline_summary: dict[str, Any],
+        ) -> float | None:
+            signal_mean = signal_summary["mean_return_pct"]
+            baseline_mean = baseline_summary["mean_return_pct"]
+            if signal_mean is None or baseline_mean is None:
+                return None
+            return round(signal_mean - baseline_mean, 5)
+
+        positive_summary = summarize(positive_returns)
+        negative_summary = summarize(negative_returns)
         baseline_summary = summarize(baseline_returns)
-        excess_mean = None
-        if signal_summary["mean_return_pct"] is not None and baseline_summary["mean_return_pct"] is not None:
-            excess_mean = round(signal_summary["mean_return_pct"] - baseline_summary["mean_return_pct"], 5)
         output[f"{horizon}h"] = {
-            "signals_detected": signals_seen,
-            "signal_forward_returns": signal_summary,
+            # Backward-compatible aliases for the original positive-move study.
+            "signals_detected": positive_signals_seen,
+            "signal_forward_returns": positive_summary,
+            "signal_minus_baseline_mean_return_pct": excess_mean(
+                positive_summary, baseline_summary
+            ),
+            "positive_move_signals_detected": positive_signals_seen,
+            "positive_move_forward_returns": positive_summary,
+            "positive_move_minus_baseline_mean_return_pct": excess_mean(
+                positive_summary, baseline_summary
+            ),
+            "negative_move_signals_detected": negative_signals_seen,
+            "negative_move_long_forward_returns": negative_summary,
+            "negative_move_long_minus_baseline_mean_return_pct": excess_mean(
+                negative_summary, baseline_summary
+            ),
             "all_observation_baseline": baseline_summary,
-            "signal_minus_baseline_mean_return_pct": excess_mean,
         }
     return {
-        "threshold": threshold,
-        "method": "first observed price at or after horizon; only full in-window horizons; no executable fill assumptions",
+        "threshold": float(threshold),
+        "method": (
+            "first observed price at or after horizon; only full in-window horizons; "
+            "no executable fill assumptions"
+        ),
+        "directional_hypotheses": {
+            "positive_move": "long_after_price_rise_momentum",
+            "negative_move": "long_after_price_drop_contrarian_rebound",
+        },
+        "interpretation": (
+            "Descriptive research only. Both directions are reported against the same "
+            "all-observation baseline; small event counts are not evidence of an edge. "
+            "No direction is selected, promoted, or connected to paper entries."
+        ),
         "horizons": output,
     }
+
 
 
 def diagnose_price_changes(rows: list[dict[str, Any]], thresholds: tuple[float, ...] = (0.005, 0.01, 0.02, 0.03)) -> dict[str, Any]:

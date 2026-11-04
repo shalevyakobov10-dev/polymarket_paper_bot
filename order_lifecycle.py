@@ -107,15 +107,18 @@ def _validated_copy(intent: dict[str, Any]) -> dict[str, Any]:
     if not isinstance(intent, dict):
         raise ValueError("order intent must be a dictionary")
     state = deepcopy(intent)
-    if state.get("schema_version") != SCHEMA_VERSION:
+    schema_version = state.get("schema_version")
+    if isinstance(schema_version, bool) or schema_version != SCHEMA_VERSION:
         raise ValueError("unsupported order intent schema_version")
     if state.get("mode") != "LOCAL_ORDER_LIFECYCLE_ONLY":
         raise ValueError("unsupported order lifecycle mode")
-    if state.get("status") not in ORDER_STATES:
+    if not isinstance(state.get("status"), str) or state["status"] not in ORDER_STATES:
         raise ValueError("invalid order lifecycle status")
-    _required_text(state.get("client_order_id"), "client_order_id")
+    client_id = _required_text(state.get("client_order_id"), "client_order_id")
+    if not _CLIENT_ID_RE.fullmatch(client_id):
+        raise ValueError("invalid stored client_order_id")
     _required_text(state.get("token_id"), "token_id")
-    if state.get("side") not in {"BUY", "SELL"}:
+    if not isinstance(state.get("side"), str) or state["side"] not in {"BUY", "SELL"}:
         raise ValueError("invalid order side")
     price = _decimal(state.get("limit_price"), "limit_price")
     size = _decimal(state.get("size"), "size")

@@ -15,6 +15,7 @@ import signal
 import subprocess
 import sys
 import threading
+import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -194,6 +195,19 @@ def run_supervisor(
             # Status visibility must not be able to terminate either worker.
             log.error("could not persist sanitized supervisor status: %s", type(exc).__name__)
 
+    def wait_with_heartbeat(seconds: float) -> bool:
+        deadline = time.monotonic() + seconds
+        while not stopping.is_set():
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return False
+            # A 15-second status refresh makes stale supervisor files detectable,
+            # including while the account monitor is waiting to restart.
+            if stopping.wait(min(remaining, 15.0)):
+                return True
+            publish_status()
+        return True
+
     publish_status()
     try:
         app_process = popen_factory(
@@ -246,7 +260,7 @@ def run_supervisor(
                         monitor_failures,
                         delay,
                     )
-                    if stopping.wait(delay):
+                    if wait_with_heartbeat(delay):
                         break
                     monitor_process = popen_factory(
                         list(config.monitor_command or ()),
@@ -257,7 +271,7 @@ def run_supervisor(
                     publish_status()
                     continue
 
-            if stopping.wait(config.poll_interval_seconds):
+            if wait_with_heartbeat(config.poll_interval_seconds):
                 break
 
         return 0

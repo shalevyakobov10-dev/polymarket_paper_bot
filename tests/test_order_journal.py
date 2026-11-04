@@ -1,9 +1,8 @@
 import tempfile
 import threading
 import unittest
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from datetime import datetime, timezone
 
 from order_journal import OrderJournal
 from order_lifecycle import create_order_intent, submission_policy
@@ -304,17 +303,22 @@ class OrderJournalTests(unittest.TestCase):
 
     def test_delayed_older_success_cannot_overwrite_a_newer_failed_sync(self):
         failed_at = datetime.now(timezone.utc)
+        newer_success_id = self.journal.save_account_risk_snapshot(
+            complete_risk_snapshot(
+                captured_at_utc=(failed_at - timedelta(milliseconds=500)).isoformat()
+            )
+        )
         self.journal.record_account_risk_snapshot_failure(
             error_code="ConnectionError",
             attempted_at=failed_at,
         )
         delayed_snapshot = complete_risk_snapshot(
-            captured_at_utc=(failed_at - __import__("datetime").timedelta(seconds=1)).isoformat()
+            captured_at_utc=(failed_at - timedelta(seconds=1)).isoformat()
         )
-        delayed_id = self.journal.save_account_risk_snapshot(delayed_snapshot)
+        self.journal.save_account_risk_snapshot(delayed_snapshot)
         self.assertEqual(
             self.journal.get_latest_account_risk_snapshot()["snapshot_id"],
-            delayed_id,
+            newer_success_id,
         )
         sync_state = self.journal.get_latest_account_risk_sync_state(max_age_seconds=60)
         self.assertEqual(sync_state["status"], "failed")

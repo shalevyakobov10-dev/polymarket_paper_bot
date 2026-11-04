@@ -283,6 +283,41 @@ class NewsMonitorTests(unittest.TestCase):
         self.assertEqual(summary[0]["distinct_publisher_count"], 2)
         self.assertEqual(summary[0]["publisher_ids"], ["bbc", "npr"])
 
+    def test_corroboration_flags_exact_headline_repetition_across_publishers(self):
+        matches = [
+            {
+                "market_id": "m1", "market_question": "Question",
+                "source": "Reuters", "publisher_id": "reuters",
+                "news_title": "Central bank announces emergency rate cut",
+            },
+            {
+                "market_id": "m1", "market_question": "Question",
+                "source": "Example Syndicator", "publisher_id": "example-syndicator",
+                "news_title": "Central bank announces emergency rate cut",
+            },
+            {
+                "market_id": "m1", "market_question": "Question",
+                "source": "NPR", "publisher_id": "npr",
+                "news_title": "Officials discuss new economic outlook",
+            },
+        ]
+        summary = news_monitor.summarize_market_corroboration(matches)[0]
+        self.assertEqual(summary["distinct_publisher_count"], 3)
+        self.assertEqual(summary["distinct_normalized_headline_count"], 2)
+        self.assertEqual(summary["repeated_headline_group_count"], 1)
+        self.assertEqual(summary["max_publishers_sharing_exact_headline"], 2)
+        self.assertIn("not_independent_event_verification", summary["interpretation"])
+
+    def test_corroboration_does_not_create_headline_groups_from_short_titles(self):
+        matches = [
+            {"market_id": "m1", "source": "Reuters", "news_title": "Fed cuts"},
+            {"market_id": "m1", "source": "NPR", "news_title": "Fed cuts"},
+        ]
+        summary = news_monitor.summarize_market_corroboration(matches)[0]
+        self.assertEqual(summary["distinct_normalized_headline_count"], 0)
+        self.assertEqual(summary["repeated_headline_group_count"], 0)
+        self.assertEqual(summary["max_publishers_sharing_exact_headline"], 0)
+
     def test_corroboration_ignores_missing_market_or_source(self):
         matches = [
             {"market_id": "", "source": "BBC News"},

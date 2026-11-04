@@ -153,8 +153,17 @@ def _validated_copy(intent: dict[str, Any]) -> dict[str, Any]:
         raise ValueError("partially_filled state has inconsistent filled_size")
     if status == "filled" and filled != size:
         raise ValueError("filled state must have filled_size equal to order size")
-    if status == "manual_review" and reason != "client_order_id_mismatch":
+    if status == "cancelled" and filled >= size:
+        raise ValueError("cancelled state must retain an unfilled remainder")
+    if status == "manual_review" and reason not in {
+        "client_order_id_mismatch", "exchange_order_id_mismatch"
+    }:
         raise ValueError("manual_review state must retain its mismatch reason")
+    conflicting_id = state.get("last_conflicting_exchange_order_id")
+    if conflicting_id is not None:
+        _required_text(conflicting_id, "last_conflicting_exchange_order_id")
+        if status != "manual_review":
+            raise ValueError("conflicting venue order ID requires manual_review")
     if status == "prepared" and (external_id is not None or reconciliations != 0):
         raise ValueError("prepared intent has inconsistent venue or reconciliation metadata")
     if status == "submission_pending" and (external_id is not None or reconciliations != 0):
@@ -301,4 +310,80 @@ def reconcile_submission(
     state["filled_size"] = str(reported_fill)
     state["reconciliation_attempts"] += 1
     state["last_reason_code"] = _reason_code(reason_code, default="reconciled_from_venue")
+    return state
+
+
+
+def record_order_observation(
+    intent: dict[str, Any],
+    *,
+    outcome: str,
+    matched_client_order_id: str,
+    exchange_order_id: str,
+    cumulative_filled_size: float,
+    reason_code: str | None = None,
+) -> dict[str, Any]:
+    """Apply a venue status snapshot using monotonic cumulative fill quantity.
+
+    Repeated snapshots are idempotent because cumulative filled size is stored,
+    never added to the previous fill. Older snapshots that report less filled
+    quantity are rejected. An identity mismatch moves the intent to manual
+    review rather than attaching activity to the wrong local order.
+    """
+    state = _validated_copy(intent)
+    if state["status"] not in {"open", "partially_filled"}:
+        raise RuntimeError("only active known orders can accept status observations")
+
+    matched_id = _required_text(matched_client_order_id, "matched_client_order_id")
+    observed_exchange_id = _required_text(exchange_order_id, "exchange_order_id")
+    if matched_id != state["client_order_id"]:
+        state["status"] = "manual_review"
+        state["last_reason_code"] = "client_order_id_mismatch"
+        state["last_conflicting_exchange_order_id"] = observed_exchange_id
+        return state
+    if observed_exchange_id != state["exchange_order_id"]:
+        state["status"] = "manual_review"
+        state["last_reason_code"] = "exchange_order_id_mismatch"
+        state["last_conflicting_exchange_order_id"] = observed_exchange_id
+        return state
+
+    if outcome not in {"open", "partially_filled", "filled", "cancelled", "rejected"}:
+        raise ValueError("unsupported order observation outcome")
+
+    order_size = _decimal(state["size"], "size")
+    previous_fill = _decimal(state["filled_size"], "filled_size")
+    reported_fill = _decimal(cumulative_filled_size, "cumulative_filled_size")
+    if reported_fill < 0 or reported_fill > order_size:
+        raise ValueError("cumulative_filled_size is outside the order size")
+    if reported_fill < previous_fill:
+        raise ValueError("cumulative filled size cannot decrease")
+
+    if outcome == "filled" and reported_fill != order_size:
+        raise ValueError("filled observation requires cumulative fill equal to order size")
+    if outcome == "partially_filled" and not Decimal("0") < reported_fill < order_size:
+        raise ValueError("partially_filled observation requires a partial cumulative fill")
+    if outcome == "rejected" and reported_fill != 0:
+        raise ValueError("rejected observation requires zero cumulative fill")
+    if outcome == "rejected" and previous_fill != 0:
+        raise ValueError("an order with prior fills cannot become rejected")
+    if outcome == "cancelled" and reported_fill >= order_size:
+        raise ValueError("cancelled observation must retain an unfilled remainder")
+
+    # Normalize an 'open' snapshot carrying a nonzero cumulative matched size
+    # to partially_filled (or filled), rather than erasing a prior fill.
+    if outcome == "open":
+        target_status = (
+            "open" if reported_fill == 0
+            else ("filled" if reported_fill == order_size else "partially_filled")
+        )
+    elif outcome == "partially_filled":
+        target_status = "partially_filled"
+    else:
+        target_status = outcome
+
+    state["status"] = target_status
+    state["filled_size"] = str(reported_fill)
+    state["last_reason_code"] = _reason_code(
+        reason_code, default="venue_order_status_observed"
+    )
     return state

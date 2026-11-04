@@ -336,6 +336,12 @@ class UserOrderStreamTests(unittest.TestCase):
         self.assertEqual(result["status"], "snapshot_has_unresolved_absences")
         self.assertEqual(len(result["unresolved_missing_orders"]), 1)
         self.assertEqual(result["unresolved_missing_orders"][0]["status"], "open")
+        self.assertEqual(
+            result["unresolved_missing_orders"][0]["trade_history_result"],
+            "terminal_status_unconfirmed",
+        )
+        self.assertTrue(result["account_trade_history_checked"])
+        self.assertEqual(result["trade_history_unresolved_orders"], 1)
         self.assertEqual(self.journal.get_intent("local-123")["status"], "open")
 
 

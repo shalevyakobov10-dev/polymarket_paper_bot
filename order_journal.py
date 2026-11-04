@@ -252,6 +252,29 @@ class OrderJournal:
         finally:
             connection.close()
 
+    def list_active_intents(self) -> list[dict[str, Any]]:
+        """List locally active orders for read-only REST snapshot comparison."""
+        connection = self._connect()
+        try:
+            rows = connection.execute(
+                """
+                SELECT state_json FROM order_intents
+                ORDER BY created_at, client_order_id
+                """
+            ).fetchall()
+        finally:
+            connection.close()
+        active: list[dict[str, Any]] = []
+        for row in rows:
+            try:
+                state = json.loads(row["state_json"])
+            except (TypeError, json.JSONDecodeError) as exc:
+                raise ValueError("stored order intent is malformed; refusing active-order listing") from exc
+            submission_policy(state)
+            if state["status"] in {"open", "partially_filled"}:
+                active.append(state)
+        return active
+
     def get_intent(self, client_order_id: str) -> dict[str, Any] | None:
         connection = self._connect()
         try:

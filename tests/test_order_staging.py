@@ -218,6 +218,18 @@ class OrderStagingTests(unittest.TestCase):
         self.assertIn("invalid_preflight_context", result["blockers"])
         self.assertIsNone(self.journal.get_intent("staged-order-001"))
 
+
+    def test_same_client_id_cannot_be_reused_with_a_different_account_snapshot(self):
+        first = self.stage()
+        self.assertTrue(first["intent_created"])
+        self.journal.save_account_risk_snapshot(account_snapshot(collateral="90"))
+        replay = self.stage()
+        self.assertEqual(replay["status"], "blocked")
+        self.assertIn("order_intent_conflict_or_corrupt_journal", replay["blockers"])
+        self.assertEqual(self.journal.get_intent("staged-order-001")["account_risk_snapshot_id"],
+                         self.snapshot_id)
+        self.assertEqual(len(self.journal.list_events("staged-order-001")), 1)
+
     def test_replaying_same_staged_intent_is_idempotent(self):
         first = self.stage()
         events_before = len(self.journal.list_events("staged-order-001"))

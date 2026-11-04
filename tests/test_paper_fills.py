@@ -63,11 +63,54 @@ class PaperFillSimulationTests(unittest.TestCase):
         self.assertAlmostEqual(result["filled_shares"], 1.0)
         self.assertAlmostEqual(result["average_price"], 0.50)
 
+    def test_fill_quality_diagnostics_measure_buy_book_walk(self):
+        result = simulate_orderbook_fill(
+            self.book, side="buy", target_notional_usd=2.5
+        )
+        self.assertEqual(result["completion_status"], "filled")
+        self.assertAlmostEqual(result["fill_ratio"], 1.0)
+        self.assertAlmostEqual(result["best_visible_price"], 0.50)
+        self.assertGreater(result["book_walk_cost_bps"], 0.0)
+        self.assertAlmostEqual(
+            result["book_walk_cost_bps"],
+            (result["average_price"] / 0.50 - 1.0) * 10000.0,
+            places=4,
+        )
+        self.assertAlmostEqual(result["visible_depth_usd"], 6.2)
+
+    def test_fill_quality_diagnostics_measure_sell_book_walk(self):
+        result = simulate_orderbook_fill(
+            self.book, side="sell", target_shares=3.0
+        )
+        self.assertEqual(result["completion_status"], "filled")
+        self.assertAlmostEqual(result["fill_ratio"], 1.0)
+        self.assertAlmostEqual(result["best_visible_price"], 0.48)
+        self.assertGreater(result["book_walk_cost_bps"], 0.0)
+        self.assertAlmostEqual(result["visible_depth_shares"], 12.0)
+        self.assertAlmostEqual(
+            result["book_walk_cost_bps"],
+            (0.48 - result["average_price"]) / 0.48 * 10000.0,
+            places=4,
+        )
+
+    def test_partial_depth_exposes_ratio_without_becoming_eligible(self):
+        result = simulate_orderbook_fill(
+            {"asks_top5": [{"price": 0.50, "size": 1}], "bids_top5": []},
+            side="buy",
+            target_notional_usd=2.0,
+        )
+        self.assertFalse(result["eligible"])
+        self.assertEqual(result["completion_status"], "partial")
+        self.assertAlmostEqual(result["fill_ratio"], 0.25)
+        self.assertAlmostEqual(result["book_walk_cost_bps"], 0.0)
+
     def test_missing_levels_do_not_fabricate_a_fill(self):
         result = simulate_orderbook_fill({}, side="sell", target_shares=2.0)
         self.assertFalse(result["eligible"])
         self.assertEqual(result["reason"], "orderbook_levels_missing")
         self.assertIsNone(result["average_price"])
+        self.assertEqual(result["completion_status"], "unfilled")
+        self.assertEqual(result["fill_ratio"], 0.0)
 
     def test_invalid_levels_are_ignored(self):
         result = simulate_orderbook_fill(

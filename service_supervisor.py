@@ -176,6 +176,7 @@ def run_supervisor(
     monitor_failures = 0
     last_monitor_exit_code: int | None = None
     next_restart_at: str | None = None
+    app_exit_code: int | None = None
 
     def publish_status() -> None:
         try:
@@ -185,6 +186,7 @@ def run_supervisor(
                 monitor_state=monitor_state,
                 restart_count=monitor_failures,
                 last_exit_code=last_monitor_exit_code,
+                app_exit_code=app_exit_code,
                 next_restart_at=next_restart_at,
             )
             write_supervisor_status(config.status_path, payload)
@@ -217,7 +219,7 @@ def run_supervisor(
                 log.error("paper HTTP worker exited with code %s", app_code)
                 service_state = "app_failed"
                 monitor_state = "stopped" if monitor_enabled else "disabled"
-                last_monitor_exit_code = int(app_code)
+                app_exit_code = int(app_code)
                 next_restart_at = None
                 publish_status()
                 return int(app_code) if int(app_code) != 0 else 1

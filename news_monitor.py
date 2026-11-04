@@ -205,43 +205,114 @@ def match_news_to_markets(
     *,
     max_matches: int = 3,
 ) -> list[dict[str, Any]]:
-    """Return conservative keyword-overlap candidates, never probabilities."""
+    """Rank research-only news candidates using market-corpus rarity and title evidence.
+
+    Terms repeated across many tracked markets are down-weighted and cannot alone
+    anchor a match. With fewer than four distinct markets, corpus rarity is not
+    reliable, so the matcher records that limitation and uses the headline overlap
+    only as a provisional anchor. Scores are ranking diagnostics, never probabilities.
+    """
     title_tokens = _tokens(str(news_item.get("title") or ""))
     news_tokens = title_tokens | _tokens(str(news_item.get("summary") or ""))
     if len(title_tokens) < 2 or len(news_tokens) < 2:
         return []
 
-    candidates = []
+    # Build a unique market-question corpus first so duplicate market rows cannot
+    # distort document frequencies or artificially suppress distinctive terms.
+    market_rows: list[tuple[str, str, set[str]]] = []
     seen_market_ids: set[str] = set()
     for market in markets:
-        market_id = str(market.get("market_id") or market.get("conditionId") or market.get("id") or "")
+        if not isinstance(market, dict):
+            continue
+        market_id = str(
+            market.get("market_id") or market.get("conditionId") or market.get("id") or ""
+        ).strip()
         question = str(market.get("question") or "").strip()
         if not market_id or not question or market_id in seen_market_ids:
             continue
         seen_market_ids.add(market_id)
-        market_tokens = _tokens(question)
+        tokens = _tokens(question)
+        if tokens:
+            market_rows.append((market_id, question, tokens))
+
+    corpus_size = len(market_rows)
+    if not corpus_size:
+        return []
+    document_frequency: dict[str, int] = {}
+    for _, _, tokens in market_rows:
+        for token in tokens:
+            document_frequency[token] = document_frequency.get(token, 0) + 1
+
+    rarity_filter_active = corpus_size >= 4
+    max_common_documents = max(1, math.floor(corpus_size * 0.35))
+
+    def idf(token: str) -> float:
+        frequency = document_frequency.get(token, 0)
+        return math.log((corpus_size + 1) / (frequency + 1)) + 1.0
+
+    candidates = []
+    for market_id, question, market_tokens in market_rows:
         shared = news_tokens & market_tokens
         title_shared = title_tokens & market_tokens
-        # Require multiple non-generic terms and at least one in the headline itself.
         if len(shared) < 2 or not title_shared:
             continue
+
+        distinctive_title = (
+            {term for term in title_shared if document_frequency.get(term, 0) <= max_common_documents}
+            if rarity_filter_active
+            else set(title_shared)
+        )
+        # Once the tracked-market corpus is large enough, generic headline terms
+        # seen in most markets cannot independently qualify a candidate.
+        if not distinctive_title:
+            continue
+
+        shared_weight = sum(idf(term) for term in shared)
+        market_weight = sum(idf(term) for term in market_tokens)
+        title_weight = sum(idf(term) for term in title_tokens)
+        title_shared_weight = sum(idf(term) for term in title_shared)
+        market_coverage = shared_weight / max(1e-12, market_weight)
+        headline_precision = title_shared_weight / max(1e-12, title_weight)
+        relevance_score = 0.65 * headline_precision + 0.35 * market_coverage
+
         candidates.append({
             "market_id": market_id,
             "question": question[:500],
             "matched_terms": sorted(shared),
             "headline_matched_terms": sorted(title_shared),
+            "distinctive_headline_terms": sorted(distinctive_title),
+            "common_headline_terms": sorted(title_shared - distinctive_title),
+            "term_document_frequency": {
+                term: document_frequency.get(term, 0) for term in sorted(shared)
+            },
             "shared_term_count": len(shared),
             "lexical_overlap": round(len(shared) / max(1, len(market_tokens)), 4),
-            "method": "keyword_overlap_v1",
+            "market_coverage": round(market_coverage, 6),
+            "headline_precision": round(headline_precision, 6),
+            "relevance_score": round(relevance_score, 6),
+            "market_corpus_size": corpus_size,
+            "market_corpus_quality": (
+                "rarity_filter_active" if rarity_filter_active
+                else "insufficient_for_rarity_filter"
+            ),
+            "method": "market_corpus_idf_keyword_v2",
             "research_only": True,
             "execution": "none",
         })
     candidates.sort(
-        key=lambda row: (row["shared_term_count"], row["lexical_overlap"]),
+        key=lambda row: (
+            row["relevance_score"],
+            len(row["distinctive_headline_terms"]),
+            row["shared_term_count"],
+            row["lexical_overlap"],
+        ),
         reverse=True,
     )
-    return candidates[:max(1, min(10, int(max_matches)))]
-
+    try:
+        limit = int(max_matches)
+    except (TypeError, ValueError, OverflowError):
+        limit = 3
+    return candidates[:max(1, min(10, limit))]
 
 def summarize_market_corroboration(matches: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Summarize publisher diversity and exact-title repetition without claiming verification."""
@@ -391,6 +462,14 @@ class NewsMarketMatcher:
                         "headline_matched_terms": candidate["headline_matched_terms"],
                         "shared_term_count": candidate["shared_term_count"],
                         "lexical_overlap": candidate["lexical_overlap"],
+                        "distinctive_headline_terms": candidate["distinctive_headline_terms"],
+                        "common_headline_terms": candidate["common_headline_terms"],
+                        "term_document_frequency": candidate["term_document_frequency"],
+                        "market_coverage": candidate["market_coverage"],
+                        "headline_precision": candidate["headline_precision"],
+                        "relevance_score": candidate["relevance_score"],
+                        "market_corpus_size": candidate["market_corpus_size"],
+                        "market_corpus_quality": candidate["market_corpus_quality"],
                         "method": candidate["method"],
                         "research_only": True,
                         "execution": "none",

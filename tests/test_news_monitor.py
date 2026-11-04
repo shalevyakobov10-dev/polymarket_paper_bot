@@ -286,6 +286,8 @@ class NewsMonitorTests(unittest.TestCase):
         self.assertGreater(result["added"][0]["relevance_score"], 0)
         self.assertIn("distinctive_headline_terms", result["added"][0])
         self.assertIn("market_corpus_quality", result["added"][0])
+        self.assertIn("news_freshness_status", result["added"][0])
+        self.assertIn("news_age_seconds", result["added"][0])
 
     def test_matcher_ignores_generic_or_unrelated_overlap(self):
         news = {
@@ -333,6 +335,49 @@ class NewsMonitorTests(unittest.TestCase):
         self.assertEqual(result["items_added"], 2)
         self.assertEqual(result["latest_items"][0]["title"], "Newer event")
 
+
+    def test_match_freshness_distinguishes_fresh_stale_unknown_and_future_timestamps(self):
+        now = news_monitor.datetime(2026, 11, 4, 12, 0, tzinfo=news_monitor.timezone.utc)
+        fresh = news_monitor.classify_news_freshness(
+            {"published_at": "2026-11-04T11:00:00Z"}, now=now
+        )
+        stale = news_monitor.classify_news_freshness(
+            {"published_at": "2026-11-01T11:00:00Z"}, now=now
+        )
+        unknown = news_monitor.classify_news_freshness(
+            {"published_at": "not-a-date"}, now=now
+        )
+        future = news_monitor.classify_news_freshness(
+            {"published_at": "2026-11-04T13:00:00Z"}, now=now
+        )
+        self.assertEqual(fresh["news_freshness_status"], "fresh")
+        self.assertEqual(fresh["news_age_seconds"], 3600.0)
+        self.assertEqual(stale["news_freshness_status"], "stale")
+        self.assertEqual(unknown["news_freshness_status"], "unknown_timestamp")
+        self.assertIsNone(unknown["news_age_seconds"])
+        self.assertEqual(future["news_freshness_status"], "future_timestamp")
+        self.assertLess(future["news_age_seconds"], 0)
+
+    def test_match_freshness_rejects_invalid_age_threshold(self):
+        with self.assertRaises(ValueError):
+            news_monitor.classify_news_freshness(
+                {"published_at": "2026-11-04T11:00:00Z"}, stale_after_hours=0
+            )
+
+    def test_match_freshness_summary_counts_timestamp_quality_without_signal_claim(self):
+        summary = news_monitor.summarize_match_freshness([
+            {"news_freshness_status": "fresh", "news_age_seconds": 120},
+            {"news_freshness_status": "stale", "news_age_seconds": 300000},
+            {"news_freshness_status": "future_timestamp", "news_age_seconds": -600},
+            {"news_freshness_status": "unknown_timestamp", "news_age_seconds": None},
+        ])
+        self.assertEqual(summary["candidate_count"], 4)
+        self.assertEqual(summary["counts_by_status"]["fresh"], 1)
+        self.assertEqual(summary["counts_by_status"]["stale"], 1)
+        self.assertEqual(summary["counts_by_status"]["future_timestamp"], 1)
+        self.assertEqual(summary["counts_by_status"]["unknown_timestamp"], 1)
+        self.assertEqual(summary["oldest_known_age_seconds"], 300000)
+        self.assertIn("not_event_freshness_or_signal", summary["interpretation"])
 
     def test_news_freshness_reports_publish_and_fetch_age_separately(self):
         now = news_monitor.datetime(2026, 10, 30, 12, 0, tzinfo=news_monitor.timezone.utc)

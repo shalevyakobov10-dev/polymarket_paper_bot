@@ -180,6 +180,24 @@ def stage_buy_order_intent(
         return _blocked("account_risk_snapshot_not_read_only")
 
     try:
+        sync_state = journal.get_latest_account_risk_sync_state(
+            max_age_seconds=max_account_snapshot_age_seconds
+        )
+    except (TypeError, ValueError) as exc:
+        return _blocked("invalid_account_risk_sync_state", str(exc)[:180])
+    if sync_state is None:
+        return _blocked("account_risk_sync_state_missing")
+    if sync_state.get("status") == "failed":
+        return _blocked(
+            "account_risk_snapshot_last_sync_failed",
+            str(sync_state.get("error_code") or "unknown_sync_error")[:80],
+        )
+    if sync_state.get("fresh") is not True:
+        return _blocked("account_risk_sync_state_stale")
+    if sync_state.get("snapshot_id") != snapshot_id:
+        return _blocked("account_risk_sync_snapshot_mismatch")
+
+    try:
         _validate_snapshot_economics(snapshot)
         position_assets = _assets_for_condition(
             snapshot, "open_position_assets_by_condition", market_condition_id

@@ -2,7 +2,7 @@
 - נוסף `order_lifecycle.py` כ-state machine מקומי ופונקציונלי להזמנת פקודה עתידית: מזהה מקומי יציב, ניסיון ראשוני יחיד, ומצבי `open`, `partially_filled`, `filled`, `cancelled`, `rejected` ו-`manual_review`.
 - timeout, ניתוק או תשובה עמומה מעבירים ל-`submission_unknown`; אסור לנסות שוב אוטומטית. תוצאת lookup של "לא נמצא" נשארת עמומה כי ייתכן עיכוב באינדוקס.
 - התאמה מול השרת מחייבת מזהה client order זהה. אי-התאמה מובילה ל-`manual_review` ולא לשיוך אוטומטי.
-- כל adapter עתידי חייב לשמור באופן durable את מצב `submission_pending` לפני בקשת רשת. המודול הנוכחי אינו מספק מסד נתונים, persistence, SDK, חתימה או שליחת פקודה.
+- כל adapter עתידי חייב לשמור באופן durable את מצב `submission_pending` לפני בקשת רשת. `order_journal.py` מספק יומן SQLite מקומי; עדיין אין SDK מחובר, חתימה או שליחת פקודה.
 - מזהה הלקוח הוא מזהה מקומי; אין כאן טענה ש-Polymarket תומכת בו כשדה idempotency רשמי. אין שינוי במצב Paper-only.
 - נוסף `order_journal.py`: יומן SQLite עמיד עם טרנזקציות ו-event log append-only. `begin_submission` שומר תחילה `submission_pending` בדיסק ורק אחר כך מחזיר שליטה למתאם העתידי.
 - לאחר קריסה, `recover_interrupted_submissions()` הופך ניסיון שנשאר `submission_pending` ל-`submission_unknown`; יש להפעיל אותו רק בתהליך התאוששות בלעדי, לפני worker חדש. התאוששות אינה מאפסת מונה ניסיונות.

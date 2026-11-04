@@ -344,6 +344,7 @@ class ParserTests(unittest.TestCase):
                 self.assertFalse(payload["order_submission_allowed"])
                 self.assertFalse(payload["order_signing_allowed"])
                 self.assertEqual(payload["execution"], "none")
+                self.assertIsNone(payload["app_exit_code"])
                 self.assertNotIn("POLYMARKET_PRIVATE_KEY", payload)
             finally:
                 server.shutdown()

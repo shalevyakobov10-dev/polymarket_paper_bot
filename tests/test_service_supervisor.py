@@ -48,13 +48,17 @@ class FakeStopEvent:
     def __init__(self, stop_after_waits):
         self.stop_after_waits = stop_after_waits
         self.wait_calls = []
+        self.stopped = False
 
     def is_set(self):
-        return False
+        return self.stopped
 
     def wait(self, timeout=None):
         self.wait_calls.append(timeout)
-        return len(self.wait_calls) >= self.stop_after_waits
+        if len(self.wait_calls) >= self.stop_after_waits:
+            self.stopped = True
+            return True
+        return False
 
 
 class SupervisorTests(unittest.TestCase):

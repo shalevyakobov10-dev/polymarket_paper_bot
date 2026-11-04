@@ -387,9 +387,17 @@ async def reconcile_open_orders_snapshot(
         if item.get("result") in {"unresolved", "terminal_status_unconfirmed"}
     )
 
+    snapshot_status = (
+        "snapshot_has_unresolved_absences" if unresolved
+        else (
+            "snapshot_requires_manual_review"
+            if trade_history_manual_reviews or counts["manual_review"]
+            else "open_orders_refreshed"
+        )
+    )
     return {
         "snapshot_complete": True,
-        "status": "open_orders_refreshed" if not unresolved else "snapshot_has_unresolved_absences",
+        "status": snapshot_status,
         **counts,
         "account_trade_history_checked": bool(initially_missing),
         "trade_records_inspected": trade_records_inspected,

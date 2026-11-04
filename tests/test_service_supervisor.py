@@ -6,6 +6,7 @@ from service_supervisor import (
     monitor_restart_delay,
     run_supervisor,
 )
+from supervisor_status import read_supervisor_status
 
 
 class FakeProcess:
@@ -173,6 +174,67 @@ class SupervisorTests(unittest.TestCase):
         self.assertEqual(result, 17)
         self.assertTrue(monitor.terminated)
         self.assertFalse(app.terminated)
+
+
+    def test_supervisor_persists_disabled_and_stopped_status_without_secrets(self):
+        import tempfile
+        from pathlib import Path
+
+        with tempfile.TemporaryDirectory() as directory:
+            config = build_supervisor_config(
+                {"DATA_DIR": directory, "POLYMARKET_PRIVATE_KEY": "synthetic-test-secret"},
+                python_executable="python-test",
+            )
+            app = FakeProcess()
+
+            def fake_popen(_command, *, env):
+                self.assertNotIn("POLYMARKET_PRIVATE_KEY", env)
+                return app
+
+            event = FakeStopEvent(stop_after_waits=1)
+            result = run_supervisor(config, popen_factory=fake_popen, stop_event=event)
+            self.assertEqual(result, 0)
+            status = read_supervisor_status(config.status_path)
+            self.assertTrue(status["supervised"])
+            self.assertEqual(status["service_state"], "stopped")
+            self.assertFalse(status["monitor_enabled"])
+            self.assertEqual(status["monitor_state"], "disabled")
+            self.assertNotIn("POLYMARKET_PRIVATE_KEY", status)
+            self.assertTrue(Path(config.status_path).exists())
+
+    def test_supervisor_status_records_monitor_restart_and_final_exit(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as directory:
+            config = build_supervisor_config(
+                {
+                    "ENABLE_USER_ORDER_MONITOR": "true",
+                    "POLYMARKET_PRIVATE_KEY": "synthetic-test-secret",
+                    "DATA_DIR": directory,
+                    "SERVICE_SUPERVISOR_POLL_SECONDS": "0.25",
+                },
+                python_executable="python-test",
+            )
+            app = FakeProcess()
+            failed_monitor = FakeProcess(poll_results=[7])
+            restarted_monitor = FakeProcess()
+            processes = [app, failed_monitor, restarted_monitor]
+
+            def fake_popen(_command, *, env):
+                return processes.pop(0)
+
+            event = FakeStopEvent(stop_after_waits=2)
+            result = run_supervisor(
+                config, popen_factory=fake_popen, stop_event=event
+            )
+            self.assertEqual(result, 0)
+            status = read_supervisor_status(config.status_path)
+            self.assertEqual(status["service_state"], "stopped")
+            self.assertTrue(status["monitor_enabled"])
+            self.assertEqual(status["monitor_state"], "stopped")
+            self.assertEqual(status["monitor_restart_count"], 1)
+            self.assertEqual(status["monitor_last_exit_code"], 7)
+            self.assertIsNone(status["monitor_next_restart_at"])
 
     def test_stop_child_escalates_to_kill_after_timeout(self):
         from service_supervisor import _stop_child

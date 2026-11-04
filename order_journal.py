@@ -219,6 +219,18 @@ class OrderJournal:
 
     def create_intent(self, intent: dict[str, Any]) -> dict[str, Any]:
         """Persist a prepared intent; replaying identical terms is idempotent."""
+        saved, _created = self.create_intent_with_status(intent)
+        return saved
+
+    def create_intent_with_status(
+        self,
+        intent: dict[str, Any],
+    ) -> tuple[dict[str, Any], bool]:
+        """Atomically persist or reuse an intent and report whether it was created.
+
+        The creation flag is computed inside the same SQLite write transaction,
+        so concurrent callers cannot both claim that they created the same intent.
+        """
         submission_policy(intent)
         if intent.get("status") != "prepared" or intent.get("submission_attempts") != 0:
             raise ValueError("only a new prepared order intent can be inserted")
@@ -242,7 +254,7 @@ class OrderJournal:
                 )
                 if any(existing.get(field) != intent.get(field) for field in immutable_fields):
                     raise ValueError("client_order_id already exists with different order terms")
-                return existing
+                return existing, False
 
             serialized = self._serialize(intent)
             connection.execute(
@@ -250,7 +262,7 @@ class OrderJournal:
                 (client_order_id, serialized),
             )
             self._append_event(connection, intent, "intent_created")
-            return intent.copy()
+            return intent.copy(), True
 
 
     def save_account_risk_snapshot(self, snapshot: dict[str, Any]) -> str:

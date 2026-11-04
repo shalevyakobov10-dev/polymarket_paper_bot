@@ -1,3 +1,8 @@
+## חיבור preflight ליומן intents — ללא ביצוע
+- נוסף `order_staging.py` שמריץ את כל שערי `live_order_preflight.py` על תנאי ההוראה ומצב הסיכון.
+- רק אם כל הבדיקות עוברות נשמר intent במצב `prepared` עם דוח ה-preflight בתוך אירוע audit ראשון; כשל בשער לא יוצר intent.
+- גם במקרה של preflight תקין, הפלט נשאר `order_submission_allowed=false`, `order_signing_allowed=false` ו-`execution=none`. אין כאן SDK לכתיבה, חתימה או submit.
+
 ## קליטת אירועי חשבון מאומתים — read-only בלבד
 - נוסף `user_order_stream.py`, המשתמש ב-`AsyncSecureClient` וב-`UserSpec` של `polymarket-client==0.16.0` כדי לצרוך אירועי פקודות בחשבון.
 - אירועי Order ממופים לפי מזהה הפקודה של CLOB לאינדקס המקומי ב-SQLite; לפני עדכון נבדקים מזהה נכס, צד, מחיר וגודל מקורי מול ה-intent המקומי.

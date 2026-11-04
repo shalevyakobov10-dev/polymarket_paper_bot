@@ -9,6 +9,7 @@ import argparse
 import asyncio
 import json
 import logging
+import math
 import os
 from pathlib import Path
 from decimal import Decimal, InvalidOperation
@@ -227,6 +228,7 @@ async def consume_user_order_stream(
     *,
     max_events: int | None = None,
     initial_snapshot: bool = True,
+    snapshot_interval_seconds: float | None = 300.0,
     logger: logging.Logger | None = None,
 ) -> dict[str, Any]:
     """Subscribe first, refresh open orders, then consume the authenticated user stream.
@@ -243,6 +245,14 @@ async def consume_user_order_stream(
         raise ValueError("max_events must be a positive integer or None")
     if not isinstance(initial_snapshot, bool):
         raise ValueError("initial_snapshot must be a bool")
+    if snapshot_interval_seconds is not None:
+        if (
+            isinstance(snapshot_interval_seconds, bool)
+            or not isinstance(snapshot_interval_seconds, (int, float))
+            or not math.isfinite(float(snapshot_interval_seconds))
+            or float(snapshot_interval_seconds) <= 0
+        ):
+            raise ValueError("snapshot_interval_seconds must be positive and finite or None")
 
     log = logger or logging.getLogger(__name__)
     handle = await client.subscribe(UserSpec())
@@ -280,7 +290,39 @@ async def consume_user_order_stream(
                 raise UserEventGapError("SDK dropped user events during the REST snapshot; reconciliation required")
             previous_dropped = current_dropped
 
-        async for event in handle:
+        periodic_snapshots: list[dict[str, Any]] = []
+        iterator = handle.__aiter__()
+        while True:
+            try:
+                if snapshot_interval_seconds is None:
+                    event = await iterator.__anext__()
+                else:
+                    event = await asyncio.wait_for(
+                        iterator.__anext__(),
+                        timeout=float(snapshot_interval_seconds),
+                    )
+            except asyncio.TimeoutError:
+                # A quiet stream still gets periodically refreshed from REST.
+                # The subscription remains live, so events queue while the
+                # paginated snapshot is fetched; queue growth is checked below.
+                periodic = await reconcile_open_orders_snapshot(client, journal)
+                periodic_snapshots.append(periodic)
+                log.info(
+                    "periodic open-order snapshot status=%s orders=%s unresolved=%s",
+                    periodic["status"],
+                    periodic["venue_open_orders"],
+                    len(periodic["unresolved_missing_orders"]),
+                )
+                current_dropped = getattr(handle, "dropped", None)
+                if isinstance(current_dropped, bool) or not isinstance(current_dropped, int):
+                    raise UserEventGapError("SDK user-stream dropped-event counter became invalid")
+                if current_dropped != previous_dropped:
+                    raise UserEventGapError("SDK dropped user events during REST snapshot; reconciliation required")
+                previous_dropped = current_dropped
+                continue
+            except StopAsyncIteration:
+                break
+
             current_dropped = getattr(handle, "dropped", None)
             if isinstance(current_dropped, bool) or not isinstance(current_dropped, int):
                 raise UserEventGapError("SDK user-stream dropped-event counter became invalid")
@@ -315,7 +357,11 @@ async def consume_user_order_stream(
             raise UserEventGapError("SDK user-stream dropped-event counter became invalid")
         if current_dropped != previous_dropped:
             raise UserEventGapError("SDK dropped one or more user events; reconciliation required")
-        return {**counts, "initial_open_orders_snapshot": snapshot}
+        return {
+            **counts,
+            "initial_open_orders_snapshot": snapshot,
+            "periodic_open_orders_snapshots": periodic_snapshots,
+        }
     finally:
         await handle.close()
 
@@ -326,6 +372,7 @@ async def monitor_user_orders_from_env(
     private_key: str | None = None,
     wallet: str | None = None,
     max_events: int | None = None,
+    snapshot_interval_seconds: float | None = 300.0,
     logger: logging.Logger | None = None,
 ) -> dict[str, Any]:
     """Run a read-only account monitor using secrets supplied by the environment.
@@ -348,6 +395,7 @@ async def monitor_user_orders_from_env(
             client,
             journal,
             max_events=max_events,
+            snapshot_interval_seconds=snapshot_interval_seconds,
             logger=logger,
         )
 

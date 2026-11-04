@@ -7,7 +7,10 @@ must explicitly recover pending attempts as ambiguous before reconciliation.
 from __future__ import annotations
 
 import json
+import math
 import sqlite3
+from datetime import datetime, timezone
+from uuid import uuid4
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Callable, Iterator
@@ -84,6 +87,16 @@ class OrderJournal:
                     client_order_id TEXT NOT NULL UNIQUE,
                     FOREIGN KEY(client_order_id)
                         REFERENCES order_intents(client_order_id)
+                )
+                """
+            )
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS account_risk_snapshots (
+                    snapshot_seq INTEGER PRIMARY KEY AUTOINCREMENT,
+                    snapshot_id TEXT NOT NULL UNIQUE,
+                    captured_at_utc TEXT NOT NULL,
+                    snapshot_json TEXT NOT NULL
                 )
                 """
             )
@@ -224,7 +237,8 @@ class OrderJournal:
                     ) from exc
                 submission_policy(existing)
                 immutable_fields = (
-                    "client_order_id", "token_id", "side", "limit_price", "size"
+                    "client_order_id", "token_id", "side", "limit_price", "size",
+                    "market_condition_id", "account_risk_snapshot_id",
                 )
                 if any(existing.get(field) != intent.get(field) for field in immutable_fields):
                     raise ValueError("client_order_id already exists with different order terms")
@@ -237,6 +251,130 @@ class OrderJournal:
             )
             self._append_event(connection, intent, "intent_created")
             return intent.copy()
+
+
+    def save_account_risk_snapshot(self, snapshot: dict[str, Any]) -> str:
+        """Append one complete, read-only account risk snapshot for audited staging."""
+        if not isinstance(snapshot, dict) or snapshot.get("snapshot_complete") is not True:
+            raise ValueError("only complete account risk snapshots can be persisted")
+        if snapshot.get("execution") != "none":
+            raise ValueError("account risk snapshot must remain read-only")
+        required = (
+            "captured_at_utc",
+            "collateral_balance_usd",
+            "conservative_available_collateral_usd",
+            "current_open_exposure_usd",
+            "current_open_positions",
+            "current_open_orders",
+            "open_position_assets_by_condition",
+            "open_order_assets_by_condition",
+        )
+        if any(field not in snapshot for field in required):
+            raise ValueError("account risk snapshot is missing required fields")
+        captured_raw = snapshot["captured_at_utc"]
+        if not isinstance(captured_raw, str) or not captured_raw.strip():
+            raise ValueError("captured_at_utc must be a non-empty ISO timestamp")
+        try:
+            captured = datetime.fromisoformat(captured_raw)
+        except ValueError:
+            raise ValueError("captured_at_utc must be a valid ISO timestamp") from None
+        if captured.tzinfo is None or captured.utcoffset() is None:
+            raise ValueError("captured_at_utc must be timezone-aware")
+        captured_utc = captured.astimezone(timezone.utc)
+        state = dict(snapshot)
+        state["captured_at_utc"] = captured_utc.isoformat()
+        serialized = json.dumps(
+            state,
+            ensure_ascii=False,
+            allow_nan=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        snapshot_id = str(uuid4())
+        with self._transaction() as connection:
+            connection.execute(
+                """
+                INSERT INTO account_risk_snapshots(
+                    snapshot_id, captured_at_utc, snapshot_json
+                ) VALUES (?, ?, ?)
+                """,
+                (snapshot_id, state["captured_at_utc"], serialized),
+            )
+        return snapshot_id
+
+    def get_latest_account_risk_snapshot(
+        self,
+        *,
+        max_age_seconds: float = 300,
+        now: datetime | None = None,
+    ) -> dict[str, Any] | None:
+        """Return latest account risk snapshot with an explicit freshness verdict."""
+        if (
+            isinstance(max_age_seconds, bool)
+            or not isinstance(max_age_seconds, (int, float))
+            or not math.isfinite(float(max_age_seconds))
+            or float(max_age_seconds) <= 0
+        ):
+            raise ValueError("max_age_seconds must be positive and finite")
+        current = now or datetime.now(timezone.utc)
+        if current.tzinfo is None or current.utcoffset() is None:
+            raise ValueError("now must be timezone-aware")
+        current = current.astimezone(timezone.utc)
+        connection = self._connect()
+        try:
+            row = connection.execute(
+                """
+                SELECT snapshot_id, captured_at_utc, snapshot_json
+                FROM account_risk_snapshots
+                ORDER BY snapshot_seq DESC
+                LIMIT 1
+                """
+            ).fetchone()
+        finally:
+            connection.close()
+        if row is None:
+            return None
+        try:
+            snapshot = json.loads(row["snapshot_json"])
+            captured = datetime.fromisoformat(row["captured_at_utc"])
+        except (TypeError, json.JSONDecodeError, ValueError) as exc:
+            raise ValueError("stored account risk snapshot is malformed") from exc
+        if captured.tzinfo is None or captured.utcoffset() is None:
+            raise ValueError("stored account risk snapshot timestamp is not timezone-aware")
+        age = (current - captured.astimezone(timezone.utc)).total_seconds()
+        if age < -60:
+            raise ValueError("stored account risk snapshot timestamp is in the future")
+        snapshot["snapshot_id"] = row["snapshot_id"]
+        snapshot["age_seconds"] = max(0.0, age)
+        snapshot["fresh"] = age <= float(max_age_seconds)
+        return snapshot
+
+    def list_account_risk_snapshots(self, *, limit: int = 50) -> list[dict[str, Any]]:
+        """List recent immutable account risk snapshots for audit and diagnostics."""
+        if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 500:
+            raise ValueError("limit must be an integer between 1 and 500")
+        connection = self._connect()
+        try:
+            rows = connection.execute(
+                """
+                SELECT snapshot_id, captured_at_utc, snapshot_json
+                FROM account_risk_snapshots
+                ORDER BY snapshot_seq DESC
+                LIMIT ?
+                """,
+                (limit,),
+            ).fetchall()
+        finally:
+            connection.close()
+        snapshots: list[dict[str, Any]] = []
+        for row in rows:
+            try:
+                snapshot = json.loads(row["snapshot_json"])
+            except (TypeError, json.JSONDecodeError) as exc:
+                raise ValueError("stored account risk snapshot is malformed") from exc
+            snapshot["snapshot_id"] = row["snapshot_id"]
+            snapshots.append(snapshot)
+        return snapshots
 
     def find_client_order_id_by_exchange_order_id(self, exchange_order_id: str) -> str | None:
         """Return the local intent mapped to a venue order ID, if known."""

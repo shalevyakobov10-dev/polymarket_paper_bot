@@ -256,7 +256,7 @@ class OrderLifecycleTests(unittest.TestCase):
         )
         self.assertEqual(cancelled["status"], "cancelled")
         self.assertEqual(cancelled["filled_size"], "4")
-        with self.assertRaisesRegex(RuntimeError, "active known orders"):
+        with self.assertRaisesRegex(RuntimeError, "terminal order"):
             record_order_observation(
                 cancelled, outcome="filled",
                 matched_client_order_id="local-order-0001",

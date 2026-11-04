@@ -1360,6 +1360,7 @@ class Handler(BaseHTTPRequestHandler):
                         "last_match_error": _news_state["last_match_error"],
                         "items": list(_news_matches_cache),
                         "source_corroboration": summarize_market_corroboration(_news_matches_cache),
+                        "freshness_summary": summarize_match_freshness(_news_matches_cache),
                     }
                 self._send(200, match_snapshot)
             else:

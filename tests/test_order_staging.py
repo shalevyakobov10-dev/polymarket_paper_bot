@@ -44,7 +44,8 @@ class OrderStagingTests(unittest.TestCase):
 
     def save_snapshot(
         self, *, age_seconds=0, position_assets=None, order_assets=None,
-        available="100", exposure="0", positions=0, open_orders=0, unrealized="0"
+        available="100", exposure="0", positions=0, open_orders=0, unrealized="0",
+        include_unrealized=True, position_assets_raw=None
     ):
         captured = datetime.now(timezone.utc) - timedelta(seconds=age_seconds)
         return self.journal.save_account_risk_snapshot({
@@ -55,9 +56,11 @@ class OrderStagingTests(unittest.TestCase):
             "current_open_exposure_usd": exposure,
             "current_open_positions": positions,
             "current_open_orders": open_orders,
-            "open_position_assets_by_condition": position_assets or {},
+            "open_position_assets_by_condition": (
+                position_assets_raw if position_assets_raw is not None else (position_assets or {})
+            ),
             "open_order_assets_by_condition": order_assets or {},
-            "open_unrealized_pnl_usd": unrealized,
+            **({"open_unrealized_pnl_usd": unrealized} if include_unrealized else {}),
             "execution": "none",
         })
 
@@ -161,6 +164,21 @@ class OrderStagingTests(unittest.TestCase):
         result = self.stage()
         self.assertEqual(result["status"], "blocked")
         self.assertIn("max_open_positions_reached", result["blockers"])
+        self.assertIsNone(self.journal.get_intent("staged-order-001"))
+
+
+    def test_malformed_snapshot_schema_blocks_staging(self):
+        self.save_snapshot(include_unrealized=False)
+        result = self.stage()
+        self.assertEqual(result["status"], "blocked")
+        self.assertIn("invalid_preflight_context", result["blockers"])
+        self.assertIsNone(self.journal.get_intent("staged-order-001"))
+
+    def test_malformed_condition_asset_list_blocks_staging(self):
+        self.save_snapshot(position_assets_raw={"condition-123": "not-a-list"})
+        result = self.stage()
+        self.assertEqual(result["status"], "blocked")
+        self.assertIn("invalid_preflight_context", result["blockers"])
         self.assertIsNone(self.journal.get_intent("staged-order-001"))
 
     def test_missing_market_condition_id_blocks_staging(self):

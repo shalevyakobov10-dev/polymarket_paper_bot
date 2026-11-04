@@ -202,7 +202,17 @@ def stage_buy_order_intent(
     intent["market_condition_id"] = market_condition_id.strip()
     intent["account_risk_snapshot_id"] = account_snapshot["snapshot_id"]
     intent["account_risk_snapshot_captured_at_utc"] = account_snapshot["captured_at_utc"]
-    saved = journal.create_intent(intent)
+    try:
+        saved = journal.create_intent(intent)
+    except (TypeError, ValueError) as exc:
+        return {
+            "status": "blocked",
+            "blockers": ["existing_intent_conflict", str(exc)[:180]],
+            "intent_created": False,
+            "order_submission_allowed": False,
+            "order_signing_allowed": False,
+            "execution": "none",
+        }
     created_now = existing_before is None
     return {
         "status": "prepared_not_authorized" if saved["status"] == "prepared"

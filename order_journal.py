@@ -235,7 +235,27 @@ class OrderJournal:
         if intent.get("status") != "prepared" or intent.get("submission_attempts") != 0:
             raise ValueError("only a new prepared order intent can be inserted")
         client_order_id = intent["client_order_id"]
+        snapshot_id = intent.get("account_risk_snapshot_id")
+        if snapshot_id is not None and (
+            not isinstance(snapshot_id, str) or not snapshot_id.strip()
+        ):
+            raise ValueError("account_risk_snapshot_id must be a non-empty string")
+
         with self._transaction() as connection:
+            if snapshot_id is not None:
+                latest_snapshot = connection.execute(
+                    """
+                    SELECT snapshot_id
+                    FROM account_risk_snapshots
+                    ORDER BY snapshot_seq DESC
+                    LIMIT 1
+                    """
+                ).fetchone()
+                if latest_snapshot is None or latest_snapshot["snapshot_id"] != snapshot_id:
+                    raise ValueError(
+                        "account risk snapshot changed before intent commit"
+                    )
+
             existing_row = connection.execute(
                 "SELECT state_json FROM order_intents WHERE client_order_id = ?",
                 (client_order_id,),

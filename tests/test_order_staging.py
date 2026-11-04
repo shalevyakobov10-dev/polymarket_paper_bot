@@ -104,6 +104,8 @@ class OrderStagingTests(unittest.TestCase):
         second = self.stage()
         self.assertEqual(first["client_order_id"], second["client_order_id"])
         self.assertEqual(second["intent_status"], "prepared")
+        self.assertFalse(second["intent_created"])
+        self.assertTrue(second["intent_reused"])
         self.assertEqual(len(self.journal.list_events("staged-order-001")), events_before)
 
 

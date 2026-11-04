@@ -8,6 +8,7 @@ preflight values. This module cannot sign, submit, retry, or cancel orders.
 from __future__ import annotations
 
 import math
+from copy import deepcopy
 from collections.abc import Mapping
 from typing import Any
 
@@ -146,6 +147,9 @@ def stage_buy_order_intent(
     except (TypeError, ValueError) as exc:
         return _blocked("invalid_preflight_context", str(exc)[:180])
 
+    # Persist the full market/book/fee/risk/release-gate inputs as audit evidence.
+    # Account-derived inputs were already overwritten from the persisted snapshot.
+    report["preflight_input_evidence"] = deepcopy(context)
     report["account_risk_snapshot"] = {
         "snapshot_id": snapshot_id,
         "captured_at_utc": captured_at,

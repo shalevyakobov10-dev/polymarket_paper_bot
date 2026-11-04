@@ -8,8 +8,10 @@ from polymarket.streams import UserOrderEvent, UserSpec, UserTradeEvent
 
 from user_order_stream import (
     OrderUserEventProcessor,
+    OrderSnapshotIncompleteError,
     UserEventGapError,
     consume_user_order_stream,
+    reconcile_open_orders_snapshot,
 )
 
 
@@ -86,13 +88,29 @@ class FakeHandle:
 
 
 class FakeClient:
-    def __init__(self, handle):
+    def __init__(self, handle, pages=()):
         self.handle = handle
+        self.pages = list(pages)
         self.spec = None
 
     async def subscribe(self, spec):
         self.spec = spec
         return self.handle
+
+    def list_open_orders(self):
+        return FakePaginator(self.pages)
+
+
+
+class FakePaginator:
+    def __init__(self, pages=()):
+        self.pages = list(pages)
+
+    def __aiter__(self):
+        async def iterate():
+            for page in self.pages:
+                yield page
+        return iterate()
 
 
 class UserOrderStreamTests(unittest.TestCase):
@@ -202,7 +220,7 @@ class UserOrderStreamTests(unittest.TestCase):
         import asyncio
 
         result = asyncio.run(
-            consume_user_order_stream(client, self.journal, max_events=2)
+            consume_user_order_stream(client, self.journal, max_events=2, initial_snapshot=False)
         )
         self.assertIsInstance(client.spec, UserSpec)
         self.assertEqual(client.spec.topic, "user")
@@ -217,9 +235,73 @@ class UserOrderStreamTests(unittest.TestCase):
         handle = FakeHandle([order_event()], drop_after_first=True)
         client = FakeClient(handle)
         with self.assertRaises(UserEventGapError):
-            asyncio.run(consume_user_order_stream(client, self.journal))
+            asyncio.run(consume_user_order_stream(client, self.journal, initial_snapshot=False))
         self.assertTrue(handle.closed)
         self.assertEqual(self.journal.get_intent("local-123")["filled_size"], "0")
+
+
+    def test_rest_open_order_snapshot_refreshes_cumulative_fills(self):
+        open_order = SimpleNamespace(
+            id="venue-123",
+            asset_id="token-456",
+            side="BUY",
+            original_size="12",
+            size_matched="5",
+            price="0.37",
+            status="LIVE",
+        )
+        page = SimpleNamespace(items=(open_order,), limit_reached=False, has_more=False)
+        import asyncio
+
+        result = asyncio.run(
+            reconcile_open_orders_snapshot(FakeClient(FakeHandle(), [page]), self.journal)
+        )
+        self.assertTrue(result["snapshot_complete"])
+        self.assertEqual(result["updated"], 1)
+        self.assertEqual(result["unresolved_missing_orders"], [])
+        self.assertEqual(self.journal.get_intent("local-123")["filled_size"], "5")
+
+    def test_missing_order_in_open_snapshot_is_reported_but_not_inferred_cancelled(self):
+        page = SimpleNamespace(items=(), limit_reached=False, has_more=False)
+        import asyncio
+
+        result = asyncio.run(
+            reconcile_open_orders_snapshot(FakeClient(FakeHandle(), [page]), self.journal)
+        )
+        self.assertEqual(result["status"], "snapshot_has_unresolved_absences")
+        self.assertEqual(len(result["unresolved_missing_orders"]), 1)
+        self.assertEqual(result["unresolved_missing_orders"][0]["status"], "open")
+        self.assertEqual(self.journal.get_intent("local-123")["status"], "open")
+
+    def test_truncated_rest_snapshot_is_not_reported_as_complete(self):
+        page = SimpleNamespace(items=(), limit_reached=True, has_more=True)
+        import asyncio
+
+        with self.assertRaises(OrderSnapshotIncompleteError):
+            asyncio.run(
+                reconcile_open_orders_snapshot(FakeClient(FakeHandle(), [page]), self.journal)
+            )
+
+    def test_consumer_runs_rest_snapshot_after_subscribing(self):
+        open_order = SimpleNamespace(
+            id="venue-123",
+            asset_id="token-456",
+            side="BUY",
+            original_size="12",
+            size_matched="2",
+            price="0.37",
+            status="LIVE",
+        )
+        page = SimpleNamespace(items=(open_order,), limit_reached=False, has_more=False)
+        handle = FakeHandle([order_event(size_matched="2")])
+        client = FakeClient(handle, [page])
+        import asyncio
+
+        result = asyncio.run(consume_user_order_stream(client, self.journal, max_events=1))
+        self.assertEqual(result["initial_open_orders_snapshot"]["updated"], 1)
+        self.assertEqual(result["duplicate"], 1)
+        self.assertEqual(self.journal.get_intent("local-123")["filled_size"], "2")
+        self.assertTrue(handle.closed)
 
     def test_consumer_rejects_nonpositive_max_events(self):
         import asyncio
@@ -227,7 +309,7 @@ class UserOrderStreamTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "positive integer"):
             asyncio.run(
                 consume_user_order_stream(
-                    FakeClient(FakeHandle()), self.journal, max_events=0
+                    FakeClient(FakeHandle()), self.journal, max_events=0, initial_snapshot=False
                 )
             )
 

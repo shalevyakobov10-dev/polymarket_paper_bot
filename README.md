@@ -293,3 +293,10 @@ The original positive-move fields remain as backward-compatible aliases. This is
 Each expanding walk-forward test fold now includes its own `directional_forward_return_study` for positive price moves (momentum) and negative price moves (contrarian long). The first test observation is compared with the last observation available for that token in the fold's training history; only in-window future observations are used to score returns. This prevents the first test point from losing its prior context without importing a future value.
 
 Fold-level studies remain descriptive and do not change the fixed paper strategy. Counts and returns are shown per fold rather than being used to promote or tune a direction. The event observations may be correlated, and small counts do not establish an edge.
+
+
+## Event-sample concentration diagnostics
+
+Each directional forward-return event study now reports how many unique outcome tokens and market IDs contributed to the scored observations, market-ID coverage, the share of events contributed by the most active token and top three tokens, and a market-equal-weighted mean return when market IDs are available. This helps reveal when a seemingly large event count is concentrated in one token or market. These are descriptive clustering diagnostics, not a statistical independence test; repeated events can remain correlated even across different IDs.
+
+The scheduled/manual historical backtest workflow is also serialized with a shared concurrency group. A newer historical run cancels an older in-progress run so multiple expensive public-data backtests do not overlap unnecessarily.

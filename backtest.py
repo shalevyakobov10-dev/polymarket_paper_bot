@@ -191,7 +191,11 @@ def evaluate_forward_returns(
         price = number(row.get("observed_price"))
         timestamp = number(row.get("timestamp"))
         if token_id and price is not None and 0 < price < 1 and timestamp is not None:
-            by_token[token_id].append({"timestamp": int(timestamp), "price": price})
+            by_token[token_id].append({
+                "timestamp": int(timestamp),
+                "price": price,
+                "market_id": str(row.get("market_id") or "").strip(),
+            })
     for token_rows in by_token.values():
         token_rows.sort(key=lambda row: row["timestamp"])
 
@@ -201,6 +205,8 @@ def evaluate_forward_returns(
         positive_returns: list[float] = []
         negative_returns: list[float] = []
         baseline_returns: list[float] = []
+        positive_events: list[tuple[str, str, float]] = []
+        negative_events: list[tuple[str, str, float]] = []
         positive_signals_seen = 0
         negative_signals_seen = 0
 
@@ -230,10 +236,16 @@ def evaluate_forward_returns(
                         positive_signals_seen += 1
                         if future_return is not None:
                             positive_returns.append(future_return)
+                            positive_events.append((
+                                token_id, str(row.get("market_id") or ""), future_return
+                            ))
                     elif price_delta <= -threshold:
                         negative_signals_seen += 1
                         if future_return is not None:
                             negative_returns.append(future_return)
+                            negative_events.append((
+                                token_id, str(row.get("market_id") or ""), future_return
+                            ))
                 previous_price = current_price
 
         def summarize(values: list[float]) -> dict[str, Any]:
@@ -257,6 +269,52 @@ def evaluate_forward_returns(
                 "median_return_pct": round(100 * median, 5),
                 "positive_rate_pct": round(
                     100 * sum(1 for value in values if value > 0) / len(values), 3
+                ),
+            }
+
+        def summarize_event_concentration(
+            events: list[tuple[str, str, float]],
+        ) -> dict[str, Any]:
+            token_counts: dict[str, int] = {}
+            market_returns: dict[str, list[float]] = {}
+            market_id_events = 0
+            for token_id, market_id, future_return in events:
+                token_counts[token_id] = token_counts.get(token_id, 0) + 1
+                if market_id:
+                    market_id_events += 1
+                    market_returns.setdefault(market_id, []).append(future_return)
+
+            event_count = len(events)
+            token_counts_sorted = sorted(token_counts.values(), reverse=True)
+            market_means = [
+                sum(values) / len(values)
+                for values in market_returns.values()
+                if values
+            ]
+            return {
+                "return_observations": event_count,
+                "unique_tokens": len(token_counts),
+                "unique_markets_with_market_id": len(market_returns),
+                "market_id_coverage_pct": (
+                    round(100.0 * market_id_events / event_count, 3)
+                    if event_count else None
+                ),
+                "max_events_from_one_token": token_counts_sorted[0] if token_counts_sorted else 0,
+                "top_token_event_share_pct": (
+                    round(100.0 * token_counts_sorted[0] / event_count, 3)
+                    if event_count else None
+                ),
+                "top_three_tokens_event_share_pct": (
+                    round(100.0 * sum(token_counts_sorted[:3]) / event_count, 3)
+                    if event_count else None
+                ),
+                "market_equal_weight_mean_return_pct": (
+                    round(100.0 * sum(market_means) / len(market_means), 5)
+                    if market_means else None
+                ),
+                "interpretation": (
+                    "Descriptive concentration only; repeated events from a token or market "
+                    "may be correlated and are not independent samples."
                 ),
             }
 
@@ -289,6 +347,12 @@ def evaluate_forward_returns(
             "negative_move_long_forward_returns": negative_summary,
             "negative_move_long_minus_baseline_mean_return_pct": excess_mean(
                 negative_summary, baseline_summary
+            ),
+            "positive_move_return_sample_concentration": summarize_event_concentration(
+                positive_events
+            ),
+            "negative_move_return_sample_concentration": summarize_event_concentration(
+                negative_events
             ),
             "all_observation_baseline": baseline_summary,
         }

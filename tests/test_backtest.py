@@ -104,6 +104,51 @@ class BacktestTests(unittest.TestCase):
         self.assertGreater(stats["all_observation_baseline"]["n"], 0)
         self.assertIsNotNone(stats["signal_minus_baseline_mean_return_pct"])
 
+    def test_forward_return_concentration_reports_token_and_market_clustering(self):
+        history = []
+        token_prices = {
+            "token-a": ("market-a", [0.50, 0.56, 0.50, 0.56, 0.50]),
+            "token-b": ("market-b", [0.50, 0.54, 0.60]),
+        }
+        for token_id, (market_id, prices) in token_prices.items():
+            history.extend([
+                {
+                    "timestamp": 1_800_000_000 + index * 3600,
+                    "token_id": token_id,
+                    "market_id": market_id,
+                    "observed_price": price,
+                }
+                for index, price in enumerate(prices)
+            ])
+        stats = evaluate_forward_returns(
+            history, threshold=0.03, horizons_hours=(1,)
+        )["horizons"]["1h"]
+        concentration = stats["positive_move_return_sample_concentration"]
+        self.assertEqual(concentration["return_observations"], 3)
+        self.assertEqual(concentration["unique_tokens"], 2)
+        self.assertEqual(concentration["unique_markets_with_market_id"], 2)
+        self.assertEqual(concentration["market_id_coverage_pct"], 100.0)
+        self.assertEqual(concentration["max_events_from_one_token"], 2)
+        self.assertAlmostEqual(concentration["top_token_event_share_pct"], 66.667)
+        self.assertAlmostEqual(concentration["top_three_tokens_event_share_pct"], 100.0)
+        self.assertIsNotNone(concentration["market_equal_weight_mean_return_pct"])
+        self.assertIn("not independent samples", concentration["interpretation"])
+
+    def test_forward_return_concentration_marks_missing_market_identity(self):
+        history = [
+            {"timestamp": 1_800_000_000 + index * 3600,
+             "token_id": "token-a", "observed_price": price}
+            for index, price in enumerate([0.50, 0.56, 0.50])
+        ]
+        stats = evaluate_forward_returns(
+            history, threshold=0.03, horizons_hours=(1,)
+        )["horizons"]["1h"]
+        concentration = stats["positive_move_return_sample_concentration"]
+        self.assertEqual(concentration["unique_tokens"], 1)
+        self.assertEqual(concentration["unique_markets_with_market_id"], 0)
+        self.assertEqual(concentration["market_id_coverage_pct"], 0.0)
+        self.assertIsNone(concentration["market_equal_weight_mean_return_pct"])
+
     def test_forward_returns_reports_both_momentum_and_contrarian_long_directions(self):
         prices = [0.50, 0.56, 0.50, 0.56, 0.50, 0.48, 0.52]
         history = [

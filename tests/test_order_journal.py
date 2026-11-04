@@ -202,6 +202,41 @@ class OrderJournalTests(unittest.TestCase):
         self.assertEqual(self.journal.get_intent("journal-order-001"), before)
 
 
+
+    def test_create_intent_with_status_reports_atomic_created_flag(self):
+        intent = new_intent()
+        saved, created = self.journal.create_intent_with_status(intent)
+        self.assertTrue(created)
+        self.assertEqual(saved, intent)
+        replay, replay_created = self.journal.create_intent_with_status(intent)
+        self.assertFalse(replay_created)
+        self.assertEqual(replay, saved)
+        self.assertEqual(len(self.journal.list_events("journal-order-001")), 1)
+
+    def test_concurrent_identical_intent_creation_has_one_creator(self):
+        barrier = threading.Barrier(2)
+        results = []
+        errors = []
+
+        def worker():
+            barrier.wait()
+            try:
+                results.append(self.journal.create_intent_with_status(new_intent()))
+            except Exception as exc:
+                errors.append(exc)
+
+        workers = [threading.Thread(target=worker) for _ in range(2)]
+        for worker_thread in workers:
+            worker_thread.start()
+        for worker_thread in workers:
+            worker_thread.join(timeout=10)
+
+        self.assertTrue(all(not worker_thread.is_alive() for worker_thread in workers))
+        self.assertEqual(errors, [])
+        self.assertEqual(sum(1 for _state, created in results if created), 1)
+        self.assertEqual(sum(1 for _state, created in results if not created), 1)
+        self.assertEqual(len(self.journal.list_events("journal-order-001")), 1)
+
     def test_exchange_order_id_index_survives_restart(self):
         self.journal.create_intent(new_intent())
         self.journal.begin_submission("journal-order-001")

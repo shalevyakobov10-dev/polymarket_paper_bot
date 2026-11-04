@@ -137,14 +137,23 @@ def write_supervisor_status(path: str | Path, payload: dict[str, Any]) -> None:
                 pass
 
 
-def read_supervisor_status(path: str | Path) -> dict[str, Any]:
-    """Return an allowlisted status view; never reflect arbitrary file keys."""
+def read_supervisor_status(
+    path: str | Path,
+    *,
+    now: datetime | None = None,
+    stale_after_seconds: float = 45.0,
+) -> dict[str, Any]:
+    """Return an allowlisted status view plus heartbeat freshness; never reflect arbitrary file keys."""
     target = Path(path).expanduser()
     try:
         raw = json.loads(target.read_text(encoding="utf-8"))
-        if not isinstance(raw, dict) or raw.get("schema_version") != STATUS_SCHEMA_VERSION:
+        if (
+            not isinstance(raw, dict)
+            or isinstance(raw.get("schema_version"), bool)
+            or raw.get("schema_version") != STATUS_SCHEMA_VERSION
+        ):
             raise ValueError("unsupported supervisor status schema")
-        return build_supervisor_status(
+        status = build_supervisor_status(
             service_state=raw.get("service_state"),
             monitor_enabled=raw.get("monitor_enabled"),
             monitor_state=raw.get("monitor_state"),
@@ -154,6 +163,14 @@ def read_supervisor_status(path: str | Path) -> dict[str, Any]:
             next_restart_at=raw.get("monitor_next_restart_at"),
             updated_at=raw.get("updated_at"),
         )
+        current = now or datetime.now(timezone.utc)
+        if current.tzinfo is None or current.utcoffset() is None:
+            raise ValueError("now must be timezone-aware")
+        age = (current.astimezone(timezone.utc) -
+               datetime.fromisoformat(status["updated_at"]).astimezone(timezone.utc)).total_seconds()
+        status["status_age_seconds"] = round(max(0.0, age), 1) if age >= -5 else None
+        status["status_fresh"] = -5 <= age <= stale_after_seconds
+        return status
     except FileNotFoundError:
         return {
             "schema_version": STATUS_SCHEMA_VERSION,
@@ -166,10 +183,12 @@ def read_supervisor_status(path: str | Path) -> dict[str, Any]:
             "app_exit_code": None,
             "monitor_next_restart_at": None,
             "updated_at": None,
+            "status_age_seconds": None,
+            "status_fresh": False,
             "execution": "none",
             "status_error": "status_file_missing",
         }
-    except (OSError, TypeError, ValueError, json.JSONDecodeError):
+    except (OSError, UnicodeError, TypeError, ValueError, json.JSONDecodeError):
         return {
             "schema_version": STATUS_SCHEMA_VERSION,
             "supervised": False,
@@ -180,6 +199,8 @@ def read_supervisor_status(path: str | Path) -> dict[str, Any]:
             "monitor_last_exit_code": None,
             "monitor_next_restart_at": None,
             "updated_at": None,
+            "status_age_seconds": None,
+            "status_fresh": False,
             "execution": "none",
             "status_error": "status_file_invalid",
         }

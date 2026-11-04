@@ -82,14 +82,18 @@ def classify_news_freshness(
     stale_after_hours: float = MATCH_STALE_AFTER_HOURS,
 ) -> dict[str, Any]:
     """Label the publication-time age of a headline without discarding old context."""
-    if not math.isfinite(float(stale_after_hours)) or stale_after_hours <= 0:
+    try:
+        threshold_hours = float(stale_after_hours)
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise ValueError("stale_after_hours must be finite and positive") from exc
+    if not math.isfinite(threshold_hours) or threshold_hours <= 0:
         raise ValueError("stale_after_hours must be finite and positive")
     current = now or datetime.now(timezone.utc)
     if current.tzinfo is None:
         current = current.replace(tzinfo=timezone.utc)
     current = current.astimezone(timezone.utc)
     published = _parse_news_timestamp(news_item.get("published_at"))
-    threshold = float(stale_after_hours) * 3600.0
+    threshold = threshold_hours * 3600.0
     if published is None:
         return {
             "news_freshness_status": "unknown_timestamp",
@@ -135,10 +139,18 @@ def summarize_match_freshness(matches: list[dict[str, Any]]) -> dict[str, Any]:
             and float(age) >= 0
         ):
             ages.append(float(age))
+    ordered_ages = sorted(ages)
+    if not ordered_ages:
+        median_age = None
+    elif len(ordered_ages) % 2:
+        median_age = ordered_ages[len(ordered_ages) // 2]
+    else:
+        middle = len(ordered_ages) // 2
+        median_age = (ordered_ages[middle - 1] + ordered_ages[middle]) / 2.0
     return {
         "candidate_count": len(matches),
         "counts_by_status": counts,
-        "median_age_seconds": round(sorted(ages)[len(ages) // 2], 1) if ages else None,
+        "median_age_seconds": round(median_age, 1) if median_age is not None else None,
         "oldest_known_age_seconds": round(max(ages), 1) if ages else None,
         "stale_after_hours": MATCH_STALE_AFTER_HOURS,
         "interpretation": "publication_timestamp_age_only_not_event_freshness_or_signal",

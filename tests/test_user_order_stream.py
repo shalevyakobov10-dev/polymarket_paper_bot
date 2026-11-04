@@ -4,6 +4,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from order_journal import OrderJournal
+from polymarket.models import ClobTrade
 from polymarket.streams import UserOrderEvent, UserSpec, UserTradeEvent
 
 from user_order_stream import (
@@ -63,6 +64,53 @@ def trade_event():
     })
 
 
+
+def clob_trade(
+    *,
+    trade_id="trade-001",
+    taker_order_id="different-taker-order",
+    size="3",
+    status="MINED",
+    asset_id="token-456",
+    side="BUY",
+    maker_orders=None,
+):
+    return ClobTrade.model_validate({
+        "asset_id": asset_id,
+        "bucket_index": 1,
+        "fee_rate_bps": "10",
+        "id": trade_id,
+        "last_update": 1700000010000,
+        "maker_address": "0xMAKER",
+        "maker_orders": maker_orders or [],
+        "market": "0xMARKET",
+        "match_time": 1700000000000,
+        "outcome": "Yes",
+        "owner": "0xOWNER",
+        "price": "0.37",
+        "side": side,
+        "size": size,
+        "status": status,
+        "taker_order_id": taker_order_id,
+        "trader_side": "TAKER",
+        "transaction_hash": "0xTX",
+    })
+
+
+def maker_order(order_id, *, amount="3", asset_id="token-456", side="BUY"):
+    return {
+        "asset_id": asset_id,
+        "fee_rate_bps": "10",
+        "maker_address": "0xMAKER",
+        "matched_amount": amount,
+        "order_id": order_id,
+        "outcome": "Yes",
+        "owner": "0xOWNER",
+        "price": "0.37",
+        "side": side,
+    }
+
+
 class FakeHandle:
     def __init__(self, events=(), *, dropped=0, drop_after_first=False):
         self.events = list(events)
@@ -101,9 +149,10 @@ class DelayedFakeHandle(FakeHandle):
 
 
 class FakeClient:
-    def __init__(self, handle, pages=()):
+    def __init__(self, handle, pages=(), trade_pages_by_asset=None):
         self.handle = handle
         self.pages = list(pages)
+        self.trade_pages_by_asset = trade_pages_by_asset or {}
         self.spec = None
 
     async def subscribe(self, spec):
@@ -112,6 +161,9 @@ class FakeClient:
 
     def list_open_orders(self):
         return FakePaginator(self.pages)
+
+    def list_account_trades(self, *, asset_id):
+        return FakePaginator(self.trade_pages_by_asset.get(asset_id, ()))
 
 
 
@@ -285,6 +337,123 @@ class UserOrderStreamTests(unittest.TestCase):
         self.assertEqual(len(result["unresolved_missing_orders"]), 1)
         self.assertEqual(result["unresolved_missing_orders"][0]["status"], "open")
         self.assertEqual(self.journal.get_intent("local-123")["status"], "open")
+
+
+    def test_missing_fully_filled_order_is_reconciled_from_taker_trade_history(self):
+        trade = clob_trade(
+            trade_id="trade-full-001",
+            taker_order_id="venue-123",
+            size="12",
+            status="CONFIRMED",
+        )
+        page = SimpleNamespace(items=(trade,), limit_reached=False, has_more=False)
+        result = __import__("asyncio").run(
+            reconcile_open_orders_snapshot(
+                FakeClient(FakeHandle(), [SimpleNamespace(items=(), limit_reached=False, has_more=False)],
+                           {"token-456": [page]}),
+                self.journal,
+            )
+        )
+        state = self.journal.get_intent("local-123")
+        self.assertEqual(state["status"], "filled")
+        self.assertEqual(state["filled_size"], "12")
+        self.assertEqual(state["last_reason_code"], "reconciled_from_account_trade_history")
+        self.assertEqual(result["unresolved_missing_orders"], [])
+        self.assertEqual(result["trade_records_inspected"], 1)
+
+    def test_missing_partially_filled_order_stays_unresolved_after_maker_trade_history(self):
+        trade = clob_trade(
+            trade_id="trade-maker-001",
+            size="3",
+            maker_orders=[maker_order("venue-123", amount="3")],
+        )
+        page = SimpleNamespace(items=(trade,), limit_reached=False, has_more=False)
+        import asyncio
+
+        result = asyncio.run(
+            reconcile_open_orders_snapshot(
+                FakeClient(FakeHandle(), [SimpleNamespace(items=(), limit_reached=False, has_more=False)],
+                           {"token-456": [page]}),
+                self.journal,
+            )
+        )
+        state = self.journal.get_intent("local-123")
+        self.assertEqual(state["status"], "partially_filled")
+        self.assertEqual(state["filled_size"], "3")
+        self.assertEqual(state["last_reason_code"], "partial_fill_from_account_trade_history")
+        self.assertEqual(len(result["unresolved_missing_orders"]), 1)
+        self.assertFalse(result["unresolved_missing_orders"][0]["terminal_status_confirmed"])
+        self.assertEqual(
+            result["unresolved_missing_orders"][0]["trade_history_result"],
+            "partial_fill_confirmed_terminal_unknown",
+        )
+
+    def test_failed_trade_is_not_counted_as_a_fill(self):
+        trade = clob_trade(
+            trade_id="trade-failed-001",
+            taker_order_id="venue-123",
+            size="12",
+            status="FAILED",
+        )
+        page = SimpleNamespace(items=(trade,), limit_reached=False, has_more=False)
+        import asyncio
+
+        result = asyncio.run(
+            reconcile_open_orders_snapshot(
+                FakeClient(FakeHandle(), [SimpleNamespace(items=(), limit_reached=False, has_more=False)],
+                           {"token-456": [page]}),
+                self.journal,
+            )
+        )
+        self.assertEqual(self.journal.get_intent("local-123")["status"], "open")
+        self.assertEqual(self.journal.get_intent("local-123")["filled_size"], "0")
+        self.assertEqual(
+            result["unresolved_missing_orders"][0]["trade_history_result"],
+            "terminal_status_unconfirmed",
+        )
+
+    def test_trade_history_asset_or_side_conflict_requires_manual_review(self):
+        trade = clob_trade(
+            trade_id="trade-conflict-001",
+            taker_order_id="venue-123",
+            size="2",
+            asset_id="different-token",
+            side="SELL",
+        )
+        page = SimpleNamespace(items=(trade,), limit_reached=False, has_more=False)
+        import asyncio
+
+        result = asyncio.run(
+            reconcile_open_orders_snapshot(
+                FakeClient(FakeHandle(), [SimpleNamespace(items=(), limit_reached=False, has_more=False)],
+                           {"token-456": [page]}),
+                self.journal,
+            )
+        )
+        state = self.journal.get_intent("local-123")
+        self.assertEqual(state["status"], "manual_review")
+        self.assertEqual(state["last_reason_code"], "order_terms_mismatch")
+        self.assertEqual(state["last_mismatch_fields"], ["token_id", "side"])
+        self.assertEqual(result["unresolved_missing_orders"], [])
+
+    def test_incomplete_account_trade_pagination_does_not_mutate_missing_order(self):
+        trade = clob_trade(
+            trade_id="trade-full-002", taker_order_id="venue-123", size="12"
+        )
+        page = SimpleNamespace(items=(trade,), limit_reached=True, has_more=True)
+        import asyncio
+
+        with self.assertRaises(OrderSnapshotIncompleteError):
+            asyncio.run(
+                reconcile_open_orders_snapshot(
+                    FakeClient(FakeHandle(), [SimpleNamespace(items=(), limit_reached=False, has_more=False)],
+                               {"token-456": [page]}),
+                    self.journal,
+                )
+            )
+        state = self.journal.get_intent("local-123")
+        self.assertEqual(state["status"], "open")
+        self.assertEqual(state["filled_size"], "0")
 
     def test_truncated_rest_snapshot_is_not_reported_as_complete(self):
         page = SimpleNamespace(items=(), limit_reached=True, has_more=True)

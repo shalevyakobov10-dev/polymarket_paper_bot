@@ -14,23 +14,25 @@ A Python research service that polls public Polymarket Gamma market data, record
 
 ## Read-only account order monitor
 
-Run this as a separate supervised process only when you intend to monitor the authenticated account:
+The Docker image runs `service_supervisor.py` as PID 1. To opt in to account monitoring in the same persistent container, set `ENABLE_USER_ORDER_MONITOR=true` and provide `POLYMARKET_PRIVATE_KEY` through the deployment secret manager/runtime environment. The supervisor starts `app.py` without account secrets and starts `user_order_stream.py` with the secret only in its process environment. The monitor is disabled by default; the Railway IaC sets `ENABLE_USER_ORDER_MONITOR=false` explicitly.
+
+For local isolated monitoring, it can still be run directly:
 
 ```bash
 python user_order_stream.py
 ```
 
-Provide `POLYMARKET_PRIVATE_KEY` through your deployment secret manager/environment, and optionally `POLYMARKET_DEPOSIT_WALLET`. Do not put credentials in source files, committed `.env` files, command-line arguments, or chat. The SQLite journal defaults to `DATA_DIR/order_journal.sqlite3`; set `ORDER_JOURNAL_DB` to choose an explicit persistent path. Set `USER_ORDER_SNAPSHOT_INTERVAL_SECONDS` or pass `--snapshot-interval-seconds` to change the periodic REST refresh. The monitor subscribes to user events and reads open-order snapshots only. It does not place, sign, or cancel orders. A detected queue gap exits nonzero so a process supervisor can restart it; unresolved missing orders still require historical trade/terminal-state reconciliation.
+Do not put credentials in source files, committed `.env` files, command-line arguments, or chat. The SQLite journal defaults to `DATA_DIR/order_journal.sqlite3`; set `ORDER_JOURNAL_DB` to choose an explicit persistent path. Set `USER_ORDER_SNAPSHOT_INTERVAL_SECONDS` or pass `--snapshot-interval-seconds` to change the periodic REST refresh. The monitor subscribes to user events and reads open-order snapshots only. It does not place, sign, or cancel orders. A detected queue gap exits nonzero; the supervisor restarts the monitor with bounded exponential backoff so its startup snapshot and trade-history reconciliation can recover missed updates.
 
 ## Run locally
 
 Requires Python 3.12+.
 
 ```bash
-python app.py
+python service_supervisor.py
 ```
 
-The Docker image uses `service_supervisor.py` as PID 1. It always runs the HTTP research worker and keeps the authenticated account monitor disabled by default. To supervise the read-only account monitor in a single persistent container, set `ENABLE_USER_ORDER_MONITOR=true` and provide `POLYMARKET_PRIVATE_KEY` through the cloud secret manager/runtime environment. The supervisor refuses that mode without the secret, never places credentials in command-line arguments or logs, and restarts a disconnected monitor with bounded backoff. If the HTTP worker exits, the container exits for platform restart. Keep one replica when using the SQLite journal and its persistent volume; do not mount the same SQLite file into multiple independent containers.
+Run `python app.py` directly only when debugging the HTTP worker without process supervision. The Docker image uses `service_supervisor.py` as PID 1. It always runs the HTTP research worker and keeps the authenticated account monitor disabled by default. To supervise the read-only account monitor in a single persistent container, set `ENABLE_USER_ORDER_MONITOR=true` and provide `POLYMARKET_PRIVATE_KEY` through the cloud secret manager/runtime environment. The supervisor refuses that mode without the secret, never places credentials in command-line arguments or logs, and restarts a disconnected monitor with bounded backoff. If the HTTP worker exits, the container exits for platform restart. Keep one replica when using the SQLite journal and its persistent volume; do not mount the same SQLite file into multiple independent containers.
 
 The service listens on port 8080 by default. Routes:
 - `/` and `/status`: current worker status

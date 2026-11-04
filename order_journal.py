@@ -279,7 +279,7 @@ class OrderJournal:
                     """
                     SELECT snapshot_id
                     FROM account_risk_snapshots
-                    ORDER BY snapshot_seq DESC
+                    ORDER BY captured_at_utc DESC, snapshot_seq DESC
                     LIMIT 1
                     """
                 ).fetchone()
@@ -641,7 +641,7 @@ class OrderJournal:
                 """
                 SELECT snapshot_id, captured_at_utc, snapshot_json
                 FROM account_risk_snapshots
-                ORDER BY snapshot_seq DESC
+                ORDER BY captured_at_utc DESC, snapshot_seq DESC
                 LIMIT 1
                 """
             ).fetchone()

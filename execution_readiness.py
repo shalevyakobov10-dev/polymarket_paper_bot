@@ -20,8 +20,8 @@ def execution_readiness_payload() -> dict[str, Any]:
             "detail": "There is no wallet signer, authenticated CLOB client, or order-submission adapter.",
         },
         {
-            "code": "account_eligibility_not_verified",
-            "detail": "The account operator's age and platform eligibility have not been independently verified.",
+            "code": "platform_account_eligibility_not_verified",
+            "detail": "The account's current platform eligibility and compliance with Polymarket's applicable account rules have not been independently verified.",
         },
         {
             "code": "jurisdiction_and_legal_review_not_verified",
@@ -46,7 +46,7 @@ def execution_readiness_payload() -> dict[str, Any]:
         "kill_switch": "engaged",
         "blockers": blockers,
         "requirements_before_any_separate_live_launch_review": [
-            "Verify the account operator meets Polymarket's current age and account-eligibility requirements.",
+            "Independently verify the account meets Polymarket's current account, identity, and platform eligibility requirements.",
             "Obtain qualified review of applicable local law and confirm current platform geographic eligibility.",
             "Validate a strategy on sufficiently large, chronological out-of-sample data after realistic fees, spread, slippage, and partial fills.",
             "Complete independent security review of wallet custody, key isolation, authentication, and secrets handling.",

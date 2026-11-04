@@ -14,7 +14,6 @@ from typing import Any, Callable, Iterator
 
 from order_lifecycle import (
     begin_submission as transition_begin_submission,
-    create_order_intent,
     reconcile_submission as transition_reconcile_submission,
     record_submission_response as transition_record_submission_response,
     submission_policy,
@@ -190,11 +189,14 @@ class OrderJournal:
             return intent.copy()
 
     def get_intent(self, client_order_id: str) -> dict[str, Any] | None:
-        with self._connect() as connection:
+        connection = self._connect()
+        try:
             row = connection.execute(
                 "SELECT state_json FROM order_intents WHERE client_order_id = ?",
                 (client_order_id,),
             ).fetchone()
+        finally:
+            connection.close()
         if row is None:
             return None
         try:
@@ -303,7 +305,8 @@ class OrderJournal:
         return recovered
 
     def list_events(self, client_order_id: str) -> list[dict[str, Any]]:
-        with self._connect() as connection:
+        connection = self._connect()
+        try:
             rows = connection.execute(
                 """
                 SELECT event_id, event_type, state_json, created_at
@@ -313,6 +316,8 @@ class OrderJournal:
                 """,
                 (client_order_id,),
             ).fetchall()
+        finally:
+            connection.close()
         events: list[dict[str, Any]] = []
         for row in rows:
             try:

@@ -199,6 +199,9 @@ def stage_buy_order_intent(
     # Preserve the passing preflight with the initial append-only intent event.
     existing_before = journal.get_intent(client_order_id)
     intent["preflight_report"] = report
+    intent["market_condition_id"] = market_condition_id.strip()
+    intent["account_risk_snapshot_id"] = account_snapshot["snapshot_id"]
+    intent["account_risk_snapshot_captured_at_utc"] = account_snapshot["captured_at_utc"]
     saved = journal.create_intent(intent)
     created_now = existing_before is None
     return {

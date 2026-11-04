@@ -556,7 +556,7 @@ def research_features_payload() -> dict:
         "methodology": {
             "market_price_source": "Gamma outcomePrices; Yes and No joined by market ID",
             "book_source": "public CLOB order-book snapshot for the Yes token",
-            "news_source": "existing lexical news-to-market candidate matches, publication time filtered to 24h",
+            "news_source": "market-corpus-aware news-to-market candidates with normalized publisher identity and publication-time filtering to 24h",
             "news_corroboration_caveat": "unique source labels are not verified independent reporting",
             "prediction": "none; features are descriptive inputs only",
         },

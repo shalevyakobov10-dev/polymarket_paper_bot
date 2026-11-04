@@ -100,6 +100,7 @@ def write_supervisor_status(path: str | Path, payload: dict[str, Any]) -> None:
         monitor_state=payload.get("monitor_state"),
         restart_count=payload.get("monitor_restart_count", 0),
         last_exit_code=payload.get("monitor_last_exit_code"),
+        app_exit_code=payload.get("app_exit_code"),
         next_restart_at=payload.get("monitor_next_restart_at"),
         updated_at=payload.get("updated_at"),
     )
@@ -197,6 +198,7 @@ def read_supervisor_status(
             "monitor_state": "unknown",
             "monitor_restart_count": 0,
             "monitor_last_exit_code": None,
+            "app_exit_code": None,
             "monitor_next_restart_at": None,
             "updated_at": None,
             "status_age_seconds": None,

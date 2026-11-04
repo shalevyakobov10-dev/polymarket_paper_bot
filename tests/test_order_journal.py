@@ -269,6 +269,7 @@ class OrderJournalTests(unittest.TestCase):
 
 
     def test_account_risk_sync_state_tracks_success_failure_and_recovery(self):
+        self.assertIsNone(self.journal.get_latest_account_risk_sync_state())
         first_id = self.journal.save_account_risk_snapshot(complete_risk_snapshot())
         first = self.journal.get_latest_account_risk_sync_state(max_age_seconds=60)
         self.assertEqual(first["status"], "success")
@@ -287,6 +288,19 @@ class OrderJournalTests(unittest.TestCase):
         self.assertEqual(recovered["status"], "success")
         self.assertEqual(recovered["snapshot_id"], second_id)
         self.assertTrue(recovered["fresh"])
+
+    def test_successful_sync_state_expires_independently_of_snapshot(self):
+        attempted = datetime.now(timezone.utc)
+        snapshot_id = self.journal.save_account_risk_snapshot(
+            complete_risk_snapshot(captured_at_utc=attempted.isoformat())
+        )
+        stale = self.journal.get_latest_account_risk_sync_state(
+            max_age_seconds=5,
+            now=attempted + __import__("datetime").timedelta(seconds=6),
+        )
+        self.assertEqual(stale["status"], "success")
+        self.assertEqual(stale["snapshot_id"], snapshot_id)
+        self.assertFalse(stale["fresh"])
 
     def test_delayed_older_success_cannot_overwrite_a_newer_failed_sync(self):
         failed_at = datetime.now(timezone.utc)

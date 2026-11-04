@@ -12,6 +12,16 @@ A Python research service that polls public Polymarket Gamma market data, record
 - Backtests and paper results do not guarantee future performance.
 - Never commit passwords, API tokens, private keys, or other secrets.
 
+## Read-only account order monitor
+
+Run this as a separate supervised process only when you intend to monitor the authenticated account:
+
+```bash
+python user_order_stream.py
+```
+
+Provide `POLYMARKET_PRIVATE_KEY` through your deployment secret manager/environment, and optionally `POLYMARKET_DEPOSIT_WALLET`. Do not put credentials in source files, committed `.env` files, command-line arguments, or chat. The SQLite journal defaults to `DATA_DIR/order_journal.sqlite3`; set `ORDER_JOURNAL_DB` to choose an explicit persistent path. The monitor subscribes to user events and reads open-order snapshots only. It does not place, sign, or cancel orders. A detected queue gap exits nonzero so a process supervisor can restart it; unresolved missing orders still require historical trade/terminal-state reconciliation.
+
 ## Run locally
 
 Requires Python 3.12+.

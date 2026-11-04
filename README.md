@@ -300,3 +300,8 @@ Fold-level studies remain descriptive and do not change the fixed paper strategy
 Each directional forward-return event study now reports how many unique outcome tokens and market IDs contributed to the scored observations, market-ID coverage, the share of events contributed by the most active token and top three tokens, and a market-equal-weighted mean return when market IDs are available. This helps reveal when a seemingly large event count is concentrated in one token or market. These are descriptive clustering diagnostics, not a statistical independence test; repeated events can remain correlated even across different IDs.
 
 The scheduled/manual historical backtest workflow is also serialized with a shared concurrency group. A newer historical run cancels an older in-progress run so multiple expensive public-data backtests do not overlap unnecessarily.
+
+
+## Market-cluster uncertainty diagnostics
+
+The directional forward-return event study reports a deterministic 95% percentile-bootstrap interval for the market-equal-weighted mean return when at least 10 distinct market IDs are available. The bootstrap resamples market-level means as clusters rather than treating repeated events in one market as independent observations. Below that minimum, the interval is explicitly marked unavailable. This remains a descriptive research diagnostic: different markets may still share news, time, or macro drivers, and an interval does not establish predictive edge or profitability.

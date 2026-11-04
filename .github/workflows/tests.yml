@@ -101,5 +101,5 @@ jobs:
           assert execution_readiness.get("live_execution_enabled") is False, "live execution must remain disabled"
           assert execution_readiness.get("order_submission_allowed") is False, "live orders must remain blocked"
           assert execution_readiness.get("execution") == "none", "execution-readiness must not submit orders"
-          print("Container smoke check passed: /news, /status, /paper, /matches, /market-stream, /resolutions, /forecast-evaluation, /research-features /independent-model-evaluation and /health returned valid JSON.")
+          print("Container smoke check passed: public research endpoints, /learning, and fail-closed /execution-readiness returned valid JSON.")
           PY

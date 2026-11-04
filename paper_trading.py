@@ -41,6 +41,90 @@ def finite_float(value: Any) -> float | None:
     return parsed if math.isfinite(parsed) else None
 
 
+def summarize_execution_diagnostics(events: Any) -> dict[str, Any]:
+    """Summarize rejected paper-entry diagnostics from the retained event window.
+
+    The source is the bounded recent_events list, not the full append-only event
+    history. Counts therefore describe only the retained window and never imply
+    lifetime totals.
+    """
+    rows = events if isinstance(events, list) else []
+    candidates = [
+        row for row in rows
+        if isinstance(row, dict)
+        and row.get("event_type") == "candidate_signal"
+        and row.get("paper_action") == "skipped"
+    ]
+
+    def increment(target: dict[str, int], key: Any) -> None:
+        label = str(key or "unknown")[:120]
+        target[label] = target.get(label, 0) + 1
+
+    skip_reasons: dict[str, int] = {}
+    quality_reasons: dict[str, int] = {}
+    fill_statuses: dict[str, int] = {}
+    quality_assessments = 0
+    fill_assessments = 0
+    partial_ratios: list[float] = []
+    book_walk_costs: list[float] = []
+    visible_depths: list[float] = []
+    candidates_with_diagnostics = 0
+
+    for candidate in candidates:
+        increment(skip_reasons, candidate.get("skip_reason"))
+        diagnostics = candidate.get("execution_diagnostics")
+        if not isinstance(diagnostics, dict):
+            continue
+        candidates_with_diagnostics += 1
+
+        quality = diagnostics.get("market_quality_assessment")
+        if isinstance(quality, dict):
+            quality_assessments += 1
+            increment(quality_reasons, quality.get("reason"))
+
+        fill = diagnostics.get("entry_fill_assessment")
+        if not isinstance(fill, dict):
+            continue
+        fill_assessments += 1
+        increment(fill_statuses, fill.get("completion_status"))
+
+        ratio = fill.get("fill_ratio")
+        if isinstance(ratio, (int, float)) and not isinstance(ratio, bool) and math.isfinite(float(ratio)):
+            if fill.get("completion_status") == "partial":
+                partial_ratios.append(min(1.0, max(0.0, float(ratio))))
+
+        cost = fill.get("book_walk_cost_bps")
+        if isinstance(cost, (int, float)) and not isinstance(cost, bool) and math.isfinite(float(cost)) and float(cost) >= 0:
+            book_walk_costs.append(float(cost))
+
+        depth = fill.get("visible_depth_usd")
+        if isinstance(depth, (int, float)) and not isinstance(depth, bool) and math.isfinite(float(depth)) and float(depth) >= 0:
+            visible_depths.append(float(depth))
+
+    def mean(values: list[float]) -> float | None:
+        return round(sum(values) / len(values), 6) if values else None
+
+    return {
+        "mode": "PAPER_EXECUTION_DIAGNOSTICS_V1",
+        "window": "last_100_state_events",
+        "events_examined": len(rows),
+        "skipped_candidates": len(candidates),
+        "skipped_candidates_with_diagnostics": candidates_with_diagnostics,
+        "skipped_candidates_without_diagnostics": len(candidates) - candidates_with_diagnostics,
+        "market_quality_assessment_count": quality_assessments,
+        "market_quality_reason_counts": dict(sorted(quality_reasons.items())),
+        "entry_fill_assessment_count": fill_assessments,
+        "entry_fill_completion_counts": dict(sorted(fill_statuses.items())),
+        "partial_entry_fill_count": fill_statuses.get("partial", 0),
+        "mean_partial_entry_fill_ratio": mean(partial_ratios),
+        "mean_rejected_entry_book_walk_cost_bps": mean(book_walk_costs),
+        "mean_rejected_entry_visible_depth_usd": mean(visible_depths),
+        "skip_reason_counts": dict(sorted(skip_reasons.items())),
+        "research_only": True,
+        "execution": "none",
+    }
+
+
 def rotate_jsonl_file(path: Path, max_bytes: int, backups: int) -> None:
     """Rotate an append-only JSONL file before the next record would grow it further."""
     if max_bytes <= 0 or not path.exists() or path.stat().st_size < max_bytes:
@@ -1083,6 +1167,9 @@ class PaperTrader:
                 "new_entries_halted": bool(state.get("circuit_breaker_tripped")),
             }
             state["positions_list"] = positions
+            state["execution_diagnostics"] = summarize_execution_diagnostics(
+                state.get("recent_events", [])
+            )
             # Keep detailed price history out of the public status response.
             state.pop("last_prices", None)
             return state

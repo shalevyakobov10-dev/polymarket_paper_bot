@@ -5,7 +5,12 @@ from unittest.mock import patch
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 
-from paper_trading import PaperConfig, PaperTrader, rotate_jsonl_file
+from paper_trading import (
+    PaperConfig,
+    PaperTrader,
+    rotate_jsonl_file,
+    summarize_execution_diagnostics,
+)
 
 
 class PaperTraderTests(unittest.TestCase):
@@ -28,6 +33,111 @@ class PaperTraderTests(unittest.TestCase):
     def row(price, token="token-1"):
         return {"token_id": token, "market_id": "market-1", "question": "Test?",
                 "outcome": "Yes", "observed_price": price}
+
+    def test_execution_diagnostics_summary_counts_only_retained_skipped_candidates(self):
+        rows = [
+            {
+                "event_type": "candidate_signal",
+                "paper_action": "skipped",
+                "skip_reason": "insufficient_visible_ask_depth",
+                "execution_diagnostics": {
+                    "market_quality_assessment": {
+                        "eligible": True,
+                        "reason": "approved_market_quality",
+                        "execution": "none",
+                    },
+                    "entry_fill_assessment": {
+                        "eligible": False,
+                        "completion_status": "partial",
+                        "fill_ratio": 0.54,
+                        "book_walk_cost_bps": 37.5,
+                        "visible_depth_usd": 1.08,
+                        "execution": "none",
+                    },
+                },
+            },
+            {
+                "event_type": "candidate_signal",
+                "paper_action": "skipped",
+                "skip_reason": "missing_orderbook",
+                "execution_diagnostics": {
+                    "market_quality_assessment": {
+                        "eligible": False,
+                        "reason": "missing_orderbook",
+                        "execution": "none",
+                    },
+                },
+            },
+            {
+                "event_type": "candidate_signal",
+                "paper_action": "opened",
+                "skip_reason": None,
+            },
+            {"event_type": "position_closed"},
+        ]
+        summary = summarize_execution_diagnostics(rows)
+        self.assertEqual(summary["mode"], "PAPER_EXECUTION_DIAGNOSTICS_V1")
+        self.assertEqual(summary["window"], "last_100_state_events")
+        self.assertEqual(summary["events_examined"], 4)
+        self.assertEqual(summary["skipped_candidates"], 2)
+        self.assertEqual(summary["skipped_candidates_with_diagnostics"], 2)
+        self.assertEqual(summary["skipped_candidates_without_diagnostics"], 0)
+        self.assertEqual(summary["market_quality_assessment_count"], 2)
+        self.assertEqual(
+            summary["market_quality_reason_counts"],
+            {"approved_market_quality": 1, "missing_orderbook": 1},
+        )
+        self.assertEqual(summary["entry_fill_assessment_count"], 1)
+        self.assertEqual(summary["entry_fill_completion_counts"], {"partial": 1})
+        self.assertEqual(summary["partial_entry_fill_count"], 1)
+        self.assertAlmostEqual(summary["mean_partial_entry_fill_ratio"], 0.54)
+        self.assertAlmostEqual(summary["mean_rejected_entry_book_walk_cost_bps"], 37.5)
+        self.assertAlmostEqual(summary["mean_rejected_entry_visible_depth_usd"], 1.08)
+        self.assertEqual(
+            summary["skip_reason_counts"],
+            {"insufficient_visible_ask_depth": 1, "missing_orderbook": 1},
+        )
+        self.assertTrue(summary["research_only"])
+        self.assertEqual(summary["execution"], "none")
+
+    def test_execution_diagnostics_summary_marks_missing_details_as_unavailable(self):
+        summary = summarize_execution_diagnostics([
+            {
+                "event_type": "candidate_signal",
+                "paper_action": "skipped",
+                "skip_reason": "max_open_positions_reached",
+            }
+        ])
+        self.assertEqual(summary["skipped_candidates_without_diagnostics"], 1)
+        self.assertEqual(summary["entry_fill_assessment_count"], 0)
+        self.assertIsNone(summary["mean_partial_entry_fill_ratio"])
+        self.assertIsNone(summary["mean_rejected_entry_book_walk_cost_bps"])
+
+    def test_paper_snapshot_exposes_recent_execution_diagnostics(self):
+        self.bot._state["recent_events"] = [
+            {
+                "event_type": "candidate_signal",
+                "paper_action": "skipped",
+                "skip_reason": "missing_orderbook",
+                "execution_diagnostics": {
+                    "market_quality_assessment": {
+                        "eligible": False,
+                        "reason": "missing_orderbook",
+                        "execution": "none",
+                    }
+                },
+            }
+        ]
+        snapshot = self.bot.snapshot()
+        self.assertEqual(
+            snapshot["execution_diagnostics"]["skip_reason_counts"],
+            {"missing_orderbook": 1},
+        )
+        self.assertEqual(
+            snapshot["execution_diagnostics"]["market_quality_reason_counts"],
+            {"missing_orderbook": 1},
+        )
+        self.assertEqual(snapshot["execution_diagnostics"]["execution"], "none")
 
     def test_starting_balance_and_no_signal_on_first_observation(self):
         result = self.bot.process_snapshot([self.row(0.5)], self.now)

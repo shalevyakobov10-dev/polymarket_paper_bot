@@ -272,3 +272,10 @@ Every depth-aware paper fill now reports:
 - `visible_depth_usd` for buys or `visible_depth_shares` for sells, limited to the configured top levels and any supplied price limit.
 
 These are snapshot diagnostics, not measured market impact or a guarantee of an executable fill. They do not model queue priority, hidden liquidity, cancellations, latency, or replenishment. A partial or unfilled result remains ineligible: the paper portfolio still opens/closes only when the full requested size is visible under the current simulation rules.
+
+
+## Paper execution diagnostics summary
+
+The `/paper` response includes an `execution_diagnostics` summary derived from the retained `recent_events` window (up to the most recent 100 state events). It reports skipped candidate counts by reason, market-quality rejection reasons, entry fill completion states, and averages for rejected partial-fill ratios, book-walk cost and visible ask depth when those observations exist.
+
+This is intentionally a bounded recent-window diagnostic, not a lifetime ledger or a strategy-performance metric. Missing assessments remain unreported rather than inferred. Opened positions and unrelated events are excluded from the skipped-candidate counts. All values remain paper/research only; `execution` is always `none`.

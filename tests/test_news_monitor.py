@@ -376,6 +376,7 @@ class NewsMonitorTests(unittest.TestCase):
         self.assertEqual(summary["counts_by_status"]["stale"], 1)
         self.assertEqual(summary["counts_by_status"]["future_timestamp"], 1)
         self.assertEqual(summary["counts_by_status"]["unknown_timestamp"], 1)
+        self.assertEqual(summary["median_age_seconds"], 150060)
         self.assertEqual(summary["oldest_known_age_seconds"], 300000)
         self.assertIn("not_event_freshness_or_signal", summary["interpretation"])
 

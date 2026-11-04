@@ -121,14 +121,17 @@ def stage_buy_order_intent(
         }
 
     # Preserve the passing preflight with the initial append-only intent event.
+    existing_before = journal.get_intent(client_order_id)
     intent["preflight_report"] = report
     saved = journal.create_intent(intent)
+    created_now = existing_before is None
     return {
         "status": "prepared_not_authorized" if saved["status"] == "prepared"
                   else "existing_intent_not_prepared",
-        "intent_created": saved["status"] == "prepared",
+        "intent_created": created_now,
         "client_order_id": saved["client_order_id"],
         "intent_status": saved["status"],
+        "intent_reused": not created_now,
         "submission_attempts": saved["submission_attempts"],
         "preflight_report": report,
         "order_submission_allowed": False,

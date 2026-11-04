@@ -4,6 +4,7 @@ from order_lifecycle import (
     begin_submission,
     create_order_intent,
     reconcile_submission,
+    record_order_observation,
     record_submission_response,
     submission_policy,
 )
@@ -187,6 +188,108 @@ class OrderLifecycleTests(unittest.TestCase):
         inconsistent["status"] = "open"
         with self.assertRaisesRegex(ValueError, "requires exchange_order_id"):
             submission_policy(inconsistent)
+
+
+    def test_cumulative_fill_updates_are_monotonic_and_idempotent(self):
+        pending = begin_submission(intent())
+        opened = record_submission_response(
+            pending, outcome="accepted", exchange_order_id="venue-order-77"
+        )
+        partial = record_order_observation(
+            opened, outcome="partially_filled",
+            matched_client_order_id="local-order-0001",
+            exchange_order_id="venue-order-77", cumulative_filled_size=3,
+        )
+        self.assertEqual(partial["status"], "partially_filled")
+        self.assertEqual(partial["filled_size"], "3")
+        duplicate = record_order_observation(
+            partial, outcome="partially_filled",
+            matched_client_order_id="local-order-0001",
+            exchange_order_id="venue-order-77", cumulative_filled_size=3,
+        )
+        self.assertEqual(duplicate, partial)
+        increased = record_order_observation(
+            duplicate, outcome="partially_filled",
+            matched_client_order_id="local-order-0001",
+            exchange_order_id="venue-order-77", cumulative_filled_size=7,
+        )
+        self.assertEqual(increased["filled_size"], "7")
+        filled = record_order_observation(
+            increased, outcome="filled",
+            matched_client_order_id="local-order-0001",
+            exchange_order_id="venue-order-77", cumulative_filled_size=10,
+        )
+        self.assertEqual(filled["status"], "filled")
+        self.assertEqual(filled["filled_size"], "10")
+
+    def test_stale_lower_cumulative_fill_is_rejected(self):
+        pending = begin_submission(intent())
+        opened = record_submission_response(
+            pending, outcome="accepted", exchange_order_id="venue-order-77"
+        )
+        partial = record_order_observation(
+            opened, outcome="partially_filled",
+            matched_client_order_id="local-order-0001",
+            exchange_order_id="venue-order-77", cumulative_filled_size=4,
+        )
+        with self.assertRaisesRegex(ValueError, "cannot decrease"):
+            record_order_observation(
+                partial, outcome="partially_filled",
+                matched_client_order_id="local-order-0001",
+                exchange_order_id="venue-order-77", cumulative_filled_size=2,
+            )
+
+    def test_cancel_after_partial_fill_preserves_filled_quantity(self):
+        pending = begin_submission(intent())
+        opened = record_submission_response(
+            pending, outcome="accepted", exchange_order_id="venue-order-77"
+        )
+        partial = record_order_observation(
+            opened, outcome="partially_filled",
+            matched_client_order_id="local-order-0001",
+            exchange_order_id="venue-order-77", cumulative_filled_size=4,
+        )
+        cancelled = record_order_observation(
+            partial, outcome="cancelled",
+            matched_client_order_id="local-order-0001",
+            exchange_order_id="venue-order-77", cumulative_filled_size=4,
+        )
+        self.assertEqual(cancelled["status"], "cancelled")
+        self.assertEqual(cancelled["filled_size"], "4")
+        with self.assertRaisesRegex(RuntimeError, "active known orders"):
+            record_order_observation(
+                cancelled, outcome="filled",
+                matched_client_order_id="local-order-0001",
+                exchange_order_id="venue-order-77", cumulative_filled_size=10,
+            )
+
+    def test_identity_mismatch_requires_manual_review(self):
+        pending = begin_submission(intent())
+        opened = record_submission_response(
+            pending, outcome="accepted", exchange_order_id="venue-order-77"
+        )
+        result = record_order_observation(
+            opened, outcome="open",
+            matched_client_order_id="other-local-order",
+            exchange_order_id="venue-order-99", cumulative_filled_size=0,
+        )
+        self.assertEqual(result["status"], "manual_review")
+        self.assertEqual(result["last_reason_code"], "client_order_id_mismatch")
+        self.assertEqual(result["last_conflicting_exchange_order_id"], "venue-order-99")
+        self.assertFalse(submission_policy(result)["automatic_retry_permitted"])
+
+    def test_exchange_order_id_mismatch_requires_manual_review(self):
+        pending = begin_submission(intent())
+        opened = record_submission_response(
+            pending, outcome="accepted", exchange_order_id="venue-order-77"
+        )
+        result = record_order_observation(
+            opened, outcome="open",
+            matched_client_order_id="local-order-0001",
+            exchange_order_id="venue-order-99", cumulative_filled_size=0,
+        )
+        self.assertEqual(result["status"], "manual_review")
+        self.assertEqual(result["last_reason_code"], "exchange_order_id_mismatch")
 
     def test_only_unknown_submission_can_be_reconciled(self):
         with self.assertRaises(RuntimeError):

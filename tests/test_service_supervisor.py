@@ -236,6 +236,34 @@ class SupervisorTests(unittest.TestCase):
             self.assertEqual(status["monitor_last_exit_code"], 7)
             self.assertIsNone(status["monitor_next_restart_at"])
 
+    def test_app_failure_is_reported_without_overwriting_monitor_exit_code(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as directory:
+            config = build_supervisor_config(
+                {
+                    "ENABLE_USER_ORDER_MONITOR": "true",
+                    "POLYMARKET_PRIVATE_KEY": "synthetic-test-secret",
+                    "DATA_DIR": directory,
+                },
+                python_executable="python-test",
+            )
+            app = FakeProcess(poll_results=[17])
+            monitor = FakeProcess()
+            processes = [app, monitor]
+
+            def fake_popen(_command, *, env):
+                return processes.pop(0)
+
+            result = run_supervisor(config, popen_factory=fake_popen)
+            self.assertEqual(result, 17)
+            status = read_supervisor_status(config.status_path)
+            self.assertEqual(status["service_state"], "app_failed")
+            self.assertEqual(status["app_exit_code"], 17)
+            self.assertIsNone(status["monitor_last_exit_code"])
+            self.assertEqual(status["monitor_state"], "stopped")
+            self.assertTrue(monitor.terminated)
+
     def test_stop_child_escalates_to_kill_after_timeout(self):
         from service_supervisor import _stop_child
 

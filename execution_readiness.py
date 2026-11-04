@@ -17,7 +17,7 @@ def execution_readiness_payload() -> dict[str, Any]:
     blockers = [
         {
             "code": "live_order_adapter_not_implemented",
-            "detail": "There is no wallet signer, authenticated CLOB client, or order-submission adapter.",
+            "detail": "A separate authenticated account monitor can read open orders and user events, but there is no reviewed order-placement adapter or order-signing workflow.",
         },
         {
             "code": "account_eligibility_not_verified",

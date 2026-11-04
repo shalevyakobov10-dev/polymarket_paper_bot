@@ -1,5 +1,6 @@
 import tempfile
 import unittest
+from unittest.mock import patch
 from decimal import Decimal
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -194,6 +195,48 @@ class OrderStagingTests(unittest.TestCase):
             result["blockers"],
             ["account_risk_snapshot_freshness_window_out_of_policy"],
         )
+        self.assertIsNone(self.journal.get_intent("staged-order-001"))
+
+    def test_staging_revalidates_legacy_snapshot_schema_before_preflight(self):
+        legacy = account_snapshot()
+        legacy.update({
+            "snapshot_id": "legacy-snapshot",
+            "snapshot_seq": 1,
+            "fresh": True,
+            "age_seconds": 1,
+        })
+        legacy.pop("open_position_risk_exposure_usd")
+        with patch.object(
+            self.journal,
+            "get_latest_account_risk_snapshot",
+            return_value=legacy,
+        ):
+            result = self.stage()
+        self.assertEqual(result["status"], "blocked")
+        self.assertEqual(
+            result["blockers"],
+            ["missing_fields:open_position_risk_exposure_usd"],
+        )
+        self.assertIsNone(self.journal.get_intent("staged-order-001"))
+
+    def test_staging_rejects_inconsistent_legacy_snapshot_economics(self):
+        inconsistent = account_snapshot()
+        inconsistent.update({
+            "snapshot_id": "legacy-inconsistent",
+            "snapshot_seq": 2,
+            "fresh": True,
+            "age_seconds": 1,
+            "current_open_exposure_usd": "3",
+            "open_position_risk_exposure_usd": "0",
+        })
+        with patch.object(
+            self.journal,
+            "get_latest_account_risk_snapshot",
+            return_value=inconsistent,
+        ):
+            result = self.stage()
+        self.assertEqual(result["status"], "blocked")
+        self.assertEqual(result["blockers"], ["open_exposure_commitment_mismatch"])
         self.assertIsNone(self.journal.get_intent("staged-order-001"))
 
     def test_missing_market_condition_id_is_blocked(self):

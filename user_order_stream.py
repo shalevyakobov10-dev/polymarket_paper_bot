@@ -11,6 +11,7 @@ import json
 import logging
 import math
 import os
+from datetime import datetime, timezone
 from pathlib import Path
 from decimal import Decimal, InvalidOperation
 from typing import Any
@@ -410,17 +411,23 @@ async def reconcile_open_orders_snapshot(
             account_risk_snapshot
         )
     except Exception as exc:
-        # User-order event processing should remain available when a separate
-        # collateral/position endpoint is degraded. No new staging can occur
-        # without a fresh persisted risk snapshot.
-        account_risk_snapshot_error = f"{type(exc).__name__}: {str(exc)[:180]}"
+        # Keep the user-order stream available, but persist a failed account-risk
+        # sync attempt so an older snapshot is immediately ineligible for staging.
+        error_code = type(exc).__name__
+        journal.record_account_risk_snapshot_failure(
+            error_code=error_code,
+            attempted_at=datetime.now(timezone.utc),
+        )
+        account_risk_snapshot_error = error_code
 
+    account_risk_sync_state = journal.get_latest_account_risk_sync_state()
     return {
         "snapshot_complete": True,
         "status": snapshot_status,
         "account_risk_snapshot_complete": account_risk_snapshot is not None,
         "account_risk_snapshot_id": account_risk_snapshot_id,
         "account_risk_snapshot_error": account_risk_snapshot_error,
+        "account_risk_sync_state": account_risk_sync_state,
         "account_risk_snapshot": account_risk_snapshot,
         **counts,
         "account_trade_history_checked": bool(initially_missing),

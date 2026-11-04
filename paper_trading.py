@@ -573,6 +573,8 @@ class PaperTrader:
             min_side_depth_usd=self.config.min_orderbook_side_depth_usd,
             require_orderbook=self.config.require_orderbook,
         )
+        if execution_diagnostics is not None:
+            execution_diagnostics["market_quality_assessment"] = dict(market_quality)
         if not market_quality["eligible"]:
             return None, str(market_quality["reason"])
         fee_model = resolve_taker_fee_model(row, fallback_rate=self.config.fee_rate)

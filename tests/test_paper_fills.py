@@ -81,6 +81,48 @@ class PaperFillSimulationTests(unittest.TestCase):
         self.assertFalse(result["eligible"])
         self.assertEqual(result["filled_shares"], 0.0)
 
+    def test_buy_respects_hard_limit_and_does_not_claim_a_partial_fill(self):
+        result = simulate_orderbook_fill(
+            self.book,
+            side="buy",
+            target_notional_usd=2.5,
+            limit_price=0.51,
+        )
+        self.assertFalse(result["eligible"])
+        self.assertEqual(result["reason"], "insufficient_visible_ask_depth")
+        self.assertAlmostEqual(result["filled_notional_usd"], 1.0)
+        self.assertAlmostEqual(result["unfilled_notional_usd"], 1.5)
+        self.assertEqual(result["limit_price"], 0.51)
+
+    def test_sell_respects_minimum_limit_price(self):
+        result = simulate_orderbook_fill(
+            self.book,
+            side="sell",
+            target_shares=3.0,
+            limit_price=0.47,
+        )
+        self.assertFalse(result["eligible"])
+        self.assertEqual(result["reason"], "insufficient_visible_bid_depth")
+        self.assertAlmostEqual(result["filled_shares"], 2.0)
+        self.assertAlmostEqual(result["unfilled_shares"], 1.0)
+
+    def test_rejects_declared_best_price_that_disagrees_with_depth(self):
+        inconsistent = {
+            **self.book,
+            "best_ask": 0.49,
+        }
+        result = simulate_orderbook_fill(
+            inconsistent, side="buy", target_notional_usd=1.0
+        )
+        self.assertFalse(result["eligible"])
+        self.assertEqual(result["reason"], "orderbook_top_level_mismatch")
+
+    def test_rejects_invalid_limit_price(self):
+        with self.assertRaisesRegex(ValueError, "limit_price"):
+            simulate_orderbook_fill(
+                self.book, side="buy", target_notional_usd=1.0, limit_price=1.0
+            )
+
     def test_validates_side_size_and_level_limit(self):
         with self.assertRaises(ValueError):
             simulate_orderbook_fill(self.book, side="hold", target_shares=1)

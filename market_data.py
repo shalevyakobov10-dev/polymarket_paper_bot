@@ -1,17 +1,14 @@
-"""Read-only Polymarket CLOB order-book snapshots for research and simulation."""
+"""Read-only Polymarket CLOB order-book snapshots via the official Python SDK."""
 from __future__ import annotations
 
-import json
 import math
 import os
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from typing import Any
 from urllib.error import HTTPError, URLError
-from urllib.parse import urlencode
-from urllib.request import Request, urlopen
 
-CLOB_BOOK_URL = "https://clob.polymarket.com/book"
+from polymarket import PublicClient
 
 
 def _number(value: Any) -> float | None:
@@ -77,21 +74,42 @@ def summarize_order_book(payload: dict[str, Any], *, token_id: str, observed_at:
     }
 
 
-def fetch_order_book(token_id: str, *, timeout: float = 8.0) -> dict[str, Any]:
-    """Fetch one public order book; no credentials or account access are used."""
+def fetch_order_book(token_id: str) -> dict[str, Any]:
+    """Fetch one public CLOB book through the official unauthenticated SDK client."""
     token = str(token_id or "").strip()
     if not token:
         raise ValueError("token_id is required")
-    request = Request(
-        f"{CLOB_BOOK_URL}?{urlencode({'token_id': token})}",
-        headers={"User-Agent": "PolymarketPaperResearchBot/1.0", "Accept": "application/json"},
-    )
-    with urlopen(request, timeout=timeout) as response:
-        if getattr(response, "status", 200) != 200:
-            raise RuntimeError(f"CLOB book API returned HTTP {response.status}")
-        payload = json.loads(response.read().decode("utf-8"))
-    result = summarize_order_book(payload, token_id=token)
-    result["observed_at"] = datetime.now(timezone.utc).isoformat()
+
+    # PublicClient never reads wallet credentials and exposes no signing or
+    # order-submission capability. The context manager closes its HTTP transports.
+    with PublicClient() as client:
+        book = client.get_order_book(token_id=token)
+
+    payload = {
+        "bids": [
+            {"price": str(level.price), "size": str(level.size)}
+            for level in book.bids
+        ],
+        "asks": [
+            {"price": str(level.price), "size": str(level.size)}
+            for level in book.asks
+        ],
+    }
+    observed_at = datetime.now(timezone.utc).isoformat()
+    result = summarize_order_book(payload, token_id=token, observed_at=observed_at)
+    exchange_timestamp = getattr(book, "timestamp", None)
+    result.update({
+        "source": "official_polymarket_python_sdk",
+        "sdk_version": "0.16.0",
+        "exchange_timestamp": (
+            exchange_timestamp.isoformat()
+            if hasattr(exchange_timestamp, "isoformat") else None
+        ),
+        "book_hash": str(getattr(book, "hash", "") or ""),
+        "min_order_size": str(getattr(book, "min_order_size", "") or ""),
+        "tick_size": str(getattr(book, "tick_size", "") or ""),
+        "neg_risk": bool(getattr(book, "neg_risk", False)),
+    })
     return result
 
 

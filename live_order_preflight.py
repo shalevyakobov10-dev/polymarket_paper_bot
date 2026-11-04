@@ -4,8 +4,6 @@ This module never creates clients, reads secrets, signs, or submits orders.
 A passing preflight is not launch authorization.
 """
 from __future__ import annotations
-
-import math
 from decimal import Decimal, InvalidOperation
 from typing import Any
 

@@ -129,11 +129,11 @@ class AccountRiskSnapshotTests(unittest.TestCase):
         self.assertEqual(client.balance_calls, ["COLLATERAL"])
         self.assertEqual(result["collateral_balance_base_units"], "100000000")
         self.assertEqual(result["collateral_balance_usd"], "100")
-        self.assertEqual(result["open_buy_commitment_usd"], "4.0")
-        self.assertEqual(result["conservative_available_collateral_usd"], "96.0")
+        self.assertEqual(Decimal(result["open_buy_commitment_usd"]), Decimal("4.0"))
+        self.assertEqual(Decimal(result["conservative_available_collateral_usd"]), Decimal("96.0"))
         self.assertEqual(result["current_open_exposure_usd"], "13.5")
         self.assertEqual(result["open_position_value_usd"], "9.5")
-        self.assertEqual(result["open_position_cost_usd"], "8.0")
+        self.assertEqual(Decimal(result["open_position_cost_usd"]), Decimal("8.0"))
         self.assertEqual(result["open_unrealized_pnl_usd"], "1.5")
         self.assertEqual(result["current_open_positions"], 2)
         self.assertEqual(result["current_open_orders"], 2)
@@ -156,7 +156,7 @@ class AccountRiskSnapshotTests(unittest.TestCase):
         )
         result = asyncio.run(collect_account_risk_snapshot(client))
         self.assertEqual(result["current_open_orders"], 2)
-        self.assertEqual(result["open_buy_commitment_usd"], "8.0")
+        self.assertEqual(Decimal(result["open_buy_commitment_usd"]), Decimal("8.0"))
 
     def test_incomplete_open_order_pagination_fails_closed(self):
         client = FakeAccountClient(

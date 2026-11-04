@@ -1,5 +1,7 @@
 import unittest
-from unittest.mock import patch
+from datetime import datetime, timezone
+from types import SimpleNamespace
+from unittest.mock import MagicMock, patch
 
 import market_data
 
@@ -37,6 +39,44 @@ class OrderBookTests(unittest.TestCase):
         self.assertIsNone(result["best_bid"])
         self.assertIsNone(result["spread"])
         self.assertFalse(result["book_usable"])
+
+    def test_fetch_order_book_uses_official_public_sdk_without_credentials(self):
+        levels = lambda rows: tuple(
+            SimpleNamespace(price=price, size=size) for price, size in rows
+        )
+        sdk_book = SimpleNamespace(
+            asset_id="yes-token",
+            timestamp=datetime(2026, 11, 4, 8, 0, tzinfo=timezone.utc),
+            bids=levels([("0.47", "50"), ("0.48", "100")]),
+            asks=levels([("0.53", "40"), ("0.52", "80")]),
+            hash="book-hash",
+            min_order_size="5",
+            tick_size="0.01",
+            neg_risk=False,
+        )
+        sdk_client = MagicMock()
+        sdk_client.__enter__.return_value = sdk_client
+        sdk_client.get_order_book.return_value = sdk_book
+        with patch.object(market_data, "PublicClient", return_value=sdk_client) as factory:
+            result = market_data.fetch_order_book("yes-token")
+
+        factory.assert_called_once_with()
+        sdk_client.get_order_book.assert_called_once_with(token_id="yes-token")
+        sdk_client.__exit__.assert_called_once()
+        self.assertEqual(result["source"], "official_polymarket_python_sdk")
+        self.assertEqual(result["sdk_version"], "0.16.0")
+        self.assertEqual(result["best_bid"], 0.48)
+        self.assertEqual(result["best_ask"], 0.52)
+        self.assertEqual(result["exchange_timestamp"], "2026-11-04T08:00:00+00:00")
+        self.assertEqual(result["book_hash"], "book-hash")
+        self.assertTrue(result["book_usable"])
+        self.assertEqual(result["execution"], "none")
+
+    def test_fetch_order_book_rejects_blank_token_before_network(self):
+        with patch.object(market_data, "PublicClient") as factory:
+            with self.assertRaisesRegex(ValueError, "token_id is required"):
+                market_data.fetch_order_book("  ")
+        factory.assert_not_called()
 
     def test_batch_fetch_can_be_disabled(self):
         with patch.dict("os.environ", {"ORDERBOOK_TOKENS_PER_POLL": "0"}):

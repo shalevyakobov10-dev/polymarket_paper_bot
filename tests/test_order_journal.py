@@ -3,6 +3,7 @@ import threading
 import unittest
 from datetime import datetime, timezone
 from pathlib import Path
+from datetime import datetime, timezone
 
 from order_journal import OrderJournal
 from order_lifecycle import create_order_intent, submission_policy
@@ -18,6 +19,33 @@ def new_intent(**overrides):
     }
     values.update(overrides)
     return create_order_intent(**values)
+
+
+
+def complete_risk_snapshot(**overrides):
+    values = {
+        "snapshot_complete": True,
+        "captured_at_utc": datetime.now(timezone.utc).isoformat(),
+        "collateral_decimals": 6,
+        "collateral_balance_base_units": "100000000",
+        "collateral_balance_usd": "100",
+        "open_buy_commitment_usd": "0",
+        "conservative_available_collateral_usd": "100",
+        "collateral_shortfall_usd": "0",
+        "current_open_exposure_usd": "0",
+        "open_position_value_usd": "0",
+        "open_position_cost_usd": "0",
+        "open_position_risk_exposure_usd": "0",
+        "open_unrealized_pnl_usd": "0",
+        "open_sell_remaining_shares": "0",
+        "current_open_positions": 0,
+        "current_open_orders": 0,
+        "open_position_assets_by_condition": {},
+        "open_order_assets_by_condition": {},
+        "execution": "none",
+    }
+    values.update(overrides)
+    return values
 
 
 class OrderJournalTests(unittest.TestCase):
@@ -239,22 +267,66 @@ class OrderJournalTests(unittest.TestCase):
         self.assertEqual(len(self.journal.list_events("journal-order-001")), 1)
 
 
-    def test_staged_intent_must_reference_latest_snapshot_inside_commit(self):
-        def snapshot():
-            return {
-                "snapshot_complete": True,
-                "captured_at_utc": datetime.now(timezone.utc).isoformat(),
-                "collateral_balance_usd": "100",
-                "conservative_available_collateral_usd": "100",
-                "current_open_exposure_usd": "0",
-                "current_open_positions": 0,
-                "current_open_orders": 0,
-                "open_position_assets_by_condition": {},
-                "open_order_assets_by_condition": {},
-                "execution": "none",
-            }
 
-        first_snapshot_id = self.journal.save_account_risk_snapshot(snapshot())
+    def test_account_risk_snapshot_rejects_inconsistent_derived_values(self):
+        cases = [
+            (
+                {"collateral_balance_usd": "NaN"},
+                "collateral_balance_usd must be a finite decimal",
+            ),
+            (
+                {"current_open_positions": True},
+                "current_open_positions must be a nonnegative integer",
+            ),
+            (
+                {"current_open_exposure_usd": "1"},
+                "current open exposure is inconsistent",
+            ),
+            (
+                {"open_position_assets_by_condition": {"condition-1": "token-1"}},
+                "values must be lists",
+            ),
+            (
+                {"conservative_available_collateral_usd": "99"},
+                "available collateral is inconsistent",
+            ),
+            (
+                {"collateral_balance_base_units": "not-an-integer"},
+                "base_units must be a nonnegative integer string",
+            ),
+        ]
+        for overrides, expected in cases:
+            with self.subTest(overrides=overrides):
+                with self.assertRaisesRegex(ValueError, expected):
+                    self.journal.save_account_risk_snapshot(
+                        complete_risk_snapshot(**overrides)
+                    )
+
+    def test_account_risk_snapshot_rejects_exposure_below_cost_or_market_value(self):
+        snapshot = complete_risk_snapshot(
+            open_position_value_usd="5",
+            open_position_cost_usd="8",
+            open_position_risk_exposure_usd="7",
+            current_open_exposure_usd="7",
+        )
+        with self.assertRaisesRegex(ValueError, "cannot be below market value or cost"):
+            self.journal.save_account_risk_snapshot(snapshot)
+
+    def test_account_risk_snapshot_rejects_duplicate_assets_and_future_timestamps(self):
+        duplicate_assets = complete_risk_snapshot(
+            open_position_assets_by_condition={"condition-1": ["token-a", "token-a"]}
+        )
+        with self.assertRaisesRegex(ValueError, "duplicate asset IDs"):
+            self.journal.save_account_risk_snapshot(duplicate_assets)
+
+        future = complete_risk_snapshot(
+            captured_at_utc=(datetime.now(timezone.utc) + __import__("datetime").timedelta(minutes=2)).isoformat()
+        )
+        with self.assertRaisesRegex(ValueError, "more than 60 seconds in the future"):
+            self.journal.save_account_risk_snapshot(future)
+
+    def test_staged_intent_must_reference_latest_snapshot_inside_commit(self):
+        first_snapshot_id = self.journal.save_account_risk_snapshot(complete_risk_snapshot())
         intent = new_intent()
         intent["market_condition_id"] = "condition-1"
         intent["account_risk_snapshot_id"] = first_snapshot_id
@@ -262,7 +334,7 @@ class OrderJournalTests(unittest.TestCase):
         self.assertTrue(created)
         self.assertEqual(saved["account_risk_snapshot_id"], first_snapshot_id)
 
-        self.journal.save_account_risk_snapshot(snapshot())
+        self.journal.save_account_risk_snapshot(complete_risk_snapshot())
         stale_intent = new_intent(client_order_id="journal-order-stale")
         stale_intent["market_condition_id"] = "condition-1"
         stale_intent["account_risk_snapshot_id"] = first_snapshot_id

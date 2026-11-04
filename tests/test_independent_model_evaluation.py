@@ -238,7 +238,7 @@ class FeatureModelEvaluationTests(unittest.TestCase):
             feature_rows, resolutions, now=now, max_feature_age_seconds=3600
         )
         self.assertEqual(result["status"], "model_fitted")
-        self.assertTrue(result["model_version"].startswith("feature-logistic-v1-"))
+        self.assertTrue(result["model_version"].startswith("feature-logistic-v2-"))
         self.assertEqual(result["model"]["version"], result["model_version"])
         self.assertTrue(all(row["model_version"] == result["model_version"] for row in result["forecasts"]))
         self.assertEqual(result["training"]["eligible_unique_markets"], 100)
@@ -253,16 +253,49 @@ class FeatureModelEvaluationTests(unittest.TestCase):
         self.assertEqual(result["decision"], "NO_ACTION_RESEARCH_ONLY")
         self.assertFalse(result["live_execution_enabled"])
 
-    def test_extract_model_features_includes_news_topic_and_source_diversity(self):
+    def test_extract_model_features_includes_market_aware_news_diagnostics(self):
         features = model_eval.extract_model_features({
             "gamma_yes_probability": 0.5,
             "news_match_count_24h": 3,
             "news_topic_category_count_24h": 4,
-            "news_unique_source_label_count_24h": 2,
+            "news_unique_source_label_count_24h": 3,
+            "news_unique_publisher_count_24h": 2,
+            "news_mean_relevance_score_24h": 0.7,
+            "news_max_relevance_score_24h": 0.9,
+            "news_mean_headline_precision_24h": 0.8,
+            "news_mean_age_hours_24h": 2.5,
             "volume_24h": 100,
         })
         self.assertAlmostEqual(features["log_news_topic_category_count_24h"], math.log1p(4))
-        self.assertAlmostEqual(features["log_news_unique_source_label_count_24h"], math.log1p(2))
+        self.assertAlmostEqual(features["log_news_unique_source_label_count_24h"], math.log1p(3))
+        self.assertAlmostEqual(features["log_news_unique_publisher_count_24h"], math.log1p(2))
+        self.assertEqual(features["mean_news_relevance_score_24h"], 0.7)
+        self.assertEqual(features["max_news_relevance_score_24h"], 0.9)
+        self.assertEqual(features["mean_news_headline_precision_24h"], 0.8)
+        self.assertEqual(features["mean_news_age_hours_24h"], 2.5)
+
+    def test_extract_model_features_falls_back_for_legacy_source_counts_and_headline_metrics(self):
+        features = model_eval.extract_model_features({
+            "gamma_yes_probability": 0.5,
+            "news_unique_source_label_count_24h": 2,
+            "news_headlines": [
+                {
+                    "relevance_score": 0.6,
+                    "headline_precision": 0.8,
+                    "age_hours": 1.0,
+                },
+                {
+                    "relevance_score": 0.8,
+                    "headline_precision": 0.6,
+                    "age_hours": 3.0,
+                },
+            ],
+        })
+        self.assertAlmostEqual(features["log_news_unique_publisher_count_24h"], math.log1p(2))
+        self.assertEqual(features["mean_news_relevance_score_24h"], 0.7)
+        self.assertEqual(features["max_news_relevance_score_24h"], 0.8)
+        self.assertEqual(features["mean_news_headline_precision_24h"], 0.7)
+        self.assertEqual(features["mean_news_age_hours_24h"], 2.0)
 
     def test_model_version_changes_when_resolved_training_history_changes(self):
         now = datetime(2026, 10, 30, 12, tzinfo=timezone.utc)

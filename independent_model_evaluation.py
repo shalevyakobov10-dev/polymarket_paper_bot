@@ -23,6 +23,11 @@ FEATURE_NAMES = (
     "log_news_matches_24h",
     "log_news_topic_category_count_24h",
     "log_news_unique_source_label_count_24h",
+    "log_news_unique_publisher_count_24h",
+    "mean_news_relevance_score_24h",
+    "max_news_relevance_score_24h",
+    "mean_news_headline_precision_24h",
+    "mean_news_age_hours_24h",
     "mean_lexical_overlap",
     "log_volume_24h",
 )
@@ -71,14 +76,45 @@ def extract_model_features(row: dict[str, Any]) -> dict[str, float | None]:
     news_count = _number(row.get("news_match_count_24h"))
     topic_count = _number(row.get("news_topic_category_count_24h"))
     source_count = _number(row.get("news_unique_source_label_count_24h"))
+    publisher_count = _number(row.get("news_unique_publisher_count_24h"))
+    if publisher_count is None:
+        # Backward-compatible fallback for historical feature snapshots created
+        # before normalized publisher identities were included.
+        publisher_count = source_count
     headlines = row.get("news_headlines")
     overlaps = []
+    headline_relevance = []
+    headline_precision = []
+    headline_ages = []
     if isinstance(headlines, list):
         for headline in headlines:
-            if isinstance(headline, dict):
-                overlap = _number(headline.get("lexical_overlap"))
-                if overlap is not None and 0.0 <= overlap <= 1.0:
-                    overlaps.append(overlap)
+            if not isinstance(headline, dict):
+                continue
+            overlap = _number(headline.get("lexical_overlap"))
+            if overlap is not None and 0.0 <= overlap <= 1.0:
+                overlaps.append(overlap)
+            relevance = _number(headline.get("relevance_score"))
+            if relevance is not None and 0.0 <= relevance <= 1.0:
+                headline_relevance.append(relevance)
+            precision = _number(headline.get("headline_precision"))
+            if precision is not None and 0.0 <= precision <= 1.0:
+                headline_precision.append(precision)
+            age = _number(headline.get("age_hours"))
+            if age is not None and 0.0 <= age <= 24.0:
+                headline_ages.append(age)
+
+    mean_relevance = _number(row.get("news_mean_relevance_score_24h"))
+    if mean_relevance is None and headline_relevance:
+        mean_relevance = sum(headline_relevance) / len(headline_relevance)
+    max_relevance = _number(row.get("news_max_relevance_score_24h"))
+    if max_relevance is None and headline_relevance:
+        max_relevance = max(headline_relevance)
+    mean_precision = _number(row.get("news_mean_headline_precision_24h"))
+    if mean_precision is None and headline_precision:
+        mean_precision = sum(headline_precision) / len(headline_precision)
+    mean_news_age = _number(row.get("news_mean_age_hours_24h"))
+    if mean_news_age is None and headline_ages:
+        mean_news_age = sum(headline_ages) / len(headline_ages)
 
     return {
         "logit_market_probability": logit_market,
@@ -93,6 +129,11 @@ def extract_model_features(row: dict[str, Any]) -> dict[str, float | None]:
         "log_news_matches_24h": math.log1p(max(0.0, news_count or 0.0)),
         "log_news_topic_category_count_24h": math.log1p(max(0.0, topic_count or 0.0)),
         "log_news_unique_source_label_count_24h": math.log1p(max(0.0, source_count or 0.0)),
+        "log_news_unique_publisher_count_24h": math.log1p(max(0.0, publisher_count or 0.0)),
+        "mean_news_relevance_score_24h": mean_relevance if mean_relevance is not None and 0.0 <= mean_relevance <= 1.0 else None,
+        "max_news_relevance_score_24h": max_relevance if max_relevance is not None and 0.0 <= max_relevance <= 1.0 else None,
+        "mean_news_headline_precision_24h": mean_precision if mean_precision is not None and 0.0 <= mean_precision <= 1.0 else None,
+        "mean_news_age_hours_24h": mean_news_age if mean_news_age is not None and 0.0 <= mean_news_age <= 24.0 else None,
         "mean_lexical_overlap": sum(overlaps) / len(overlaps) if overlaps else None,
         "log_volume_24h": math.log1p(max(0.0, volume or 0.0)),
     }
@@ -991,7 +1032,7 @@ def forecast_current_feature_rows(
     version_digest = hashlib.sha256(
         json.dumps(version_material, sort_keys=True, separators=(",", ":")).encode("utf-8")
     ).hexdigest()[:20]
-    model_version = f"feature-logistic-v1-{version_digest}" if training else None
+    model_version = f"feature-logistic-v2-{version_digest}" if training else None
 
     resolved_before_now = set()
     for resolution in resolutions:

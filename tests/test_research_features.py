@@ -69,6 +69,68 @@ class ResearchFeatureTests(unittest.TestCase):
         self.assertIsNone(item["forecast"])
         self.assertEqual(item["execution"], "none")
 
+    def test_uses_normalized_publisher_ids_and_market_aware_news_scores(self):
+        now = datetime(2026, 11, 4, 12, tzinfo=timezone.utc)
+        outcomes = [{"market_id": "m1", "outcome": "Yes", "observed_price": 0.55}]
+        matches = [
+            {
+                "market_id": "m1", "source": "BBC News - World", "publisher_id": "bbc",
+                "news_title": "Central bank rate change",
+                "news_published_at": "2026-11-04T11:30:00Z",
+                "method": "market_corpus_idf_keyword_v2",
+                "relevance_score": 0.8, "headline_precision": 0.9,
+                "lexical_overlap": 0.6, "topic_categories": ["economy"],
+            },
+            {
+                "market_id": "m1", "source": "BBC News - Business", "publisher_id": "bbc",
+                "news_title": "Central bank cuts rates",
+                "news_published_at": "2026-11-04T11:00:00Z",
+                "method": "market_corpus_idf_keyword_v2",
+                "relevance_score": 0.6, "headline_precision": 0.7,
+                "lexical_overlap": 0.5, "topic_categories": ["economy"],
+            },
+            {
+                "market_id": "m1", "source": "Reuters", "publisher_id": "reuters",
+                "news_title": "Policy reaction",
+                "news_published_at": "2026-11-04T10:30:00Z",
+                "method": "market_corpus_idf_keyword_v2",
+                "relevance_score": 1.4, "headline_precision": -0.1,
+            },
+        ]
+        item = research_features.build_market_feature_rows(
+            outcomes, matches, now=now
+        )[0]
+        self.assertEqual(item["schema_version"], 3)
+        self.assertEqual(item["news_match_count_24h"], 3)
+        self.assertEqual(item["news_unique_source_label_count_24h"], 3)
+        self.assertEqual(item["news_unique_publisher_count_24h"], 2)
+        self.assertEqual(item["news_mean_relevance_score_24h"], 0.7)
+        self.assertEqual(item["news_max_relevance_score_24h"], 0.8)
+        self.assertEqual(item["news_mean_headline_precision_24h"], 0.8)
+        self.assertAlmostEqual(item["news_mean_age_hours_24h"], 1.0)
+        self.assertEqual(item["news_matching_method"], "market_corpus_idf_keyword_v2")
+        self.assertEqual(item["news_matching_methods_24h"], ["market_corpus_idf_keyword_v2"])
+        self.assertEqual(item["news_headlines"][0]["publisher_id"], "bbc")
+        self.assertIn("age_hours", item["news_headlines"][0])
+
+    def test_marks_mixed_or_unknown_news_matcher_versions_explicitly(self):
+        outcomes = [{"market_id": "m1", "outcome": "Yes", "observed_price": 0.5}]
+        now = datetime(2026, 11, 4, 12, tzinfo=timezone.utc)
+        base = {
+            "market_id": "m1", "news_published_at": "2026-11-04T11:00:00Z",
+        }
+        mixed = research_features.build_market_feature_rows(
+            outcomes,
+            [{**base, "method": "method_a"}, {**base, "method": "method_b"}],
+            now=now,
+        )[0]
+        self.assertEqual(mixed["news_matching_method"], "mixed")
+        self.assertEqual(mixed["news_matching_methods_24h"], ["method_a", "method_b"])
+        unknown = research_features.build_market_feature_rows(
+            outcomes, [{**base}], now=now
+        )[0]
+        self.assertEqual(unknown["news_matching_method"], "unknown")
+
     def test_skips_yes_outcome_with_invalid_price_and_non_yes_only_markets(self):
         rows = [
             {"market_id": "invalid", "outcome": "Yes", "observed_price": float("nan")},

@@ -123,6 +123,14 @@ def build_market_feature_rows(
             for _, match in fresh_matches
             if str(match.get("source") or "").strip()
         }
+        publisher_ids = {
+            (
+                str(match.get("publisher_id") or "").strip().casefold()
+                or str(match.get("source") or "").strip().casefold()
+            )
+            for _, match in fresh_matches
+            if str(match.get("publisher_id") or match.get("source") or "").strip()
+        }
         topic_categories = {
             str(category).strip()[:80]
             for _, match in fresh_matches
@@ -132,14 +140,43 @@ def build_market_feature_rows(
             )
             if str(category).strip()
         }
+        relevance_scores = []
+        headline_precisions = []
+        news_ages_hours = []
+        matching_methods = set()
+        for published, match in fresh_matches:
+            relevance = _finite_nonnegative(match.get("relevance_score"))
+            precision = _finite_nonnegative(match.get("headline_precision"))
+            if relevance is not None and relevance <= 1.0:
+                relevance_scores.append(relevance)
+            if precision is not None and precision <= 1.0:
+                headline_precisions.append(precision)
+            news_ages_hours.append(max(0.0, (current - published).total_seconds()) / 3600.0)
+            method = str(match.get("method") or "").strip()
+            if method:
+                matching_methods.add(method)
+        sorted_methods = sorted(matching_methods)
+        matching_method = (
+            sorted_methods[0] if len(sorted_methods) == 1
+            else "mixed" if sorted_methods
+            else "unknown"
+        )
         headline_rows = []
         for published, match in fresh_matches[:max_headlines_per_market]:
+            age_hours = max(0.0, (current - published).total_seconds()) / 3600.0
+            relevance = _finite_nonnegative(match.get("relevance_score"))
+            precision = _finite_nonnegative(match.get("headline_precision"))
             headline_rows.append({
                 "source": str(match.get("source") or "")[:100],
+                "publisher_id": str(match.get("publisher_id") or "")[:120],
                 "title": str(match.get("news_title") or "")[:400],
                 "published_at": published.isoformat(),
+                "age_hours": round(age_hours, 6),
                 "lexical_overlap": _finite_nonnegative(match.get("lexical_overlap")),
+                "relevance_score": relevance if relevance is not None and relevance <= 1.0 else None,
+                "headline_precision": precision if precision is not None and precision <= 1.0 else None,
                 "shared_term_count": int(_finite_nonnegative(match.get("shared_term_count")) or 0),
+                "method": str(match.get("method") or "")[:80] or None,
                 "topic_categories": sorted({
                     str(category).strip()[:80]
                     for category in (
@@ -154,7 +191,7 @@ def build_market_feature_rows(
         fee_rate = _finite_nonnegative(fee_schedule.get("rate"))
         fee_exponent = _finite_nonnegative(fee_schedule.get("exponent"))
         output.append({
-            "schema_version": 2,
+            "schema_version": 3,
             "observed_at": current.isoformat(),
             "market_id": market_id,
             "token_id_yes": str(yes.get("token_id") or ""),
@@ -183,13 +220,19 @@ def build_market_feature_rows(
             "clob_depth_imbalance_top5": book.get("depth_imbalance_top5"),
             "news_match_count_24h": len(fresh_matches),
             "news_unique_source_label_count_24h": len(source_labels),
+            "news_unique_publisher_count_24h": len(publisher_ids),
             "news_topic_categories_24h": sorted(topic_categories),
             "news_topic_category_count_24h": len(topic_categories),
+            "news_mean_relevance_score_24h": _mean(relevance_scores),
+            "news_max_relevance_score_24h": max(relevance_scores) if relevance_scores else None,
+            "news_mean_headline_precision_24h": _mean(headline_precisions),
+            "news_mean_age_hours_24h": _mean(news_ages_hours),
             "news_matches_without_publish_time": unknown_time,
             "news_matches_with_future_publish_time": future_time,
             "news_window_hours": float(news_window_hours),
-            "news_matching_method": "existing_lexical_keyword_overlap",
-            "news_source_count_interpretation": "distinct_source_labels_not_verified_independent_reporting",
+            "news_matching_methods_24h": sorted_methods,
+            "news_matching_method": matching_method,
+            "news_source_count_interpretation": "normalized_publisher_id_count_not_verified_editorial_independence",
             "news_headlines": headline_rows,
             "research_only": True,
             "forecast": None,

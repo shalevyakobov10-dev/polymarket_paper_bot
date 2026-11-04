@@ -244,7 +244,7 @@ def match_news_to_markets(
 
 
 def summarize_market_corroboration(matches: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Count distinct publishers linked to each market; this is not event verification."""
+    """Summarize publisher diversity and exact-title repetition without claiming verification."""
     grouped: dict[str, dict[str, Any]] = {}
     for match in matches:
         market_id = str(match.get("market_id") or "").strip()
@@ -255,19 +255,29 @@ def summarize_market_corroboration(matches: list[dict[str, Any]]) -> list[dict[s
         # are one source, not independent corroboration.
         publisher = source.split(" - ", 1)[0].strip()[:100]
         publisher_id = str(match.get("publisher_id") or publisher_identity(source)).strip()
+        title = " ".join(str(match.get("news_title") or match.get("title") or "").casefold().split())
+        # Exact normalized title fingerprints expose repeated/syndicated headlines.
+        # They are deliberately not treated as independent evidence.
+        title_tokens = sorted(_tokens(title))
+        headline_key = " ".join(title_tokens) if len(title_tokens) >= 3 else ""
         row = grouped.setdefault(market_id, {
             "market_id": market_id,
             "market_question": str(match.get("market_question") or "")[:500],
             "publishers": {},
             "headline_count": 0,
+            "headline_publishers": {},
         })
         row["publishers"].setdefault(publisher_id, publisher)
         row["headline_count"] += 1
+        if headline_key:
+            row["headline_publishers"].setdefault(headline_key, set()).add(publisher_id)
 
     summaries = []
     for row in grouped.values():
         publisher_ids = sorted(row["publishers"])
         publishers = sorted(set(row["publishers"].values()))
+        headline_groups = list(row["headline_publishers"].values())
+        repeated_groups = [group for group in headline_groups if len(group) > 1]
         summaries.append({
             "market_id": row["market_id"],
             "market_question": row["market_question"],
@@ -275,7 +285,10 @@ def summarize_market_corroboration(matches: list[dict[str, Any]]) -> list[dict[s
             "publisher_ids": publisher_ids,
             "publishers": publishers,
             "matched_headline_count": row["headline_count"],
-            "interpretation": "normalized_publisher_diversity_only_not_independent_event_verification",
+            "distinct_normalized_headline_count": len(headline_groups),
+            "repeated_headline_group_count": len(repeated_groups),
+            "max_publishers_sharing_exact_headline": max((len(group) for group in headline_groups), default=0),
+            "interpretation": "publisher_diversity_and_exact_title_repetition_only_not_independent_event_verification",
             "research_only": True,
             "execution": "none",
         })

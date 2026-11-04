@@ -496,11 +496,15 @@ async def consume_user_order_stream(
         snapshot = None
         if initial_snapshot:
             snapshot = await reconcile_open_orders_snapshot(client, journal)
+            risk_sync = snapshot.get("account_risk_sync_state") or {}
             log.info(
-                "initial open-order snapshot status=%s orders=%s unresolved=%s",
+                "initial open-order snapshot status=%s orders=%s unresolved=%s account_risk_sync=%s fresh=%s error_code=%s",
                 snapshot["status"],
                 snapshot["venue_open_orders"],
                 len(snapshot["unresolved_missing_orders"]),
+                risk_sync.get("status", "missing"),
+                bool(risk_sync.get("fresh")),
+                risk_sync.get("error_code"),
             )
             current_dropped = getattr(handle, "dropped", None)
             if isinstance(current_dropped, bool) or not isinstance(current_dropped, int):
@@ -526,11 +530,15 @@ async def consume_user_order_stream(
                 # paginated snapshot is fetched; queue growth is checked below.
                 periodic = await reconcile_open_orders_snapshot(client, journal)
                 periodic_snapshots.append(periodic)
+                risk_sync = periodic.get("account_risk_sync_state") or {}
                 log.info(
-                    "periodic open-order snapshot status=%s orders=%s unresolved=%s",
+                    "periodic open-order snapshot status=%s orders=%s unresolved=%s account_risk_sync=%s fresh=%s error_code=%s",
                     periodic["status"],
                     periodic["venue_open_orders"],
                     len(periodic["unresolved_missing_orders"]),
+                    risk_sync.get("status", "missing"),
+                    bool(risk_sync.get("fresh")),
+                    risk_sync.get("error_code"),
                 )
                 current_dropped = getattr(handle, "dropped", None)
                 if isinstance(current_dropped, bool) or not isinstance(current_dropped, int):

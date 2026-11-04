@@ -272,7 +272,7 @@ class OrderJournalTests(unittest.TestCase):
         cases = [
             (
                 {"collateral_balance_usd": "NaN"},
-                "collateral_balance_usd must be a finite decimal",
+                "field collateral_balance_usd is outside valid bounds",
             ),
             (
                 {"current_open_positions": True},

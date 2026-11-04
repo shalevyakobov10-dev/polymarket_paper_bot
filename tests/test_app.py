@@ -355,6 +355,7 @@ class ParserTests(unittest.TestCase):
             self.assertEqual(
                 matches["freshness_summary"]["counts_by_status"]["unknown_timestamp"], 1
             )
+            self.assertNotIn("news_age_seconds", app._news_matches_cache[0])
         finally:
             server.shutdown()
             server.server_close()

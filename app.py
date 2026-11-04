@@ -20,7 +20,7 @@ from market_stream import MarketStreamCollector
 from forecast_evaluation import evaluate_jsonl_files
 from resolution_tracker import ResolutionCollector
 from global_news import DEFAULT_TOPIC_QUERIES, GDELTCollector
-from news_monitor import DEFAULT_FEEDS, NewsCollector, NewsMarketMatcher, summarize_market_corroboration, summarize_match_freshness, summarize_news_freshness
+from news_monitor import DEFAULT_FEEDS, NewsCollector, NewsMarketMatcher, refresh_match_freshness, summarize_market_corroboration, summarize_match_freshness, summarize_news_freshness
 from research_features import build_market_feature_rows, read_recent_jsonl, summarize_feature_rows
 from independent_model_evaluation import evaluate_feature_files, forecast_current_feature_files
 from learning_journal import LearningJournal
@@ -1351,6 +1351,7 @@ class Handler(BaseHTTPRequestHandler):
                     })
             elif self.path == "/matches":
                 with _news_lock:
+                    cached_matches = list(_news_matches_cache)
                     match_snapshot = {
                         "method": "market_corpus_idf_keyword_v2",
                         "research_only": True,
@@ -1358,10 +1359,16 @@ class Handler(BaseHTTPRequestHandler):
                         "total_recent": _news_state["market_matches_total_recent"],
                         "last_match_check_at": _news_state["last_match_check_at"],
                         "last_match_error": _news_state["last_match_error"],
-                        "items": list(_news_matches_cache),
-                        "source_corroboration": summarize_market_corroboration(_news_matches_cache),
-                        "freshness_summary": summarize_match_freshness(_news_matches_cache),
                     }
+                # Publication age changes while a candidate remains in the cache.
+                # Refresh only the response payload; the append-only research log
+                # keeps the timestamp/status as observed when the match was created.
+                current_matches = refresh_match_freshness(cached_matches)
+                match_snapshot.update({
+                    "items": current_matches,
+                    "source_corroboration": summarize_market_corroboration(current_matches),
+                    "freshness_summary": summarize_match_freshness(current_matches),
+                })
                 self._send(200, match_snapshot)
             else:
                 with _news_lock:

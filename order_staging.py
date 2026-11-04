@@ -192,6 +192,8 @@ def stage_buy_order_intent(
             "account_risk_snapshot_last_sync_failed",
             str(sync_state.get("error_code") or "unknown_sync_error")[:80],
         )
+    if sync_state.get("status") != "success":
+        return _blocked("account_risk_sync_state_not_successful")
     if sync_state.get("fresh") is not True:
         return _blocked("account_risk_sync_state_stale")
     if sync_state.get("snapshot_id") != snapshot_id:

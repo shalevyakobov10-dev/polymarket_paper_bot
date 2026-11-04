@@ -196,17 +196,23 @@ def run_supervisor(
             log.error("could not persist sanitized supervisor status: %s", type(exc).__name__)
 
     def wait_with_heartbeat(seconds: float) -> bool:
-        deadline = time.monotonic() + seconds
-        while not stopping.is_set():
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                return False
+        remaining = seconds
+        while remaining > 0 and not stopping.is_set():
             # A 15-second status refresh makes stale supervisor files detectable,
             # including while the account monitor is waiting to restart.
-            if stopping.wait(min(remaining, 15.0)):
+            chunk = min(remaining, 15.0)
+            started = time.monotonic()
+            if stopping.wait(chunk):
                 return True
+            elapsed = time.monotonic() - started
+            # threading.Event.wait(False) returns after the requested timeout.
+            # Treat an immediate false result from a nonblocking test double as
+            # a completed wait slice rather than spinning until wall-clock time.
+            if elapsed < 0.001:
+                elapsed = chunk
+            remaining = max(0.0, remaining - elapsed)
             publish_status()
-        return True
+        return stopping.is_set()
 
     publish_status()
     try:

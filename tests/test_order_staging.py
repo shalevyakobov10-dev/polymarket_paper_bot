@@ -187,6 +187,17 @@ class OrderStagingTests(unittest.TestCase):
         self.assertIn("missing_market_condition_id", result["blockers"])
         self.assertIsNone(self.journal.get_intent("staged-order-001"))
 
+
+    def test_reusing_client_id_with_new_snapshot_is_blocked_without_mutation(self):
+        first = self.stage()
+        self.assertEqual(first["status"], "prepared_not_authorized")
+        original = self.journal.get_intent("staged-order-001")
+        self.save_snapshot(available="90")
+        second = self.stage()
+        self.assertEqual(second["status"], "blocked")
+        self.assertIn("existing_intent_conflict", second["blockers"])
+        self.assertEqual(self.journal.get_intent("staged-order-001"), original)
+
     def test_replaying_same_staged_intent_is_idempotent(self):
         first = self.stage()
         events_before = len(self.journal.list_events("staged-order-001"))

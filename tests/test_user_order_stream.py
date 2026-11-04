@@ -87,6 +87,19 @@ class FakeHandle:
         self.closed = True
 
 
+class DelayedFakeHandle(FakeHandle):
+    def __init__(self, events=()):
+        super().__init__(events)
+        self.first_wait = True
+
+    async def __anext__(self):
+        if self.first_wait:
+            self.first_wait = False
+            import asyncio
+            await asyncio.sleep(0.05)
+        return await super().__anext__()
+
+
 class FakeClient:
     def __init__(self, handle, pages=()):
         self.handle = handle
@@ -302,6 +315,50 @@ class UserOrderStreamTests(unittest.TestCase):
         self.assertEqual(result["duplicate"], 1)
         self.assertEqual(self.journal.get_intent("local-123")["filled_size"], "2")
         self.assertTrue(handle.closed)
+
+
+    def test_periodic_rest_snapshot_refreshes_quiet_stream(self):
+        open_order = SimpleNamespace(
+            id="venue-123",
+            asset_id="token-456",
+            side="BUY",
+            original_size="12",
+            size_matched="4",
+            price="0.37",
+            status="LIVE",
+        )
+        page = SimpleNamespace(items=(open_order,), limit_reached=False, has_more=False)
+        handle = DelayedFakeHandle([order_event(size_matched="4")])
+        client = FakeClient(handle, [page])
+        import asyncio
+
+        result = asyncio.run(
+            consume_user_order_stream(
+                client,
+                self.journal,
+                max_events=1,
+                initial_snapshot=False,
+                snapshot_interval_seconds=0.005,
+            )
+        )
+        self.assertEqual(len(result["periodic_open_orders_snapshots"]), 1)
+        self.assertEqual(result["periodic_open_orders_snapshots"][0]["updated"], 1)
+        self.assertEqual(result["duplicate"], 1)
+        self.assertEqual(self.journal.get_intent("local-123")["filled_size"], "4")
+        self.assertTrue(handle.closed)
+
+    def test_consumer_rejects_invalid_periodic_snapshot_interval(self):
+        import asyncio
+
+        with self.assertRaisesRegex(ValueError, "positive and finite"):
+            asyncio.run(
+                consume_user_order_stream(
+                    FakeClient(FakeHandle()),
+                    self.journal,
+                    initial_snapshot=False,
+                    snapshot_interval_seconds=0,
+                )
+            )
 
     def test_consumer_rejects_nonpositive_max_events(self):
         import asyncio

@@ -201,6 +201,65 @@ class OrderJournalTests(unittest.TestCase):
             )
         self.assertEqual(self.journal.get_intent("journal-order-001"), before)
 
+
+    def test_exchange_order_id_index_survives_restart(self):
+        self.journal.create_intent(new_intent())
+        self.journal.begin_submission("journal-order-001")
+        self.journal.record_submission_response(
+            "journal-order-001", outcome="accepted", exchange_order_id="venue-index-001"
+        )
+        self.assertEqual(
+            self.journal.find_client_order_id_by_exchange_order_id("venue-index-001"),
+            "journal-order-001",
+        )
+        reopened = OrderJournal(self.database)
+        self.assertEqual(
+            reopened.find_client_order_id_by_exchange_order_id("venue-index-001"),
+            "journal-order-001",
+        )
+        self.assertIsNone(
+            reopened.find_client_order_id_by_exchange_order_id("unknown-venue-id")
+        )
+
+    def test_exchange_order_id_cannot_be_linked_to_two_local_intents(self):
+        self.journal.create_intent(new_intent())
+        self.journal.begin_submission("journal-order-001")
+        self.journal.record_submission_response(
+            "journal-order-001", outcome="accepted", exchange_order_id="venue-shared-001"
+        )
+        second = new_intent(client_order_id="journal-order-002")
+        self.journal.create_intent(second)
+        self.journal.begin_submission("journal-order-002")
+        with self.assertRaisesRegex(ValueError, "already linked"):
+            self.journal.record_submission_response(
+                "journal-order-002", outcome="accepted", exchange_order_id="venue-shared-001"
+            )
+        self.assertEqual(
+            self.journal.get_intent("journal-order-002")["status"],
+            "submission_pending",
+        )
+        self.assertEqual(
+            self.journal.find_client_order_id_by_exchange_order_id("venue-shared-001"),
+            "journal-order-001",
+        )
+
+    def test_exchange_order_index_is_rebuilt_from_existing_journal_state(self):
+        self.journal.create_intent(new_intent())
+        self.journal.begin_submission("journal-order-001")
+        self.journal.record_submission_response(
+            "journal-order-001", outcome="accepted", exchange_order_id="venue-backfill-001"
+        )
+        connection = self.journal._connect()
+        try:
+            connection.execute("DROP TABLE order_exchange_index")
+        finally:
+            connection.close()
+        reopened = OrderJournal(self.database)
+        self.assertEqual(
+            reopened.find_client_order_id_by_exchange_order_id("venue-backfill-001"),
+            "journal-order-001",
+        )
+
     def test_unknown_order_can_only_reconcile_when_client_id_matches(self):
         self.journal.create_intent(new_intent())
         self.journal.begin_submission("journal-order-001")

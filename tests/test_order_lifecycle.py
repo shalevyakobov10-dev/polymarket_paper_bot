@@ -330,6 +330,29 @@ class OrderLifecycleTests(unittest.TestCase):
         self.assertEqual(result["status"], "manual_review")
         self.assertEqual(result["last_reason_code"], "exchange_order_id_mismatch")
 
+
+    def test_venue_order_terms_mismatch_requires_manual_review(self):
+        pending = begin_submission(intent())
+        opened = record_submission_response(
+            pending, outcome="accepted", exchange_order_id="venue-order-77"
+        )
+        result = record_order_observation(
+            opened,
+            outcome="partially_filled",
+            matched_client_order_id="local-order-0001",
+            exchange_order_id="venue-order-77",
+            cumulative_filled_size=2,
+            observed_token_id="different-token",
+            observed_side="BUY",
+            observed_original_size=10,
+            observed_price=0.42,
+        )
+        self.assertEqual(result["status"], "manual_review")
+        self.assertEqual(result["last_reason_code"], "order_terms_mismatch")
+        self.assertEqual(result["last_mismatch_fields"], ["token_id"])
+        self.assertEqual(result["filled_size"], "0")
+        self.assertFalse(submission_policy(result)["automatic_retry_permitted"])
+
     def test_only_unknown_submission_can_be_reconciled(self):
         with self.assertRaises(RuntimeError):
             reconcile_submission(intent(), outcome="not_found")

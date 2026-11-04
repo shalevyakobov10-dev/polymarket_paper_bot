@@ -1,5 +1,6 @@
 import tempfile
 import unittest
+from decimal import Decimal
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -51,14 +52,15 @@ def account_snapshot(
         "snapshot_complete": True,
         "captured_at_utc": (captured_at or datetime.now(timezone.utc)).isoformat(),
         "collateral_decimals": 6,
-        "collateral_balance_base_units": "100000000",
-        "collateral_balance_usd": "100",
+        "collateral_balance_base_units": str(int(Decimal(collateral) * Decimal("1000000"))),
+        "collateral_balance_usd": collateral,
         "open_buy_commitment_usd": "0",
         "conservative_available_collateral_usd": collateral,
         "collateral_shortfall_usd": "0",
         "current_open_exposure_usd": exposure,
         "open_position_value_usd": exposure,
         "open_position_cost_usd": "0",
+        "open_position_risk_exposure_usd": exposure,
         "open_unrealized_pnl_usd": unrealized,
         "current_open_positions": positions,
         "current_open_orders": 0,

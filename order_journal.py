@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 from copy import deepcopy
 import math
+import re
 import sqlite3
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
@@ -99,6 +100,22 @@ class OrderJournal:
                     snapshot_id TEXT NOT NULL UNIQUE,
                     captured_at_utc TEXT NOT NULL,
                     snapshot_json TEXT NOT NULL
+                )
+                """
+            )
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS account_risk_sync_state (
+                    singleton_id INTEGER PRIMARY KEY CHECK (singleton_id = 1),
+                    status TEXT NOT NULL CHECK (status IN ('success', 'failed')),
+                    attempted_at_utc TEXT NOT NULL,
+                    snapshot_id TEXT,
+                    error_code TEXT,
+                    CHECK (
+                        (status = 'success' AND snapshot_id IS NOT NULL AND error_code IS NULL)
+                        OR
+                        (status = 'failed' AND snapshot_id IS NULL AND error_code IS NOT NULL)
+                    )
                 )
                 """
             )
@@ -269,6 +286,21 @@ class OrderJournal:
                 if latest_snapshot is None or latest_snapshot["snapshot_id"] != snapshot_id:
                     raise ValueError(
                         "account risk snapshot changed before intent commit"
+                    )
+                latest_sync = connection.execute(
+                    """
+                    SELECT status, snapshot_id
+                    FROM account_risk_sync_state
+                    WHERE singleton_id = 1
+                    """
+                ).fetchone()
+                if (
+                    latest_sync is None
+                    or latest_sync["status"] != "success"
+                    or latest_sync["snapshot_id"] != snapshot_id
+                ):
+                    raise ValueError(
+                        "account risk sync is not the latest successful attempt"
                     )
 
             existing_row = connection.execute(
@@ -483,7 +515,107 @@ class OrderJournal:
                 """,
                 (snapshot_id, state["captured_at_utc"], serialized),
             )
+            # A delayed successful fetch must never overwrite a newer failed
+            # attempt. ISO UTC timestamps are normalized before lexical compare.
+            connection.execute(
+                """
+                INSERT INTO account_risk_sync_state(
+                    singleton_id, status, attempted_at_utc, snapshot_id, error_code
+                ) VALUES (1, 'success', ?, ?, NULL)
+                ON CONFLICT(singleton_id) DO UPDATE SET
+                    status = excluded.status,
+                    attempted_at_utc = excluded.attempted_at_utc,
+                    snapshot_id = excluded.snapshot_id,
+                    error_code = NULL
+                WHERE excluded.attempted_at_utc >= account_risk_sync_state.attempted_at_utc
+                """,
+                (state["captured_at_utc"], snapshot_id),
+            )
         return snapshot_id
+
+    def record_account_risk_snapshot_failure(
+        self,
+        *,
+        error_code: str,
+        attempted_at: datetime | None = None,
+    ) -> None:
+        """Persist a sanitized failed sync attempt, immediately invalidating prior freshness."""
+        if not isinstance(error_code, str) or not re.fullmatch(r"[A-Za-z0-9_.-]{1,80}", error_code):
+            raise ValueError("error_code must be a short sanitized identifier")
+        timestamp = attempted_at or datetime.now(timezone.utc)
+        if not isinstance(timestamp, datetime) or timestamp.tzinfo is None or timestamp.utcoffset() is None:
+            raise ValueError("attempted_at must be timezone-aware")
+        timestamp = timestamp.astimezone(timezone.utc)
+        now = datetime.now(timezone.utc)
+        if (timestamp - now).total_seconds() > 60:
+            raise ValueError("attempted_at must not be more than 60 seconds in the future")
+        attempted_at_utc = timestamp.isoformat()
+        with self._transaction() as connection:
+            connection.execute(
+                """
+                INSERT INTO account_risk_sync_state(
+                    singleton_id, status, attempted_at_utc, snapshot_id, error_code
+                ) VALUES (1, 'failed', ?, NULL, ?)
+                ON CONFLICT(singleton_id) DO UPDATE SET
+                    status = excluded.status,
+                    attempted_at_utc = excluded.attempted_at_utc,
+                    snapshot_id = NULL,
+                    error_code = excluded.error_code
+                WHERE excluded.attempted_at_utc >= account_risk_sync_state.attempted_at_utc
+                """,
+                (attempted_at_utc, error_code),
+            )
+
+    def get_latest_account_risk_sync_state(
+        self,
+        *,
+        max_age_seconds: float = 300.0,
+        now: datetime | None = None,
+    ) -> dict[str, Any] | None:
+        """Return the latest account-risk sync attempt; a failed attempt is never fresh."""
+        if (
+            isinstance(max_age_seconds, bool)
+            or not isinstance(max_age_seconds, (int, float))
+            or not math.isfinite(float(max_age_seconds))
+            or float(max_age_seconds) <= 0
+        ):
+            raise ValueError("max_age_seconds must be positive and finite")
+        current = now or datetime.now(timezone.utc)
+        if current.tzinfo is None or current.utcoffset() is None:
+            raise ValueError("now must be timezone-aware")
+        current = current.astimezone(timezone.utc)
+        connection = self._connect()
+        try:
+            row = connection.execute(
+                """
+                SELECT status, attempted_at_utc, snapshot_id, error_code
+                FROM account_risk_sync_state
+                WHERE singleton_id = 1
+                """
+            ).fetchone()
+        finally:
+            connection.close()
+        if row is None:
+            return None
+        try:
+            attempted = datetime.fromisoformat(row["attempted_at_utc"])
+        except (TypeError, ValueError):
+            raise ValueError("stored account-risk sync state timestamp is malformed") from None
+        if attempted.tzinfo is None or attempted.utcoffset() is None:
+            raise ValueError("stored account-risk sync state timestamp is not timezone-aware")
+        age = (current - attempted.astimezone(timezone.utc)).total_seconds()
+        if age < -60:
+            raise ValueError("stored account-risk sync state timestamp is in the future")
+        status = row["status"]
+        fresh = status == "success" and age <= float(max_age_seconds)
+        return {
+            "status": status,
+            "attempted_at_utc": attempted.astimezone(timezone.utc).isoformat(),
+            "age_seconds": max(0.0, age),
+            "snapshot_id": row["snapshot_id"],
+            "error_code": row["error_code"],
+            "fresh": fresh,
+        }
 
     def get_latest_account_risk_snapshot(
         self,

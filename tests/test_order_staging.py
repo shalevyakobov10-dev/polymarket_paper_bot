@@ -1,5 +1,6 @@
 import tempfile
 import unittest
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from live_order_preflight import REQUIRED_RELEASE_GATES
@@ -39,6 +40,26 @@ class OrderStagingTests(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory()
         self.database = Path(self.temp.name) / "orders.sqlite3"
         self.journal = OrderJournal(self.database)
+        self.snapshot_id = self.save_snapshot()
+
+    def save_snapshot(
+        self, *, age_seconds=0, position_assets=None, order_assets=None,
+        available="100", exposure="0", positions=0, open_orders=0, unrealized="0"
+    ):
+        captured = datetime.now(timezone.utc) - timedelta(seconds=age_seconds)
+        return self.journal.save_account_risk_snapshot({
+            "snapshot_complete": True,
+            "captured_at_utc": captured.isoformat(),
+            "collateral_balance_usd": "100",
+            "conservative_available_collateral_usd": available,
+            "current_open_exposure_usd": exposure,
+            "current_open_positions": positions,
+            "current_open_orders": open_orders,
+            "open_position_assets_by_condition": position_assets or {},
+            "open_order_assets_by_condition": order_assets or {},
+            "open_unrealized_pnl_usd": unrealized,
+            "execution": "none",
+        })
 
     def tearDown(self):
         self.temp.cleanup()
@@ -50,6 +71,7 @@ class OrderStagingTests(unittest.TestCase):
             "side": "BUY",
             "limit_price": 0.50,
             "size": 10,
+            "market_condition_id": "condition-123",
             "preflight_context": preflight_context(),
         }
         values.update(overrides)
@@ -67,6 +89,9 @@ class OrderStagingTests(unittest.TestCase):
         saved = self.journal.get_intent("staged-order-001")
         self.assertEqual(saved["status"], "prepared")
         self.assertTrue(saved["preflight_report"]["preflight_passed"])
+        self.assertEqual(saved["account_risk_snapshot_id"], self.snapshot_id)
+        self.assertEqual(saved["market_condition_id"], "condition-123")
+        self.assertEqual(result["account_risk_snapshot_id"], self.snapshot_id)
         events = self.journal.list_events("staged-order-001")
         self.assertEqual(len(events), 1)
         self.assertIn("preflight_report", events[0]["state"])
@@ -101,6 +126,47 @@ class OrderStagingTests(unittest.TestCase):
         result = self.stage(preflight_context={"best_ask": 0.5})
         self.assertEqual(result["status"], "blocked")
         self.assertIn("invalid_preflight_context", result["blockers"])
+        self.assertIsNone(self.journal.get_intent("staged-order-001"))
+
+
+    def test_missing_or_stale_account_snapshot_blocks_staging(self):
+        self.save_snapshot(age_seconds=600)
+        result = self.stage()
+        self.assertEqual(result["status"], "blocked")
+        self.assertIn("account_risk_snapshot_missing_or_stale", result["blockers"])
+        self.assertIsNone(self.journal.get_intent("staged-order-001"))
+
+    def test_account_metrics_are_derived_from_snapshot_not_caller_values(self):
+        context = preflight_context()
+        context.update({
+            "available_collateral_usd": 0,
+            "current_open_exposure_usd": 999,
+            "current_open_positions": 5,
+            "open_unrealized_pnl_usd": -999,
+            "opposing_market_outcome_open": True,
+        })
+        result = self.stage(preflight_context=context)
+        self.assertEqual(result["status"], "prepared_not_authorized")
+        self.assertTrue(result["preflight_report"]["preflight_passed"])
+
+    def test_opposing_outcome_in_account_snapshot_blocks_staging(self):
+        self.save_snapshot(position_assets={"condition-123": ["opposing-token"]})
+        result = self.stage()
+        self.assertEqual(result["status"], "blocked")
+        self.assertIn("opposing_market_outcome_already_open", result["blockers"])
+        self.assertIsNone(self.journal.get_intent("staged-order-001"))
+
+    def test_open_orders_count_toward_conservative_position_limit(self):
+        self.save_snapshot(open_orders=5)
+        result = self.stage()
+        self.assertEqual(result["status"], "blocked")
+        self.assertIn("max_open_positions_reached", result["blockers"])
+        self.assertIsNone(self.journal.get_intent("staged-order-001"))
+
+    def test_missing_market_condition_id_blocks_staging(self):
+        result = self.stage(market_condition_id="")
+        self.assertEqual(result["status"], "blocked")
+        self.assertIn("missing_market_condition_id", result["blockers"])
         self.assertIsNone(self.journal.get_intent("staged-order-001"))
 
     def test_replaying_same_staged_intent_is_idempotent(self):

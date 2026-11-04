@@ -404,6 +404,12 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Read-only Polymarket account order monitor")
     parser.add_argument("--database", default=os.environ.get("ORDER_JOURNAL_DB"),
                         help="SQLite journal path (default: DATA_DIR/order_journal.sqlite3)")
+    parser.add_argument(
+        "--snapshot-interval-seconds",
+        type=float,
+        default=float(os.environ.get("USER_ORDER_SNAPSHOT_INTERVAL_SECONDS", "300")),
+        help="REST open-order refresh interval in seconds (default: 300)",
+    )
     args = parser.parse_args()
     data_dir = Path(os.environ.get("DATA_DIR", "data"))
     database_path = Path(args.database) if args.database else data_dir / "order_journal.sqlite3"
@@ -413,7 +419,13 @@ def main() -> None:
     journal = OrderJournal(database_path)
     logger.info("starting read-only Polymarket user-order monitor")
     try:
-        summary = asyncio.run(monitor_user_orders_from_env(journal, logger=logger))
+        summary = asyncio.run(
+            monitor_user_orders_from_env(
+                journal,
+                snapshot_interval_seconds=args.snapshot_interval_seconds,
+                logger=logger,
+            )
+        )
     except KeyboardInterrupt:
         logger.info("user-order monitor stopped by operator")
         return

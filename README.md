@@ -286,3 +286,10 @@ This is intentionally a bounded recent-window diagnostic, not a lifetime ledger 
 The historical backtest's `forward_return_study` now reports two separate descriptive hypotheses for each horizon: long after a positive price move (momentum) and long after a negative price move (contrarian/rebound). Both are compared with the same all-observation baseline, use the first observed price at or after the horizon, and exclude signals without a full in-window future observation from return statistics while retaining their detected-signal counts.
 
 The original positive-move fields remain as backward-compatible aliases. This is an event study, not a simulated portfolio or executable fill model. It does not pick the better direction, tune thresholds, or change paper entries. Small event counts are explicitly not evidence of a predictive edge; any strategy change requires a newly collected chronological holdout and realistic cost/fill validation.
+
+
+## Walk-forward directional event studies
+
+Each expanding walk-forward test fold now includes its own `directional_forward_return_study` for positive price moves (momentum) and negative price moves (contrarian long). The first test observation is compared with the last observation available for that token in the fold's training history; only in-window future observations are used to score returns. This prevents the first test point from losing its prior context without importing a future value.
+
+Fold-level studies remain descriptive and do not change the fixed paper strategy. Counts and returns are shown per fold rather than being used to promote or tune a direction. The event observations may be correlated, and small counts do not establish an edge.

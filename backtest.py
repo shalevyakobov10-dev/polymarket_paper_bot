@@ -308,6 +308,8 @@ def evaluate_forward_returns(
             "No direction is selected, promoted, or connected to paper entries."
         ),
         "horizons": output,
+        "research_only": True,
+        "execution": "none",
     }
 
 
@@ -682,6 +684,15 @@ def run_walk_forward_backtest(
                 prime_prices=prime_prices,
                 prime_timestamp=utc_from_timestamp(test_start) - timedelta(microseconds=1),
             )
+            prior_prices = {
+                token_id: float(row["observed_price"])
+                for token_id, row in latest_by_token.items()
+            }
+            directional_forward_return_study = evaluate_forward_returns(
+                test_rows,
+                config.signal_delta,
+                prior_prices=prior_prices,
+            )
             train_stamps = sorted({int(row["timestamp"]) for row in train_rows})
             results.append({
                 "fold": fold_number,
@@ -698,6 +709,7 @@ def run_walk_forward_backtest(
                     "observations": len(test_rows),
                 },
                 "out_of_sample": segment,
+                "directional_forward_return_study": directional_forward_return_study,
                 "research_only": True,
                 "execution": "none",
             })

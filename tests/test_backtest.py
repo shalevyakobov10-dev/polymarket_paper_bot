@@ -171,6 +171,26 @@ class BacktestTests(unittest.TestCase):
         self.assertEqual(result["horizons"]["1h"]["signals_detected"], 1)
         self.assertEqual(result["horizons"]["1h"]["signal_forward_returns"]["n"], 1)
 
+    def test_forward_returns_uses_prior_price_for_first_negative_holdout_move(self):
+        history = [
+            {"timestamp": 1_800_000_000, "token_id": "token-a", "observed_price": 0.44},
+            {"timestamp": 1_800_003_600, "token_id": "token-a", "observed_price": 0.48},
+        ]
+        result = evaluate_forward_returns(
+            history,
+            threshold=0.03,
+            horizons_hours=(1,),
+            prior_prices={"token-a": 0.50},
+        )
+        stats = result["horizons"]["1h"]
+        self.assertEqual(stats["negative_move_signals_detected"], 1)
+        self.assertEqual(stats["negative_move_long_forward_returns"]["n"], 1)
+        self.assertGreater(
+            stats["negative_move_long_forward_returns"]["mean_return_pct"], 0.0
+        )
+        self.assertTrue(result["research_only"])
+        self.assertEqual(result["execution"], "none")
+
     def test_backtest_rejects_too_few_points(self):
         history = [
             {"timestamp": 1_800_000_000 + i, "token_id": "t", "observed_price": 0.5}
@@ -258,6 +278,11 @@ class BacktestTests(unittest.TestCase):
         self.assertTrue(report["portfolio_reset_each_fold"])
         self.assertEqual(len(report["folds"]), 3)
         for index, fold in enumerate(report["folds"]):
+            directional = fold["directional_forward_return_study"]
+            self.assertTrue(directional["research_only"])
+            self.assertEqual(directional["execution"], "none")
+            self.assertIn("positive_move_forward_returns", directional["horizons"]["1h"])
+            self.assertIn("negative_move_long_forward_returns", directional["horizons"]["1h"])
             self.assertLess(
                 fold["training_window"]["end_utc"],
                 fold["test_window"]["start_utc"],

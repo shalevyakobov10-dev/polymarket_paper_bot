@@ -30,6 +30,8 @@ Requires Python 3.12+.
 python app.py
 ```
 
+The Docker image uses `service_supervisor.py` as PID 1. It always runs the HTTP research worker and keeps the authenticated account monitor disabled by default. To supervise the read-only account monitor in a single persistent container, set `ENABLE_USER_ORDER_MONITOR=true` and provide `POLYMARKET_PRIVATE_KEY` through the cloud secret manager/runtime environment. The supervisor refuses that mode without the secret, never places credentials in command-line arguments or logs, and restarts a disconnected monitor with bounded backoff. If the HTTP worker exits, the container exits for platform restart. Keep one replica when using the SQLite journal and its persistent volume; do not mount the same SQLite file into multiple independent containers.
+
 The service listens on port 8080 by default. Routes:
 - `/` and `/status`: current worker status
 - `/health`: readiness response with `healthy` / `degraded` / `unhealthy` status and freshness/worker checks for market data, RSS news, GDELT, resolutions, and the public market stream; the market-data poll is required while the other collectors are exposed as optional degraded components

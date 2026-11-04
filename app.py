@@ -27,6 +27,7 @@ from learning_journal import LearningJournal
 from model_governance import ModelGovernanceLedger
 from execution_readiness import execution_readiness_payload
 from resilience import exponential_backoff_seconds, parse_retry_after
+from supervisor_status import read_supervisor_status
 
 GAMMA_URL = "https://gamma-api.polymarket.com/markets"
 POLL_SECONDS = max(15, int(os.getenv("POLL_SECONDS", "60")))
@@ -47,6 +48,7 @@ try:
 except (ValueError, TypeError):
     MODEL_EVALUATION_SECONDS = 21600
 DATA_DIR = Path(os.getenv("DATA_DIR", "data"))
+SUPERVISOR_STATUS_FILE = Path(os.getenv("SERVICE_SUPERVISOR_STATUS_FILE", str(DATA_DIR / "service_supervisor_status.json")))
 SNAPSHOTS = DATA_DIR / "market_snapshots.jsonl"
 SIGNALS = DATA_DIR / "candidate_signals.jsonl"
 ORDERBOOK_SNAPSHOTS = DATA_DIR / "orderbook_snapshots.jsonl"
@@ -1242,7 +1244,7 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def do_GET(self):
-        if self.path in ("/", "/status", "/health", "/paper", "/news", "/matches", "/market-stream", "/resolutions", "/forecast-evaluation", "/research-features", "/independent-model-evaluation", "/model-forecasts", "/learning", "/execution-readiness"):
+        if self.path in ("/", "/status", "/health", "/paper", "/news", "/matches", "/market-stream", "/resolutions", "/forecast-evaluation", "/research-features", "/independent-model-evaluation", "/model-forecasts", "/learning", "/execution-readiness", "/service-supervisor"):
             with _lock:
                 snapshot = dict(_state)
             if self.path == "/health":
@@ -1322,6 +1324,14 @@ class Handler(BaseHTTPRequestHandler):
                     })
             elif self.path == "/execution-readiness":
                 self._send(200, execution_readiness_payload())
+            elif self.path == "/service-supervisor":
+                payload = read_supervisor_status(SUPERVISOR_STATUS_FILE)
+                payload.update({
+                    "read_only": True,
+                    "order_submission_allowed": False,
+                    "order_signing_allowed": False,
+                })
+                self._send(200, payload)
             elif self.path == "/learning":
                 try:
                     with _learning_lock:

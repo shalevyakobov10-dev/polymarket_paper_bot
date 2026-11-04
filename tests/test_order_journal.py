@@ -268,6 +268,61 @@ class OrderJournalTests(unittest.TestCase):
 
 
 
+    def test_account_risk_sync_state_tracks_success_failure_and_recovery(self):
+        first_id = self.journal.save_account_risk_snapshot(complete_risk_snapshot())
+        first = self.journal.get_latest_account_risk_sync_state(max_age_seconds=60)
+        self.assertEqual(first["status"], "success")
+        self.assertEqual(first["snapshot_id"], first_id)
+        self.assertTrue(first["fresh"])
+
+        self.journal.record_account_risk_snapshot_failure(error_code="TimeoutError")
+        failed = self.journal.get_latest_account_risk_sync_state(max_age_seconds=60)
+        self.assertEqual(failed["status"], "failed")
+        self.assertIsNone(failed["snapshot_id"])
+        self.assertEqual(failed["error_code"], "TimeoutError")
+        self.assertFalse(failed["fresh"])
+
+        second_id = self.journal.save_account_risk_snapshot(complete_risk_snapshot())
+        recovered = self.journal.get_latest_account_risk_sync_state(max_age_seconds=60)
+        self.assertEqual(recovered["status"], "success")
+        self.assertEqual(recovered["snapshot_id"], second_id)
+        self.assertTrue(recovered["fresh"])
+
+    def test_delayed_older_success_cannot_overwrite_a_newer_failed_sync(self):
+        failed_at = datetime.now(timezone.utc)
+        self.journal.record_account_risk_snapshot_failure(
+            error_code="ConnectionError",
+            attempted_at=failed_at,
+        )
+        delayed_snapshot = complete_risk_snapshot(
+            captured_at_utc=(failed_at - __import__("datetime").timedelta(seconds=1)).isoformat()
+        )
+        delayed_id = self.journal.save_account_risk_snapshot(delayed_snapshot)
+        self.assertEqual(
+            self.journal.get_latest_account_risk_snapshot()["snapshot_id"],
+            delayed_id,
+        )
+        sync_state = self.journal.get_latest_account_risk_sync_state(max_age_seconds=60)
+        self.assertEqual(sync_state["status"], "failed")
+        self.assertEqual(sync_state["error_code"], "ConnectionError")
+        self.assertFalse(sync_state["fresh"])
+
+    def test_failed_latest_sync_blocks_atomic_intent_commit(self):
+        snapshot_id = self.journal.save_account_risk_snapshot(complete_risk_snapshot())
+        intent = new_intent()
+        intent["market_condition_id"] = "condition-1"
+        intent["account_risk_snapshot_id"] = snapshot_id
+        self.journal.record_account_risk_snapshot_failure(error_code="TimeoutError")
+        with self.assertRaisesRegex(ValueError, "sync is not the latest successful attempt"):
+            self.journal.create_intent_with_status(intent)
+        self.assertIsNone(self.journal.get_intent(intent["client_order_id"]))
+
+    def test_failed_sync_rejects_unsafe_error_code(self):
+        with self.assertRaisesRegex(ValueError, "sanitized identifier"):
+            self.journal.record_account_risk_snapshot_failure(
+                error_code="timeout with credential=secret"
+            )
+
     def test_account_risk_snapshot_rejects_inconsistent_derived_values(self):
         cases = [
             (

@@ -513,7 +513,11 @@ class PaperTrader:
                             "execution": "simulated_only",
                         }
                         result["candidates"].append(candidate)
-                        opened, skip_reason = self._try_open(key, row, price, current_time, delta)
+                        execution_diagnostics: dict[str, Any] = {}
+                        opened, skip_reason = self._try_open(
+                            key, row, price, current_time, delta,
+                            execution_diagnostics=execution_diagnostics,
+                        )
                         if opened:
                             result["opened"].append(opened)
                             events.append(opened)
@@ -521,6 +525,8 @@ class PaperTrader:
                         else:
                             candidate["paper_action"] = "skipped"
                             candidate["skip_reason"] = skip_reason
+                            if execution_diagnostics:
+                                candidate["execution_diagnostics"] = execution_diagnostics
                         events.append(candidate)
                 self._state["last_prices"][key] = round(price, 8)
 
@@ -547,7 +553,16 @@ class PaperTrader:
                     self._write_event(event)
         return result
 
-    def _try_open(self, key: str, row: dict[str, Any], observed_price: float, now: datetime, delta: float) -> tuple[dict[str, Any] | None, str]:
+    def _try_open(
+        self,
+        key: str,
+        row: dict[str, Any],
+        observed_price: float,
+        now: datetime,
+        delta: float,
+        *,
+        execution_diagnostics: dict[str, Any] | None = None,
+    ) -> tuple[dict[str, Any] | None, str]:
         if self._state.get("circuit_breaker_tripped"):
             return None, "portfolio_drawdown_circuit_breaker_latched"
         market_quality = evaluate_order_book_quality(
@@ -644,6 +659,8 @@ class PaperTrader:
                 target_notional_usd=spend,
                 limit_price=entry_limit_price,
             )
+            if execution_diagnostics is not None:
+                execution_diagnostics["entry_fill_assessment"] = dict(entry_fill_details)
             if not entry_fill_details.get("eligible"):
                 return None, str(entry_fill_details.get("reason") or "entry_book_depth_unavailable")
             entry_reference_price = float(entry_fill_details["average_price"])

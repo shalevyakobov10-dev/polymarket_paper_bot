@@ -7,6 +7,7 @@ must explicitly recover pending attempts as ambiguous before reconciliation.
 from __future__ import annotations
 
 import json
+from copy import deepcopy
 import math
 import sqlite3
 from datetime import datetime, timezone
@@ -223,6 +224,19 @@ class OrderJournal:
         saved, _created = self.create_intent_with_status(intent)
         return saved
 
+    @staticmethod
+    def _stable_preflight_report(report: Any) -> Any:
+        """Copy audit evidence while excluding only the naturally changing age counter."""
+        if report is None:
+            return None
+        if not isinstance(report, dict):
+            raise ValueError("preflight_report must be a dictionary")
+        normalized = deepcopy(report)
+        account_snapshot = normalized.get("account_risk_snapshot")
+        if isinstance(account_snapshot, dict):
+            account_snapshot.pop("age_seconds", None)
+        return normalized
+
     def create_intent_with_status(
         self,
         intent: dict[str, Any],
@@ -275,6 +289,16 @@ class OrderJournal:
                 )
                 if any(existing.get(field) != intent.get(field) for field in immutable_fields):
                     raise ValueError("client_order_id already exists with different order terms")
+                existing_preflight = self._stable_preflight_report(
+                    existing.get("preflight_report")
+                )
+                requested_preflight = self._stable_preflight_report(
+                    intent.get("preflight_report")
+                )
+                if existing_preflight != requested_preflight:
+                    raise ValueError(
+                        "client_order_id already exists with different preflight evidence"
+                    )
                 return existing, False
 
             serialized = self._serialize(intent)

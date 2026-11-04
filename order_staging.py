@@ -174,9 +174,11 @@ def stage_buy_order_intent(
     intent["account_risk_snapshot_captured_at_utc"] = captured_at
     intent["preflight_report"] = report
 
-    existing_before = journal.get_intent(client_order_id)
-    saved = journal.create_intent(intent)
-    created_now = existing_before is None
+    try:
+        saved, created_now = journal.create_intent_with_status(intent)
+    except (KeyError, TypeError, ValueError) as exc:
+        return _blocked("order_intent_conflict_or_corrupt_journal", str(exc)[:180],
+                        preflight_report=report)
     return {
         "status": "prepared_not_authorized" if saved["status"] == "prepared"
                   else "existing_intent_not_prepared",

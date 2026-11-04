@@ -255,6 +255,13 @@ class ModelGovernanceLedger:
             "market_brier": baseline.get("brier_score"),
             "model_log_loss": model.get("log_loss"),
             "market_log_loss": baseline.get("log_loss"),
+            "model_calibration": model.get("calibration"),
+            "market_calibration": baseline.get("calibration"),
+            "dataset_provenance": evaluation.get("dataset_provenance"),
+            "test_forecast_start": evaluation.get("test_forecast_start"),
+            "latest_training_label_available_at": evaluation.get("latest_training_label_available_at"),
+            "horizon_hours": evaluation.get("horizon_hours"),
+            "tolerance_hours": evaluation.get("tolerance_hours"),
             "walk_status": walk.get("status"),
             "walk_folds": [
                 {
@@ -263,6 +270,11 @@ class ModelGovernanceLedger:
                     "test_n": row.get("test_n"),
                     "brier": row.get("brier_improvement_vs_market"),
                     "log_loss": row.get("log_loss_change_vs_market"),
+                    "train_start": row.get("train_start"),
+                    "train_end": row.get("train_end"),
+                    "test_forecast_start": row.get("test_forecast_start"),
+                    "test_forecast_end": row.get("test_forecast_end"),
+                    "latest_training_label_available_at": row.get("latest_training_label_available_at"),
                 }
                 for row in walk.get("folds", []) if isinstance(row, dict)
             ],
@@ -299,6 +311,16 @@ class ModelGovernanceLedger:
                 **assessment,
                 "evaluated_at": datetime.now(timezone.utc).isoformat(),
                 "evaluation_fingerprint": fingerprint,
+                "evaluation_provenance": (
+                    evaluation.get("dataset_provenance")
+                    if isinstance(evaluation, dict) else None
+                ),
+                "evaluation_window": {
+                    "test_forecast_start": evaluation.get("test_forecast_start"),
+                    "latest_training_label_available_at": evaluation.get("latest_training_label_available_at"),
+                    "horizon_hours": evaluation.get("horizon_hours"),
+                    "tolerance_hours": evaluation.get("tolerance_hours"),
+                } if isinstance(evaluation, dict) else {},
                 "audit_record_written": True,
                 "duplicate_evaluation": False,
             }

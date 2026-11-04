@@ -91,6 +91,15 @@ class LiveOrderPreflightTests(unittest.TestCase):
         self.assertIn("max_drawdown_reached", result["blockers"])
         self.assertIn("max_open_exposure_exceeded", result["blockers"])
 
+    def test_non_positive_minimum_order_size_fails_closed(self):
+        for minimum in (0, -1):
+            with self.subTest(minimum_order_size=minimum):
+                args = valid_args()
+                args["minimum_order_size"] = minimum
+                result = evaluate_live_order_preflight(**args)
+                self.assertFalse(result["preflight_passed"])
+                self.assertIn("invalid_minimum_order_size", result["blockers"])
+
     def test_invalid_numeric_values_fail_closed(self):
         args = valid_args()
         args["limit_price"] = float("nan")

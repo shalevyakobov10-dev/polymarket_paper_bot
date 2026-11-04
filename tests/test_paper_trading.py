@@ -483,11 +483,23 @@ class PaperTraderTests(unittest.TestCase):
             self.now + timedelta(minutes=5),
         )
         self.assertEqual(result["opened"], [])
+        candidate = result["candidates"][0]
         self.assertEqual(
-            result["candidates"][0]["skip_reason"],
+            candidate["skip_reason"],
             "insufficient_visible_ask_depth",
         )
+        assessment = candidate["execution_diagnostics"]["entry_fill_assessment"]
+        self.assertEqual(assessment["completion_status"], "partial")
+        self.assertFalse(assessment["eligible"])
+        self.assertAlmostEqual(assessment["fill_ratio"], 0.54)
+        self.assertAlmostEqual(assessment["visible_depth_usd"], 1.08)
+        self.assertEqual(assessment["execution"], "none")
         self.assertEqual(bot.snapshot()["metrics"]["open_positions"], 0)
+        persisted_candidate = bot.snapshot()["recent_events"][-1]
+        self.assertEqual(
+            persisted_candidate["execution_diagnostics"]["entry_fill_assessment"]["completion_status"],
+            "partial",
+        )
 
     def test_orderbook_gate_accepts_fresh_liquid_book(self):
         cfg = PaperConfig(**{**self.config.__dict__, "require_orderbook": True})

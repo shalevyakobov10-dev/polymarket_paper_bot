@@ -149,6 +149,7 @@ async def collect_account_risk_snapshot(
     positions = await _collect_positions(client)
     position_value = Decimal("0")
     position_cost = Decimal("0")
+    position_risk_exposure = Decimal("0")
     unrealized_pnl = Decimal("0")
     position_assets_by_condition: dict[str, set[str]] = {}
     position_count_by_status: dict[str, int] = {}
@@ -161,12 +162,16 @@ async def collect_account_risk_snapshot(
         status = str(position.status)
         position_value += current_value
         position_cost += total_cost
+        # Use the higher of marked value and deployed cost for each position.
+        # Per-position max avoids one winning position masking another position's
+        # drawdown when only aggregate totals are compared.
+        position_risk_exposure += max(current_value, total_cost)
         unrealized_pnl += pnl
         position_assets_by_condition.setdefault(condition_id, set()).add(asset_id)
         position_count_by_status[status] = position_count_by_status.get(status, 0) + 1
 
     conservative_available = max(Decimal("0"), collateral_usd - open_buy_commitment)
-    projected_exposure = position_value + open_buy_commitment
+    projected_exposure = position_risk_exposure + open_buy_commitment
     collateral_shortfall = max(Decimal("0"), open_buy_commitment - collateral_usd)
 
     return {
@@ -181,6 +186,7 @@ async def collect_account_risk_snapshot(
         "current_open_exposure_usd": _decimal_text(projected_exposure),
         "open_position_value_usd": _decimal_text(position_value),
         "open_position_cost_usd": _decimal_text(position_cost),
+        "open_position_risk_exposure_usd": _decimal_text(position_risk_exposure),
         "open_unrealized_pnl_usd": _decimal_text(unrealized_pnl),
         "current_open_positions": len(positions),
         "current_open_orders": len(unique_orders),

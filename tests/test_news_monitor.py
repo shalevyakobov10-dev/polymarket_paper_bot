@@ -358,6 +358,29 @@ class NewsMonitorTests(unittest.TestCase):
         self.assertEqual(future["news_freshness_status"], "future_timestamp")
         self.assertLess(future["news_age_seconds"], 0)
 
+    def test_refresh_match_freshness_recomputes_age_without_mutating_history(self):
+        now = news_monitor.datetime(2026, 11, 4, 12, 0, tzinfo=news_monitor.timezone.utc)
+        original = {
+            "pair_id": "p1",
+            "news_published_at_utc": "2026-11-01T11:00:00+00:00",
+            "news_freshness_status": "fresh",
+            "news_age_seconds": 60,
+        }
+        refreshed = news_monitor.refresh_match_freshness([original], now=now)
+        self.assertEqual(refreshed[0]["news_freshness_status"], "stale")
+        self.assertEqual(refreshed[0]["news_age_seconds"], 262800)
+        self.assertEqual(refreshed[0]["news_published_at_utc"], original["news_published_at_utc"])
+        self.assertEqual(original["news_freshness_status"], "fresh")
+        self.assertEqual(original["news_age_seconds"], 60)
+
+    def test_refresh_match_freshness_keeps_legacy_missing_timestamp_unknown(self):
+        refreshed = news_monitor.refresh_match_freshness(
+            [{"pair_id": "legacy", "news_freshness_status": "fresh", "news_age_seconds": 10}],
+            now=news_monitor.datetime(2026, 11, 4, 12, 0, tzinfo=news_monitor.timezone.utc),
+        )
+        self.assertEqual(refreshed[0]["news_freshness_status"], "unknown_timestamp")
+        self.assertIsNone(refreshed[0]["news_age_seconds"])
+
     def test_match_freshness_rejects_invalid_age_threshold(self):
         with self.assertRaises(ValueError):
             news_monitor.classify_news_freshness(

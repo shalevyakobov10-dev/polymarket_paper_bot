@@ -257,7 +257,7 @@ class NewsMonitorTests(unittest.TestCase):
         self.assertEqual(summary[0]["publisher_ids"], ["bbc", "guardian", "npr"])
         self.assertEqual(
             summary[0]["interpretation"],
-            "normalized_publisher_diversity_only_not_independent_event_verification",
+            "publisher_diversity_and_exact_title_repetition_only_not_independent_event_verification",
         )
         self.assertEqual(summary[0]["execution"], "none")
 

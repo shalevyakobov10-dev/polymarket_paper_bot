@@ -167,7 +167,7 @@ class UserOrderStreamTests(unittest.TestCase):
         self.assertEqual(state["filled_size"], "0")
 
     def test_unknown_status_and_untracked_orders_do_not_mutate_journal(self):
-        unknown = self.processor.process(order_event(status="NEW_UNKNOWN_STATUS"))
+        unknown = self.processor.process(order_event(status="NEW_UNKNOWN_STATUS", size_matched="0"))
         self.assertEqual(unknown["result"], "ignored_unknown_venue_status")
         untracked = self.processor.process(order_event(order_id="not-in-journal"))
         self.assertEqual(untracked["result"], "untracked_order_event")

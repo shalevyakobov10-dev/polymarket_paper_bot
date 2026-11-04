@@ -17,7 +17,7 @@ import sys
 import threading
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable, Mapping, Sequence
+from typing import Any, Callable, Mapping
 
 
 LOGGER = logging.getLogger("polymarket.supervisor")

@@ -130,6 +130,57 @@ class OrderJournalTests(unittest.TestCase):
         self.assertEqual(final_state["submission_attempts"], 1)
         self.assertEqual(final_state["status"], "submission_pending")
 
+
+    def test_cumulative_observations_are_durable_and_duplicate_snapshots_are_noops(self):
+        self.journal.create_intent(new_intent())
+        self.journal.begin_submission("journal-order-001")
+        self.journal.record_submission_response(
+            "journal-order-001", outcome="accepted", exchange_order_id="venue-123"
+        )
+        first = self.journal.record_order_observation(
+            "journal-order-001", outcome="partially_filled",
+            matched_client_order_id="journal-order-001",
+            exchange_order_id="venue-123", cumulative_filled_size=3,
+        )
+        self.assertEqual(first["filled_size"], "3")
+        event_count = len(self.journal.list_events("journal-order-001"))
+        duplicate = self.journal.record_order_observation(
+            "journal-order-001", outcome="partially_filled",
+            matched_client_order_id="journal-order-001",
+            exchange_order_id="venue-123", cumulative_filled_size=3,
+        )
+        self.assertEqual(duplicate, first)
+        self.assertEqual(len(self.journal.list_events("journal-order-001")), event_count)
+        cancelled = self.journal.record_order_observation(
+            "journal-order-001", outcome="cancelled",
+            matched_client_order_id="journal-order-001",
+            exchange_order_id="venue-123", cumulative_filled_size=3,
+        )
+        self.assertEqual(cancelled["status"], "cancelled")
+        self.assertEqual(cancelled["filled_size"], "3")
+        self.assertEqual(self.journal.list_events("journal-order-001")[-1]["event_type"],
+                         "order_observation_cancelled")
+
+    def test_stale_fill_snapshot_cannot_reduce_persisted_cumulative_fill(self):
+        self.journal.create_intent(new_intent())
+        self.journal.begin_submission("journal-order-001")
+        self.journal.record_submission_response(
+            "journal-order-001", outcome="accepted", exchange_order_id="venue-123"
+        )
+        self.journal.record_order_observation(
+            "journal-order-001", outcome="partially_filled",
+            matched_client_order_id="journal-order-001",
+            exchange_order_id="venue-123", cumulative_filled_size=5,
+        )
+        before = self.journal.get_intent("journal-order-001")
+        with self.assertRaisesRegex(ValueError, "cannot decrease"):
+            self.journal.record_order_observation(
+                "journal-order-001", outcome="partially_filled",
+                matched_client_order_id="journal-order-001",
+                exchange_order_id="venue-123", cumulative_filled_size=2,
+            )
+        self.assertEqual(self.journal.get_intent("journal-order-001"), before)
+
     def test_unknown_order_can_only_reconcile_when_client_id_matches(self):
         self.journal.create_intent(new_intent())
         self.journal.begin_submission("journal-order-001")

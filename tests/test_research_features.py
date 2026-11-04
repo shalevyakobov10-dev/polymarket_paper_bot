@@ -92,7 +92,7 @@ class ResearchFeatureTests(unittest.TestCase):
             {
                 "market_id": "m1", "source": "Reuters", "publisher_id": "reuters",
                 "news_title": "Policy reaction",
-                "news_published_at": "2026-11-04T10:00:00Z",
+                "news_published_at": "2026-11-04T10:30:00Z",
                 "method": "market_corpus_idf_keyword_v2",
                 "relevance_score": 1.4, "headline_precision": -0.1,
             },

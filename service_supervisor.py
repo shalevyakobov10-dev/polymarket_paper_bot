@@ -16,8 +16,11 @@ import subprocess
 import sys
 import threading
 from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable, Mapping
+
+from supervisor_status import build_supervisor_status, write_supervisor_status
 
 
 LOGGER = logging.getLogger("polymarket.supervisor")
@@ -29,6 +32,7 @@ class SupervisorConfig:
     monitor_command: tuple[str, ...] | None
     app_env: dict[str, str]
     monitor_env: dict[str, str] | None
+    status_path: Path
     poll_interval_seconds: float = 1.0
     monitor_restart_base_seconds: float = 2.0
     monitor_restart_max_seconds: float = 60.0
@@ -62,9 +66,16 @@ def build_supervisor_config(
     database_path = Path(
         source.get("ORDER_JOURNAL_DB", str(data_dir / "order_journal.sqlite3"))
     ).expanduser()
+    status_path = Path(
+        source.get(
+            "SERVICE_SUPERVISOR_STATUS_FILE",
+            str(data_dir / "service_supervisor_status.json"),
+        )
+    ).expanduser()
     monitor_env = dict(source)
     monitor_env["DATA_DIR"] = str(data_dir)
     monitor_env["ORDER_JOURNAL_DB"] = str(database_path)
+    monitor_env["SERVICE_SUPERVISOR_STATUS_FILE"] = str(status_path)
 
     # The public HTTP research worker has no need to inherit account secrets.
     app_env = dict(monitor_env)
@@ -110,6 +121,7 @@ def build_supervisor_config(
         monitor_command=monitor_command,
         app_env=app_env,
         monitor_env=monitor_env if monitor_enabled else None,
+        status_path=status_path,
         poll_interval_seconds=min(poll_interval, 10.0),
     )
 
@@ -156,41 +168,75 @@ def run_supervisor(
     """Run the HTTP worker and optionally supervise the authenticated read-only monitor."""
     log = logger or LOGGER
     stopping = stop_event or threading.Event()
-    app_process = None
+    monitor_enabled = config.monitor_command is not None
+    monitor_state = "starting" if monitor_enabled else "disabled"
+    service_state = "starting"
     monitor_process = None
+    app_process = None
     monitor_failures = 0
+    last_monitor_exit_code: int | None = None
+    next_restart_at: str | None = None
 
+    def publish_status() -> None:
+        try:
+            payload = build_supervisor_status(
+                service_state=service_state,
+                monitor_enabled=monitor_enabled,
+                monitor_state=monitor_state,
+                restart_count=monitor_failures,
+                last_exit_code=last_monitor_exit_code,
+                next_restart_at=next_restart_at,
+            )
+            write_supervisor_status(config.status_path, payload)
+        except (OSError, TypeError, ValueError) as exc:
+            # Status visibility must not be able to terminate either worker.
+            log.error("could not persist sanitized supervisor status: %s", type(exc).__name__)
+
+    publish_status()
     try:
         app_process = popen_factory(
             list(config.app_command),
             env=dict(config.app_env),
         )
         log.info("started paper HTTP worker")
-        if config.monitor_command is None:
+        if not monitor_enabled:
             log.info("authenticated account monitor is disabled")
         else:
             monitor_process = popen_factory(
-                list(config.monitor_command),
+                list(config.monitor_command or ()),
                 env=dict(config.monitor_env or {}),
             )
+            monitor_state = "running"
             log.info("started optional read-only account order monitor")
+        service_state = "running"
+        publish_status()
 
         while not stopping.is_set():
             app_code = app_process.poll()
             if app_code is not None:
                 log.error("paper HTTP worker exited with code %s", app_code)
-                # A clean exit is unexpected for the long-running HTTP worker too.
+                service_state = "app_failed"
+                monitor_state = "stopped" if monitor_enabled else "disabled"
+                last_monitor_exit_code = int(app_code)
+                next_restart_at = None
+                publish_status()
                 return int(app_code) if int(app_code) != 0 else 1
 
             if monitor_process is not None:
                 monitor_code = monitor_process.poll()
                 if monitor_code is not None:
                     monitor_failures += 1
+                    last_monitor_exit_code = int(monitor_code)
                     delay = monitor_restart_delay(
                         monitor_failures,
                         base_seconds=config.monitor_restart_base_seconds,
                         max_seconds=config.monitor_restart_max_seconds,
                     )
+                    next_restart_at = (
+                        datetime.now(timezone.utc) + timedelta(seconds=delay)
+                    ).isoformat()
+                    monitor_state = "restarting"
+                    publish_status()
                     # Never log the child environment or any credential material.
                     log.warning(
                         "read-only account monitor exited with code %s; restart %s in %.1f seconds",
@@ -204,15 +250,29 @@ def run_supervisor(
                         list(config.monitor_command or ()),
                         env=dict(config.monitor_env or {}),
                     )
+                    monitor_state = "running"
+                    next_restart_at = None
+                    publish_status()
                     continue
 
             if stopping.wait(config.poll_interval_seconds):
                 break
 
         return 0
+    except Exception:
+        service_state = "startup_failed"
+        monitor_state = "stopped" if monitor_enabled else "disabled"
+        next_restart_at = None
+        publish_status()
+        raise
     finally:
         _stop_child(monitor_process)
         _stop_child(app_process)
+        if service_state != "app_failed" and service_state != "startup_failed":
+            service_state = "stopped"
+            monitor_state = "stopped" if monitor_enabled else "disabled"
+            next_restart_at = None
+            publish_status()
 
 
 def main() -> int:

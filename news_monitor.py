@@ -55,6 +55,108 @@ def utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+MATCH_STALE_AFTER_HOURS = 72.0
+
+
+def _parse_news_timestamp(value: Any) -> datetime | None:
+    """Parse RSS/Atom publication dates or ISO timestamps into aware UTC datetimes."""
+    raw = str(value or "").strip()
+    if not raw:
+        return None
+    try:
+        parsed = parsedate_to_datetime(raw)
+    except (TypeError, ValueError, OverflowError):
+        try:
+            parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+        except (TypeError, ValueError, OverflowError):
+            return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def classify_news_freshness(
+    news_item: dict[str, Any],
+    *,
+    now: datetime | None = None,
+    stale_after_hours: float = MATCH_STALE_AFTER_HOURS,
+) -> dict[str, Any]:
+    """Label the publication-time age of a headline without discarding old context."""
+    try:
+        threshold_hours = float(stale_after_hours)
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise ValueError("stale_after_hours must be finite and positive") from exc
+    if not math.isfinite(threshold_hours) or threshold_hours <= 0:
+        raise ValueError("stale_after_hours must be finite and positive")
+    current = now or datetime.now(timezone.utc)
+    if current.tzinfo is None:
+        current = current.replace(tzinfo=timezone.utc)
+    current = current.astimezone(timezone.utc)
+    published = _parse_news_timestamp(news_item.get("published_at"))
+    threshold = threshold_hours * 3600.0
+    if published is None:
+        return {
+            "news_freshness_status": "unknown_timestamp",
+            "news_age_seconds": None,
+            "news_stale_after_seconds": round(threshold, 1),
+            "news_published_at_utc": None,
+        }
+
+    raw_age = (current - published).total_seconds()
+    if raw_age < -300.0:
+        status = "future_timestamp"
+        age = raw_age
+    else:
+        age = max(0.0, raw_age)
+        status = "fresh" if age <= threshold else "stale"
+    return {
+        "news_freshness_status": status,
+        "news_age_seconds": round(age, 1),
+        "news_stale_after_seconds": round(threshold, 1),
+        "news_published_at_utc": published.isoformat(),
+    }
+
+
+def summarize_match_freshness(matches: list[dict[str, Any]]) -> dict[str, Any]:
+    """Count fresh/stale/unknown/future candidate timestamps for the current match view."""
+    counts = {
+        "fresh": 0,
+        "stale": 0,
+        "unknown_timestamp": 0,
+        "future_timestamp": 0,
+    }
+    ages = []
+    for match in matches:
+        status = str(match.get("news_freshness_status") or "unknown_timestamp")
+        if status not in counts:
+            status = "unknown_timestamp"
+        counts[status] += 1
+        age = match.get("news_age_seconds")
+        if (
+            isinstance(age, (int, float))
+            and not isinstance(age, bool)
+            and math.isfinite(float(age))
+            and float(age) >= 0
+        ):
+            ages.append(float(age))
+    ordered_ages = sorted(ages)
+    if not ordered_ages:
+        median_age = None
+    elif len(ordered_ages) % 2:
+        median_age = ordered_ages[len(ordered_ages) // 2]
+    else:
+        middle = len(ordered_ages) // 2
+        median_age = (ordered_ages[middle - 1] + ordered_ages[middle]) / 2.0
+    return {
+        "candidate_count": len(matches),
+        "counts_by_status": counts,
+        "median_age_seconds": round(median_age, 1) if median_age is not None else None,
+        "oldest_known_age_seconds": round(max(ages), 1) if ages else None,
+        "stale_after_hours": MATCH_STALE_AFTER_HOURS,
+        "interpretation": "publication_timestamp_age_only_not_event_freshness_or_signal",
+    }
+
+
 def summarize_news_freshness(
     items: list[dict[str, Any]],
     now: datetime | None = None,
@@ -222,6 +324,7 @@ def match_news_to_markets(
     news_tokens = title_tokens | _tokens(str(news_item.get("summary") or ""))
     if len(title_tokens) < 2 or len(news_tokens) < 2:
         return []
+    freshness = classify_news_freshness(news_item)
 
     # Build a unique market-question corpus first so duplicate market rows cannot
     # distort document frequencies or artificially suppress distinctive terms.
@@ -301,6 +404,7 @@ def match_news_to_markets(
                 "rarity_filter_active" if rarity_filter_active
                 else "insufficient_for_rarity_filter"
             ),
+            **freshness,
             "method": MATCHER_METHOD,
             "research_only": True,
             "execution": "none",
@@ -501,6 +605,10 @@ class NewsMarketMatcher:
                         "relevance_score": candidate["relevance_score"],
                         "market_corpus_size": candidate["market_corpus_size"],
                         "market_corpus_quality": candidate["market_corpus_quality"],
+                        "news_freshness_status": candidate["news_freshness_status"],
+                        "news_age_seconds": candidate["news_age_seconds"],
+                        "news_stale_after_seconds": candidate["news_stale_after_seconds"],
+                        "news_published_at_utc": candidate["news_published_at_utc"],
                         "method": candidate["method"],
                         "research_only": True,
                         "execution": "none",

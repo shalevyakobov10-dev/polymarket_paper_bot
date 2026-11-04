@@ -351,6 +351,10 @@ class ParserTests(unittest.TestCase):
             self.assertTrue(matches["research_only"])
             self.assertEqual(matches["execution"], "none")
             self.assertEqual(matches["items"][0]["news_title"], "A test headline")
+            self.assertEqual(matches["freshness_summary"]["candidate_count"], 1)
+            self.assertEqual(
+                matches["freshness_summary"]["counts_by_status"]["unknown_timestamp"], 1
+            )
         finally:
             server.shutdown()
             server.server_close()

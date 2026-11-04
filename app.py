@@ -20,7 +20,7 @@ from market_stream import MarketStreamCollector
 from forecast_evaluation import evaluate_jsonl_files
 from resolution_tracker import ResolutionCollector
 from global_news import DEFAULT_TOPIC_QUERIES, GDELTCollector
-from news_monitor import DEFAULT_FEEDS, NewsCollector, NewsMarketMatcher, summarize_market_corroboration, summarize_news_freshness
+from news_monitor import DEFAULT_FEEDS, NewsCollector, NewsMarketMatcher, summarize_market_corroboration, summarize_match_freshness, summarize_news_freshness
 from research_features import build_market_feature_rows, read_recent_jsonl, summarize_feature_rows
 from independent_model_evaluation import evaluate_feature_files, forecast_current_feature_files
 from learning_journal import LearningJournal
@@ -1360,6 +1360,7 @@ class Handler(BaseHTTPRequestHandler):
                         "last_match_error": _news_state["last_match_error"],
                         "items": list(_news_matches_cache),
                         "source_corroboration": summarize_market_corroboration(_news_matches_cache),
+                        "freshness_summary": summarize_match_freshness(_news_matches_cache),
                     }
                 self._send(200, match_snapshot)
             else:

@@ -117,6 +117,28 @@ def classify_news_freshness(
     }
 
 
+def refresh_match_freshness(
+    matches: list[dict[str, Any]],
+    *,
+    now: datetime | None = None,
+) -> list[dict[str, Any]]:
+    """Refresh display-time ages from original publication timestamps without mutating history."""
+    current = now or datetime.now(timezone.utc)
+    refreshed = []
+    for match in matches:
+        if not isinstance(match, dict):
+            continue
+        # Prefer the normalized immutable publication timestamp written when the
+        # candidate was recorded. Legacy rows lacking it remain unknown.
+        published_at = match.get("news_published_at_utc")
+        freshness = classify_news_freshness(
+            {"published_at": published_at},
+            now=current,
+        )
+        refreshed.append({**match, **freshness})
+    return refreshed
+
+
 def summarize_match_freshness(matches: list[dict[str, Any]]) -> dict[str, Any]:
     """Count fresh/stale/unknown/future candidate timestamps for the current match view."""
     counts = {

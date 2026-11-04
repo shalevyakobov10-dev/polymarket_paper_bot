@@ -493,9 +493,7 @@ class PaperTraderTests(unittest.TestCase):
         self.assertFalse(assessment["eligible"])
         self.assertAlmostEqual(assessment["fill_ratio"], 0.54)
         self.assertAlmostEqual(assessment["visible_depth_usd"], 1.08)
-        self.assertIsNone(assessment["execution"] if assessment["execution"] is None else (
-            None if assessment["execution"] == "none" else "unexpected_live_execution"
-        ))
+        self.assertEqual(assessment["execution"], "none")
         self.assertEqual(bot.snapshot()["metrics"]["open_positions"], 0)
         persisted_candidate = bot.snapshot()["recent_events"][-1]
         self.assertEqual(

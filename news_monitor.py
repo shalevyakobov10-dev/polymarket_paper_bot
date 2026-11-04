@@ -46,6 +46,7 @@ MAX_FEED_BYTES = 1_000_000
 MAX_RECENT_ITEMS = 500
 MAX_SUMMARY_CHARS = 1200
 MAX_TITLE_CHARS = 400
+MATCHER_METHOD = "market_corpus_idf_keyword_v2"
 USER_AGENT = "PolymarketPaperResearchBot/1.0 (+read-only RSS monitor)"
 
 
@@ -295,7 +296,7 @@ def match_news_to_markets(
                 "rarity_filter_active" if rarity_filter_active
                 else "insufficient_for_rarity_filter"
             ),
-            "method": "market_corpus_idf_keyword_v2",
+            "method": MATCHER_METHOD,
             "research_only": True,
             "execution": "none",
         })
@@ -383,6 +384,7 @@ class NewsMarketMatcher:
         self.max_recent = max(1, min(5000, int(max_recent)))
         self._lock = threading.RLock()
         self.seen_pairs: set[str] = set()
+        self.latest_method_by_pair: dict[str, str] = {}
         self.recent: list[dict[str, Any]] = []
         self._load_existing()
 
@@ -398,7 +400,10 @@ class NewsMarketMatcher:
         ]
 
     def _load_existing(self) -> None:
-        records: list[dict[str, Any]] = []
+        # Replay rotated logs oldest-to-newest and keep only the latest revision
+        # for each stable news/market pair. This permits matcher-version upgrades
+        # without showing duplicate historical candidates after a restart.
+        latest_records: dict[str, dict[str, Any]] = {}
         for path in reversed(self._paths()):
             if not path.exists():
                 continue
@@ -411,14 +416,26 @@ class NewsMarketMatcher:
                             continue
                         if not isinstance(record, dict) or not record.get("pair_id"):
                             continue
-                        self.seen_pairs.add(str(record["pair_id"]))
-                        records.append(record)
+                        pair_id = str(record["pair_id"])
+                        latest_records[pair_id] = record
             except OSError:
                 continue
-        records.sort(key=lambda row: str(row.get("matched_at") or ""))
-        self.recent = records[-self.max_recent:]
+        ordered = sorted(
+            latest_records.values(),
+            key=lambda row: str(row.get("matched_at") or ""),
+        )
+        self.recent = ordered[-self.max_recent:]
+        self.latest_method_by_pair = {
+            pair_id: str(record.get("method") or "")
+            for pair_id, record in latest_records.items()
+        }
+        self.seen_pairs = set(latest_records)
         if len(self.seen_pairs) > 100_000:
             self.seen_pairs = {str(row["pair_id"]) for row in self.recent if row.get("pair_id")}
+            self.latest_method_by_pair = {
+                str(row["pair_id"]): str(row.get("method") or "")
+                for row in self.recent if row.get("pair_id")
+            }
 
     def match(
         self,
@@ -434,7 +451,9 @@ class NewsMarketMatcher:
                 for candidate in match_news_to_markets(news, markets):
                     market_id = str(candidate["market_id"])
                     pair_id = hashlib.sha256(f"{news_id}|{market_id}".encode("utf-8")).hexdigest()
-                    if pair_id in self.seen_pairs:
+                    # Re-evaluate old persisted pairs once when the matcher changes.
+                    # Pairs already scored by the current version remain idempotent.
+                    if self.latest_method_by_pair.get(pair_id) == MATCHER_METHOD:
                         continue
                     record = {
                         "pair_id": pair_id,
@@ -477,11 +496,18 @@ class NewsMarketMatcher:
                     }
                     self._append(record)
                     self.seen_pairs.add(pair_id)
+                    self.latest_method_by_pair[pair_id] = MATCHER_METHOD
+                    self.recent = [row for row in self.recent if str(row.get("pair_id")) != pair_id]
                     self.recent.append(record)
                     added.append(record)
+            self.recent.sort(key=lambda row: str(row.get("matched_at") or ""))
             self.recent = self.recent[-self.max_recent:]
             if len(self.seen_pairs) > 100_000:
                 self.seen_pairs = {str(row["pair_id"]) for row in self.recent if row.get("pair_id")}
+                self.latest_method_by_pair = {
+                    str(row["pair_id"]): str(row.get("method") or "")
+                    for row in self.recent if row.get("pair_id")
+                }
             return {
                 "added": added,
                 "items_total_recent": len(self.recent),

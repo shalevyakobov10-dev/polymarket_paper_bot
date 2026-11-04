@@ -6,6 +6,7 @@ place orders, or treat a headline as a verified event or trading signal.
 from __future__ import annotations
 
 import hashlib
+import math
 from concurrent.futures import ThreadPoolExecutor
 import html
 import json
@@ -46,6 +47,7 @@ MAX_FEED_BYTES = 1_000_000
 MAX_RECENT_ITEMS = 500
 MAX_SUMMARY_CHARS = 1200
 MAX_TITLE_CHARS = 400
+MATCHER_METHOD = "market_corpus_idf_keyword_v2"
 USER_AGENT = "PolymarketPaperResearchBot/1.0 (+read-only RSS monitor)"
 
 
@@ -185,6 +187,10 @@ _STOP_WORDS = {
 def _tokens(value: str) -> set[str]:
     tokens = set()
     for raw in re.findall(r"[a-z0-9]{3,}", (value or "").lower()):
+        # Drop stop words before stemming so short words such as "news" do not
+        # turn into misleading content terms (for example, "new").
+        if raw in _STOP_WORDS:
+            continue
         token = raw
         if len(token) > 5 and token.endswith("ing"):
             token = token[:-3]
@@ -192,7 +198,7 @@ def _tokens(value: str) -> set[str]:
             token = token[:-2]
         elif len(token) > 4 and token.endswith("ies"):
             token = token[:-3] + "y"
-        elif len(token) > 4 and token.endswith("s") and not token.endswith("ss"):
+        elif len(token) > 3 and token.endswith("s") and not token.endswith("ss"):
             token = token[:-1]
         if len(token) >= 3 and token not in _STOP_WORDS:
             tokens.add(token)
@@ -205,43 +211,114 @@ def match_news_to_markets(
     *,
     max_matches: int = 3,
 ) -> list[dict[str, Any]]:
-    """Return conservative keyword-overlap candidates, never probabilities."""
+    """Rank research-only news candidates using market-corpus rarity and title evidence.
+
+    Terms repeated across many tracked markets are down-weighted and cannot alone
+    anchor a match. With fewer than four distinct markets, corpus rarity is not
+    reliable, so the matcher records that limitation and uses the headline overlap
+    only as a provisional anchor. Scores are ranking diagnostics, never probabilities.
+    """
     title_tokens = _tokens(str(news_item.get("title") or ""))
     news_tokens = title_tokens | _tokens(str(news_item.get("summary") or ""))
     if len(title_tokens) < 2 or len(news_tokens) < 2:
         return []
 
-    candidates = []
+    # Build a unique market-question corpus first so duplicate market rows cannot
+    # distort document frequencies or artificially suppress distinctive terms.
+    market_rows: list[tuple[str, str, set[str]]] = []
     seen_market_ids: set[str] = set()
     for market in markets:
-        market_id = str(market.get("market_id") or market.get("conditionId") or market.get("id") or "")
+        if not isinstance(market, dict):
+            continue
+        market_id = str(
+            market.get("market_id") or market.get("conditionId") or market.get("id") or ""
+        ).strip()
         question = str(market.get("question") or "").strip()
         if not market_id or not question or market_id in seen_market_ids:
             continue
         seen_market_ids.add(market_id)
-        market_tokens = _tokens(question)
+        tokens = _tokens(question)
+        if tokens:
+            market_rows.append((market_id, question, tokens))
+
+    corpus_size = len(market_rows)
+    if not corpus_size:
+        return []
+    document_frequency: dict[str, int] = {}
+    for _, _, tokens in market_rows:
+        for token in tokens:
+            document_frequency[token] = document_frequency.get(token, 0) + 1
+
+    rarity_filter_active = corpus_size >= 4
+    max_common_documents = max(1, math.floor(corpus_size * 0.35))
+
+    def idf(token: str) -> float:
+        frequency = document_frequency.get(token, 0)
+        return math.log((corpus_size + 1) / (frequency + 1)) + 1.0
+
+    candidates = []
+    for market_id, question, market_tokens in market_rows:
         shared = news_tokens & market_tokens
         title_shared = title_tokens & market_tokens
-        # Require multiple non-generic terms and at least one in the headline itself.
         if len(shared) < 2 or not title_shared:
             continue
+
+        distinctive_title = (
+            {term for term in title_shared if document_frequency.get(term, 0) <= max_common_documents}
+            if rarity_filter_active
+            else set(title_shared)
+        )
+        # Once the tracked-market corpus is large enough, generic headline terms
+        # seen in most markets cannot independently qualify a candidate.
+        if not distinctive_title:
+            continue
+
+        shared_weight = sum(idf(term) for term in shared)
+        market_weight = sum(idf(term) for term in market_tokens)
+        title_weight = sum(idf(term) for term in title_tokens)
+        title_shared_weight = sum(idf(term) for term in title_shared)
+        market_coverage = shared_weight / max(1e-12, market_weight)
+        headline_precision = title_shared_weight / max(1e-12, title_weight)
+        relevance_score = 0.65 * headline_precision + 0.35 * market_coverage
+
         candidates.append({
             "market_id": market_id,
             "question": question[:500],
             "matched_terms": sorted(shared),
             "headline_matched_terms": sorted(title_shared),
+            "distinctive_headline_terms": sorted(distinctive_title),
+            "common_headline_terms": sorted(title_shared - distinctive_title),
+            "term_document_frequency": {
+                term: document_frequency.get(term, 0) for term in sorted(shared)
+            },
             "shared_term_count": len(shared),
             "lexical_overlap": round(len(shared) / max(1, len(market_tokens)), 4),
-            "method": "keyword_overlap_v1",
+            "market_coverage": round(market_coverage, 6),
+            "headline_precision": round(headline_precision, 6),
+            "relevance_score": round(relevance_score, 6),
+            "market_corpus_size": corpus_size,
+            "market_corpus_quality": (
+                "rarity_filter_active" if rarity_filter_active
+                else "insufficient_for_rarity_filter"
+            ),
+            "method": MATCHER_METHOD,
             "research_only": True,
             "execution": "none",
         })
     candidates.sort(
-        key=lambda row: (row["shared_term_count"], row["lexical_overlap"]),
+        key=lambda row: (
+            row["relevance_score"],
+            len(row["distinctive_headline_terms"]),
+            row["shared_term_count"],
+            row["lexical_overlap"],
+        ),
         reverse=True,
     )
-    return candidates[:max(1, min(10, int(max_matches)))]
-
+    try:
+        limit = int(max_matches)
+    except (TypeError, ValueError, OverflowError):
+        limit = 3
+    return candidates[:max(1, min(10, limit))]
 
 def summarize_market_corroboration(matches: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Summarize publisher diversity and exact-title repetition without claiming verification."""
@@ -312,6 +389,7 @@ class NewsMarketMatcher:
         self.max_recent = max(1, min(5000, int(max_recent)))
         self._lock = threading.RLock()
         self.seen_pairs: set[str] = set()
+        self.latest_method_by_pair: dict[str, str] = {}
         self.recent: list[dict[str, Any]] = []
         self._load_existing()
 
@@ -327,7 +405,10 @@ class NewsMarketMatcher:
         ]
 
     def _load_existing(self) -> None:
-        records: list[dict[str, Any]] = []
+        # Replay rotated logs oldest-to-newest and keep only the latest revision
+        # for each stable news/market pair. This permits matcher-version upgrades
+        # without showing duplicate historical candidates after a restart.
+        latest_records: dict[str, dict[str, Any]] = {}
         for path in reversed(self._paths()):
             if not path.exists():
                 continue
@@ -340,14 +421,33 @@ class NewsMarketMatcher:
                             continue
                         if not isinstance(record, dict) or not record.get("pair_id"):
                             continue
-                        self.seen_pairs.add(str(record["pair_id"]))
-                        records.append(record)
+                        pair_id = str(record["pair_id"])
+                        latest_records[pair_id] = record
             except OSError:
                 continue
-        records.sort(key=lambda row: str(row.get("matched_at") or ""))
-        self.recent = records[-self.max_recent:]
+        ordered = sorted(
+            latest_records.values(),
+            key=lambda row: str(row.get("matched_at") or ""),
+        )
+        # Do not expose older matcher-version candidates while the live news
+        # worker is replaying the recent news cache through the current version.
+        # Their pair IDs/methods remain indexed so valid matches can be upgraded
+        # exactly once, while legacy false positives disappear from the API view.
+        current_records = [
+            row for row in ordered if str(row.get("method") or "") == MATCHER_METHOD
+        ]
+        self.recent = current_records[-self.max_recent:]
+        self.latest_method_by_pair = {
+            pair_id: str(record.get("method") or "")
+            for pair_id, record in latest_records.items()
+        }
+        self.seen_pairs = set(latest_records)
         if len(self.seen_pairs) > 100_000:
             self.seen_pairs = {str(row["pair_id"]) for row in self.recent if row.get("pair_id")}
+            self.latest_method_by_pair = {
+                str(row["pair_id"]): str(row.get("method") or "")
+                for row in self.recent if row.get("pair_id")
+            }
 
     def match(
         self,
@@ -363,7 +463,9 @@ class NewsMarketMatcher:
                 for candidate in match_news_to_markets(news, markets):
                     market_id = str(candidate["market_id"])
                     pair_id = hashlib.sha256(f"{news_id}|{market_id}".encode("utf-8")).hexdigest()
-                    if pair_id in self.seen_pairs:
+                    # Re-evaluate old persisted pairs once when the matcher changes.
+                    # Pairs already scored by the current version remain idempotent.
+                    if self.latest_method_by_pair.get(pair_id) == MATCHER_METHOD:
                         continue
                     record = {
                         "pair_id": pair_id,
@@ -391,6 +493,14 @@ class NewsMarketMatcher:
                         "headline_matched_terms": candidate["headline_matched_terms"],
                         "shared_term_count": candidate["shared_term_count"],
                         "lexical_overlap": candidate["lexical_overlap"],
+                        "distinctive_headline_terms": candidate["distinctive_headline_terms"],
+                        "common_headline_terms": candidate["common_headline_terms"],
+                        "term_document_frequency": candidate["term_document_frequency"],
+                        "market_coverage": candidate["market_coverage"],
+                        "headline_precision": candidate["headline_precision"],
+                        "relevance_score": candidate["relevance_score"],
+                        "market_corpus_size": candidate["market_corpus_size"],
+                        "market_corpus_quality": candidate["market_corpus_quality"],
                         "method": candidate["method"],
                         "research_only": True,
                         "execution": "none",
@@ -398,11 +508,18 @@ class NewsMarketMatcher:
                     }
                     self._append(record)
                     self.seen_pairs.add(pair_id)
+                    self.latest_method_by_pair[pair_id] = MATCHER_METHOD
+                    self.recent = [row for row in self.recent if str(row.get("pair_id")) != pair_id]
                     self.recent.append(record)
                     added.append(record)
+            self.recent.sort(key=lambda row: str(row.get("matched_at") or ""))
             self.recent = self.recent[-self.max_recent:]
             if len(self.seen_pairs) > 100_000:
                 self.seen_pairs = {str(row["pair_id"]) for row in self.recent if row.get("pair_id")}
+                self.latest_method_by_pair = {
+                    str(row["pair_id"]): str(row.get("method") or "")
+                    for row in self.recent if row.get("pair_id")
+                }
             return {
                 "added": added,
                 "items_total_recent": len(self.recent),

@@ -1,3 +1,5 @@
+import hashlib
+import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -125,6 +127,111 @@ class NewsMonitorTests(unittest.TestCase):
         self.assertIn("lexical_overlap", matches[0])
         self.assertNotIn("probability", matches[0])
 
+    def test_market_corpus_suppresses_generic_headline_terms(self):
+        news = {
+            "id": "generic-market-headline",
+            "title": "President election outcome",
+            "summary": "A new president election outcome was discussed today.",
+        }
+        markets = [
+            {"market_id": "country-a", "question": "Will the president win the election in country Alpha?"},
+            {"market_id": "country-b", "question": "Will the president win the election in country Beta?"},
+            {"market_id": "country-c", "question": "Will the president win the election in country Gamma?"},
+            {"market_id": "country-d", "question": "Will the president win the election in country Delta?"},
+        ]
+        self.assertEqual(news_monitor.match_news_to_markets(news, markets), [])
+
+    def test_market_corpus_rarity_selects_specific_market_over_shared_theme(self):
+        news = {
+            "id": "fed-policy-headline",
+            "title": "Fed cuts interest rates",
+            "summary": "The central bank cuts interest rates after reviewing inflation.",
+        }
+        markets = [
+            {"market_id": "fed-cut", "question": "Will the Fed cut interest rates in December?"},
+            {"market_id": "fed-hold", "question": "Will the Fed hold interest rates in December?"},
+            {"market_id": "fed-discuss", "question": "Will the Fed discuss interest rates in December?"},
+            {"market_id": "fed-outlook", "question": "Will the Fed announce its interest rate outlook in December?"},
+        ]
+        matches = news_monitor.match_news_to_markets(news, markets)
+        self.assertEqual([row["market_id"] for row in matches], ["fed-cut"])
+        candidate = matches[0]
+        self.assertEqual(candidate["distinctive_headline_terms"], ["cut"])
+        self.assertEqual(candidate["common_headline_terms"], ["fed", "interest", "rate"])
+        self.assertEqual(candidate["market_corpus_size"], 4)
+        self.assertEqual(candidate["market_corpus_quality"], "rarity_filter_active")
+        self.assertEqual(candidate["method"], "market_corpus_idf_keyword_v2")
+        self.assertGreater(candidate["relevance_score"], 0)
+        self.assertLessEqual(candidate["relevance_score"], 1)
+        self.assertEqual(candidate["term_document_frequency"]["cut"], 1)
+
+    def test_small_market_universe_is_explicitly_marked_as_low_information(self):
+        news = {
+            "id": "small-corpus-headline",
+            "title": "Fed signals interest-rate cuts",
+            "summary": "The Federal Reserve signaled a possible cut in interest rates.",
+        }
+        markets = [{"market_id": "market-fed", "question": "Will the Fed cut interest rates in December?"}]
+        matches = news_monitor.match_news_to_markets(news, markets)
+        self.assertEqual(len(matches), 1)
+        self.assertEqual(matches[0]["market_corpus_quality"], "insufficient_for_rarity_filter")
+        self.assertEqual(matches[0]["market_corpus_size"], 1)
+
+    def test_duplicate_market_rows_do_not_inflate_corpus_document_frequency(self):
+        news = {
+            "id": "unique-market-token",
+            "title": "Fed cuts interest rates",
+            "summary": "Central bank decision",
+        }
+        markets = [
+            {"market_id": "fed-cut", "question": "Will the Fed cut interest rates in December?"},
+            {"market_id": "fed-cut", "question": "Will the Fed cut interest rates in December?"},
+            {"market_id": "fed-hold", "question": "Will the Fed hold interest rates in December?"},
+            {"market_id": "fed-discuss", "question": "Will the Fed discuss interest rates in December?"},
+            {"market_id": "fed-policy", "question": "Will the Fed change monetary policy this month?"},
+        ]
+        matches = news_monitor.match_news_to_markets(news, markets)
+        self.assertEqual([row["market_id"] for row in matches], ["fed-cut"])
+        self.assertEqual(matches[0]["term_document_frequency"]["cut"], 1)
+
+    def test_matcher_reprocesses_legacy_pairs_once_and_deduplicates_latest_revision(self):
+        news = {
+            "id": "legacy-story",
+            "source": "Example Finance",
+            "title": "Fed signals interest-rate cuts",
+            "summary": "The Federal Reserve signaled a possible cut in interest rates.",
+            "url": "https://example.org/fed",
+        }
+        markets = [{
+            "market_id": "market-fed",
+            "question": "Will the Fed cut interest rates in December?",
+        }]
+        pair_id = hashlib.sha256(b"legacy-story|market-fed").hexdigest()
+        legacy_record = {
+            "pair_id": pair_id,
+            "news_id": "legacy-story",
+            "market_id": "market-fed",
+            "method": "keyword_overlap_v1",
+            "matched_at": "2026-11-03T10:00:00+00:00",
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "matches.jsonl"
+            path.write_text(json.dumps(legacy_record) + "\n", encoding="utf-8")
+            matcher = news_monitor.NewsMarketMatcher(path)
+            upgraded = matcher.match([news], markets)
+            self.assertEqual(len(upgraded["added"]), 1)
+            self.assertEqual(upgraded["added"][0]["method"], "market_corpus_idf_keyword_v2")
+
+            repeated = matcher.match([news], markets)
+            self.assertEqual(repeated["added"], [])
+
+            restarted = news_monitor.NewsMarketMatcher(path)
+            self.assertEqual(len(restarted.recent), 1)
+            self.assertEqual(restarted.recent[0]["method"], "market_corpus_idf_keyword_v2")
+            again = restarted.match([news], markets)
+            self.assertEqual(again["added"], [])
+            self.assertEqual(len(path.read_text(encoding="utf-8").splitlines()), 2)
+
     def test_matcher_deduplicates_pairs_across_calls_and_restarts(self):
         news = {
             "id": "headline-2",
@@ -175,6 +282,10 @@ class NewsMonitorTests(unittest.TestCase):
         )
         self.assertEqual(result["added"][0]["source_country"], "US")
         self.assertEqual(result["added"][0]["language"], "English")
+        self.assertEqual(result["added"][0]["method"], "market_corpus_idf_keyword_v2")
+        self.assertGreater(result["added"][0]["relevance_score"], 0)
+        self.assertIn("distinctive_headline_terms", result["added"][0])
+        self.assertIn("market_corpus_quality", result["added"][0])
 
     def test_matcher_ignores_generic_or_unrelated_overlap(self):
         news = {

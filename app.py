@@ -1352,7 +1352,7 @@ class Handler(BaseHTTPRequestHandler):
             elif self.path == "/matches":
                 with _news_lock:
                     match_snapshot = {
-                        "method": "keyword_overlap_v1",
+                        "method": "market_corpus_idf_keyword_v2",
                         "research_only": True,
                         "execution": "none",
                         "total_recent": _news_state["market_matches_total_recent"],

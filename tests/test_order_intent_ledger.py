@@ -60,6 +60,15 @@ class OrderIntentLedgerTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "only ambiguous"):
             self.ledger.reconcile("signal-123", "filled", "lookup")
 
+    def test_open_order_can_be_reconciled_again_without_resubmission(self):
+        self.ledger.prepare("signal-123", self.order)
+        self.ledger.begin_submission("signal-123")
+        opened = self.ledger.reconcile("signal-123", "open", "order lookup")
+        self.assertEqual(opened["status"], "reconciled_open")
+        filled = self.ledger.reconcile("signal-123", "filled", "later order lookup")
+        self.assertEqual(filled["status"], "reconciled_filled")
+        self.assertFalse(self.ledger.begin_submission("signal-123"))
+
     def test_invalid_order_payloads_fail_closed(self):
         invalid = [
             {**self.order, "price": 1.0},

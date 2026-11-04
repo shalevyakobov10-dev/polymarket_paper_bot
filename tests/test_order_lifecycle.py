@@ -164,6 +164,30 @@ class OrderLifecycleTests(unittest.TestCase):
                 unknown, outcome="found_filled", filled_size=8, **common
             )
 
+    def test_state_validation_rejects_inconsistent_persisted_states(self):
+        pending = begin_submission(intent())
+        unknown = record_submission_response(pending, outcome="ambiguous")
+
+        inconsistent = dict(unknown)
+        inconsistent["exchange_order_id"] = "unexpected-venue-id"
+        with self.assertRaisesRegex(ValueError, "unknown submission"):
+            submission_policy(inconsistent)
+
+        inconsistent = reconcile_submission(
+            unknown,
+            outcome="found_filled",
+            matched_client_order_id="local-order-0001",
+            exchange_order_id="venue-order-77",
+        )
+        inconsistent["filled_size"] = "9"
+        with self.assertRaisesRegex(ValueError, "equal to order size"):
+            submission_policy(inconsistent)
+
+        inconsistent = dict(pending)
+        inconsistent["status"] = "open"
+        with self.assertRaisesRegex(ValueError, "requires exchange_order_id"):
+            submission_policy(inconsistent)
+
     def test_only_unknown_submission_can_be_reconciled(self):
         with self.assertRaises(RuntimeError):
             reconcile_submission(intent(), outcome="not_found")

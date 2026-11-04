@@ -527,7 +527,7 @@ class OrderJournal:
                     attempted_at_utc = excluded.attempted_at_utc,
                     snapshot_id = excluded.snapshot_id,
                     error_code = NULL
-                WHERE excluded.attempted_at_utc >= account_risk_sync_state.attempted_at_utc
+                WHERE excluded.attempted_at_utc > account_risk_sync_state.attempted_at_utc
                 """,
                 (state["captured_at_utc"], snapshot_id),
             )

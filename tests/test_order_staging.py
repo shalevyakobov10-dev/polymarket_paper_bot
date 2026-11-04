@@ -185,6 +185,15 @@ class OrderStagingTests(unittest.TestCase):
         self.assertIn("max_open_exposure_exceeded", result["blockers"])
         self.assertIsNone(other.get_intent("exposure-order"))
 
+
+    def test_snapshot_freshness_window_cannot_be_weakened_by_caller(self):
+        result = self.stage(max_account_snapshot_age_seconds=86400)
+        self.assertEqual(
+            result["blockers"],
+            ["account_risk_snapshot_freshness_window_out_of_policy"],
+        )
+        self.assertIsNone(self.journal.get_intent("staged-order-001"))
+
     def test_missing_market_condition_id_is_blocked(self):
         result = self.stage(market_condition_id="")
         self.assertIn("missing_market_condition_id", result["blockers"])

@@ -119,6 +119,13 @@ class SupervisorTests(unittest.TestCase):
                 "USER_ORDER_SNAPSHOT_INTERVAL_SECONDS": "NaN",
             })
 
+        with self.assertRaisesRegex(ValueError, "must not exceed 240"):
+            build_supervisor_config({
+                "ENABLE_USER_ORDER_MONITOR": "true",
+                "POLYMARKET_PRIVATE_KEY": "synthetic-test-secret",
+                "USER_ORDER_SNAPSHOT_INTERVAL_SECONDS": "241",
+            })
+
     def test_monitor_restart_uses_capped_exponential_backoff_and_shared_env(self):
         config = build_supervisor_config(
             {

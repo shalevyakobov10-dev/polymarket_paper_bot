@@ -148,6 +148,13 @@ class DelayedFakeHandle(FakeHandle):
         return await super().__anext__()
 
 
+class BusyFakeHandle(FakeHandle):
+    async def __anext__(self):
+        import asyncio
+        await asyncio.sleep(0.01)
+        return await super().__anext__()
+
+
 class FakeClient:
     def __init__(
         self, handle, pages=(), trade_pages_by_asset=None,
@@ -586,6 +593,38 @@ class UserOrderStreamTests(unittest.TestCase):
         self.assertEqual(result["periodic_open_orders_snapshots"][0]["updated"], 1)
         self.assertEqual(result["duplicate"], 1)
         self.assertEqual(self.journal.get_intent("local-123")["filled_size"], "4")
+        self.assertTrue(handle.closed)
+
+    def test_periodic_rest_snapshot_is_not_starved_by_continuous_user_events(self):
+        open_order = SimpleNamespace(
+            id="venue-123",
+            asset_id="token-456",
+            side="BUY",
+            original_size="12",
+            size_matched="4",
+            price="0.37",
+            status="LIVE",
+        )
+        page = SimpleNamespace(items=(open_order,), limit_reached=False, has_more=False)
+        handle = BusyFakeHandle([
+            order_event(size_matched="4"),
+            order_event(size_matched="4"),
+            order_event(size_matched="4"),
+        ])
+        client = FakeClient(handle, [page])
+        import asyncio
+
+        result = asyncio.run(
+            consume_user_order_stream(
+                client,
+                self.journal,
+                max_events=3,
+                initial_snapshot=False,
+                snapshot_interval_seconds=0.015,
+            )
+        )
+        self.assertEqual(result["received"], 3)
+        self.assertGreaterEqual(len(result["periodic_open_orders_snapshots"]), 1)
         self.assertTrue(handle.closed)
 
     def test_consumer_rejects_invalid_periodic_snapshot_interval(self):

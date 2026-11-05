@@ -1,3 +1,4 @@
+import sqlite3
 import tempfile
 import threading
 import unittest
@@ -63,6 +64,40 @@ class OrderJournalTests(unittest.TestCase):
         self.assertEqual(saved, loaded)
         self.assertEqual(loaded["status"], "prepared")
         self.assertEqual(len(reopened.list_events("journal-order-001")), 1)
+
+    def test_journal_requires_wal_mode(self):
+        connection = sqlite3.connect(self.database)
+        try:
+            mode = connection.execute("PRAGMA journal_mode").fetchone()[0]
+        finally:
+            connection.close()
+        self.assertEqual(str(mode).lower(), "wal")
+
+    def test_startup_fails_closed_on_corrupt_database_file(self):
+        corrupt_path = Path(self.temp.name) / "corrupt.sqlite3"
+        corrupt_path.write_bytes(b"this is not a sqlite database")
+        with self.assertRaises(sqlite3.DatabaseError):
+            OrderJournal(corrupt_path)
+
+    def test_online_backup_is_verified_and_can_be_reopened(self):
+        created = self.journal.create_intent(new_intent())
+        backup_path = Path(self.temp.name) / "backups" / "orders-backup.sqlite3"
+
+        result = self.journal.backup_to(backup_path)
+
+        self.assertEqual(result["integrity_check"], "ok")
+        self.assertGreater(result["size_bytes"], 0)
+        self.assertTrue(backup_path.exists())
+        restored = OrderJournal(backup_path)
+        self.assertEqual(restored.get_intent("journal-order-001"), created)
+        self.assertEqual(
+            [event["event_type"] for event in restored.list_events("journal-order-001")],
+            ["intent_created"],
+        )
+
+    def test_online_backup_refuses_to_overwrite_the_live_journal(self):
+        with self.assertRaisesRegex(ValueError, "must differ"):
+            self.journal.backup_to(self.database)
 
     def test_replaying_same_intent_is_idempotent_but_changed_terms_are_rejected(self):
         first = self.journal.create_intent(new_intent())

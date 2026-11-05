@@ -324,6 +324,20 @@ The scheduled/manual historical backtest workflow is also serialized with a shar
 
 After a process restart, the operator must call `recover_interrupted_submissions()` during exclusive recovery before starting an execution worker. It converts any stranded `submission_pending` record to `submission_unknown`; it never resets an attempt to prepared. The journal serializes concurrent writers with SQLite transactions and rejects reuse of an ID with different order terms.
 
+## SQLite durability, integrity and backups
+
+The journal requires SQLite WAL mode and configures full synchronous commits plus a 15-second busy timeout. Startup runs `PRAGMA quick_check` and `PRAGMA foreign_key_check` before schema migration; if SQLite refuses WAL or either check reports an error, the journal refuses to start rather than silently proceeding with a questionable database.
+
+Create a consistent online backup while the journal is in use:
+
+```bash
+python backup_order_journal.py --destination /mnt/independent-backups/order-journal.sqlite3
+```
+
+The command requires an existing source journal, refuses to overwrite the live database, uses SQLite's online backup API (so committed WAL data is included), verifies the copied database and foreign keys, then atomically replaces the destination only after verification. A failed backup leaves a previous destination untouched. The output reports the backup path, byte size and completion time.
+
+This is a backup primitive, not a backup service: it does not schedule copies, encrypt or upload them, enforce retention, or prove that the destination survives loss of the app host/volume. Production operations must schedule this command to an independently durable off-host destination, protect access to the backup (it contains account/order metadata), retain multiple generations, and periodically test a restore. The Railway IaC currently defines no off-host backup target or scheduled backup job.
+
 This remains a safety scaffold only. The repository has a read-only authenticated account monitor, but no order-placement adapter, signing workflow, or order-placement call. The local client order ID is not claimed to be a venue-supported idempotency field.
 
 

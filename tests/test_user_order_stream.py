@@ -640,6 +640,16 @@ class UserOrderStreamTests(unittest.TestCase):
                 )
             )
 
+        with self.assertRaisesRegex(ValueError, "must not exceed 240"):
+            asyncio.run(
+                consume_user_order_stream(
+                    FakeClient(FakeHandle()),
+                    self.journal,
+                    initial_snapshot=False,
+                    snapshot_interval_seconds=241,
+                )
+            )
+
     def test_consumer_rejects_nonpositive_max_events(self):
         import asyncio
 

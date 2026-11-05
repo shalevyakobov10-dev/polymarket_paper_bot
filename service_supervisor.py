@@ -21,6 +21,10 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable, Mapping
 
+from account_risk_policy import (
+    DEFAULT_ACCOUNT_RISK_REFRESH_INTERVAL_SECONDS,
+    MAX_ACCOUNT_RISK_REFRESH_INTERVAL_SECONDS,
+)
 from supervisor_status import build_supervisor_status, write_supervisor_status
 
 
@@ -101,9 +105,14 @@ def build_supervisor_config(
                 "from the runtime secret manager"
             )
         interval = _positive_finite(
-            source.get("USER_ORDER_SNAPSHOT_INTERVAL_SECONDS", "300"),
+            source.get("USER_ORDER_SNAPSHOT_INTERVAL_SECONDS", str(DEFAULT_ACCOUNT_RISK_REFRESH_INTERVAL_SECONDS)),
             "USER_ORDER_SNAPSHOT_INTERVAL_SECONDS",
         )
+        if interval > MAX_ACCOUNT_RISK_REFRESH_INTERVAL_SECONDS:
+            raise ValueError(
+                "USER_ORDER_SNAPSHOT_INTERVAL_SECONDS must not exceed "
+                f"{MAX_ACCOUNT_RISK_REFRESH_INTERVAL_SECONDS} seconds"
+            )
         monitor_command = (
             executable,
             "user_order_stream.py",

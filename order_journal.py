@@ -9,8 +9,10 @@ from __future__ import annotations
 import json
 from copy import deepcopy
 import math
+import os
 import re
 import sqlite3
+import tempfile
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
 from uuid import uuid4
@@ -54,7 +56,18 @@ class OrderJournal:
     def _initialize(self) -> None:
         connection = self._connect()
         try:
-            connection.execute("PRAGMA journal_mode=WAL")
+            journal_mode = connection.execute("PRAGMA journal_mode=WAL").fetchone()
+            if journal_mode is None or str(journal_mode[0]).lower() != "wal":
+                raise RuntimeError("SQLite refused WAL mode; refusing unsafe journal startup")
+            integrity_rows = connection.execute("PRAGMA quick_check").fetchall()
+            integrity_results = [str(row[0]) for row in integrity_rows]
+            if integrity_results != ["ok"]:
+                raise sqlite3.DatabaseError("SQLite quick_check failed; refusing journal startup")
+            foreign_key_errors = connection.execute("PRAGMA foreign_key_check").fetchall()
+            if foreign_key_errors:
+                raise sqlite3.IntegrityError(
+                    "SQLite foreign_key_check failed; refusing journal startup"
+                )
             connection.execute(
                 """
                 CREATE TABLE IF NOT EXISTS order_intents (
@@ -146,6 +159,83 @@ class OrderJournal:
                 )
         finally:
             connection.close()
+
+    def backup_to(self, destination_path: str | Path) -> dict[str, Any]:
+        """Create a verified, atomic SQLite online backup at a separate path.
+
+        The SQLite backup API includes committed WAL content and can run while
+        the journal is being used. A temporary file is verified before it
+        replaces the destination; a failed backup leaves any previous backup
+        untouched. The caller is responsible for copying the result off-host.
+        """
+        raw_destination = str(destination_path)
+        if not raw_destination or raw_destination == ":memory:":
+            raise ValueError("backup destination must be a durable file path")
+        source_path = Path(self.database_path).resolve(strict=True)
+        destination = Path(destination_path).expanduser()
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        resolved_destination = destination.resolve(strict=False)
+        if resolved_destination == source_path:
+            raise ValueError("backup destination must differ from the live journal")
+
+        file_descriptor, temporary_name = tempfile.mkstemp(
+            prefix=f".{destination.name}.",
+            suffix=".tmp",
+            dir=str(destination.parent),
+        )
+        os.close(file_descriptor)
+        source_connection: sqlite3.Connection | None = None
+        backup_connection: sqlite3.Connection | None = None
+        try:
+            source_connection = self._connect()
+            backup_connection = sqlite3.connect(
+                temporary_name,
+                timeout=15.0,
+                isolation_level=None,
+            )
+            source_connection.backup(backup_connection, pages=256, sleep=0.05)
+            integrity_rows = backup_connection.execute("PRAGMA integrity_check").fetchall()
+            integrity_results = [str(row[0]) for row in integrity_rows]
+            if integrity_results != ["ok"]:
+                raise sqlite3.DatabaseError("SQLite backup integrity_check failed")
+            foreign_key_errors = backup_connection.execute(
+                "PRAGMA foreign_key_check"
+            ).fetchall()
+            if foreign_key_errors:
+                raise sqlite3.IntegrityError("SQLite backup foreign_key_check failed")
+            backup_connection.close()
+            backup_connection = None
+            source_connection.close()
+            source_connection = None
+
+            with open(temporary_name, "rb") as backup_file:
+                os.fsync(backup_file.fileno())
+            os.replace(temporary_name, destination)
+            try:
+                directory_fd = os.open(destination.parent, os.O_RDONLY)
+                try:
+                    os.fsync(directory_fd)
+                finally:
+                    os.close(directory_fd)
+            except OSError:
+                # Some filesystems do not allow fsync on directories. The file
+                # itself has already been flushed and atomically renamed.
+                pass
+            return {
+                "path": str(destination),
+                "size_bytes": destination.stat().st_size,
+                "integrity_check": "ok",
+                "completed_at_utc": datetime.now(timezone.utc).isoformat(),
+            }
+        finally:
+            if backup_connection is not None:
+                backup_connection.close()
+            if source_connection is not None:
+                source_connection.close()
+            try:
+                os.unlink(temporary_name)
+            except FileNotFoundError:
+                pass
 
     @contextmanager
     def _transaction(self) -> Iterator[sqlite3.Connection]:

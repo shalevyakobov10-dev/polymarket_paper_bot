@@ -175,8 +175,16 @@ class OrderJournal:
         destination = Path(destination_path).expanduser()
         destination.parent.mkdir(parents=True, exist_ok=True)
         resolved_destination = destination.resolve(strict=False)
-        if resolved_destination == source_path:
-            raise ValueError("backup destination must differ from the live journal")
+        protected_paths = {
+            source_path,
+            Path(f"{source_path}-wal").resolve(strict=False),
+            Path(f"{source_path}-shm").resolve(strict=False),
+            Path(f"{source_path}-journal").resolve(strict=False),
+        }
+        if resolved_destination in protected_paths:
+            raise ValueError(
+                "backup destination must differ from the live journal and its SQLite sidecars"
+            )
 
         file_descriptor, temporary_name = tempfile.mkstemp(
             prefix=f".{destination.name}.",

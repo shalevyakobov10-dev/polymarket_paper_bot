@@ -26,7 +26,10 @@ def main() -> int:
     args = parser.parse_args()
 
     try:
-        journal = OrderJournal(args.database)
+        database_path = Path(args.database).expanduser()
+        if not database_path.is_file():
+            raise FileNotFoundError("journal database does not exist")
+        journal = OrderJournal(database_path)
         result = journal.backup_to(args.destination)
     except Exception as exc:
         # Do not print exception text: paths or database content should not leak

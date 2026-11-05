@@ -515,37 +515,56 @@ async def consume_user_order_stream(
 
         periodic_snapshots: list[dict[str, Any]] = []
         iterator = handle.__aiter__()
+        loop = asyncio.get_running_loop()
+        next_snapshot_at = (
+            loop.time() + float(snapshot_interval_seconds)
+            if snapshot_interval_seconds is not None
+            else None
+        )
+
+        async def refresh_periodic_snapshot() -> None:
+            nonlocal previous_dropped, next_snapshot_at
+            # Refresh on a monotonic deadline, not only after an idle timeout.
+            # A continuously busy user stream must not starve account-risk refresh.
+            periodic = await reconcile_open_orders_snapshot(client, journal)
+            periodic_snapshots.append(periodic)
+            risk_sync = periodic.get("account_risk_sync_state") or {}
+            log.info(
+                "periodic open-order snapshot status=%s orders=%s unresolved=%s account_risk_sync=%s fresh=%s error_code=%s",
+                periodic["status"],
+                periodic["venue_open_orders"],
+                len(periodic["unresolved_missing_orders"]),
+                risk_sync.get("status", "missing"),
+                bool(risk_sync.get("fresh")),
+                risk_sync.get("error_code"),
+            )
+            current_dropped = getattr(handle, "dropped", None)
+            if isinstance(current_dropped, bool) or not isinstance(current_dropped, int):
+                raise UserEventGapError("SDK user-stream dropped-event counter became invalid")
+            if current_dropped != previous_dropped:
+                raise UserEventGapError("SDK dropped user events during REST snapshot; reconciliation required")
+            previous_dropped = current_dropped
+            if snapshot_interval_seconds is not None:
+                # Start the next interval after the REST reconciliation completes;
+                # slow paginated reads therefore do not cause a burst of catch-up calls.
+                next_snapshot_at = loop.time() + float(snapshot_interval_seconds)
+
         while True:
             try:
                 if snapshot_interval_seconds is None:
                     event = await iterator.__anext__()
                 else:
+                    remaining = next_snapshot_at - loop.time()
+                    if remaining <= 0:
+                        await refresh_periodic_snapshot()
+                        continue
                     event = await asyncio.wait_for(
                         iterator.__anext__(),
-                        timeout=float(snapshot_interval_seconds),
+                        timeout=remaining,
                     )
             except asyncio.TimeoutError:
-                # A quiet stream still gets periodically refreshed from REST.
-                # The subscription remains live, so events queue while the
-                # paginated snapshot is fetched; queue growth is checked below.
-                periodic = await reconcile_open_orders_snapshot(client, journal)
-                periodic_snapshots.append(periodic)
-                risk_sync = periodic.get("account_risk_sync_state") or {}
-                log.info(
-                    "periodic open-order snapshot status=%s orders=%s unresolved=%s account_risk_sync=%s fresh=%s error_code=%s",
-                    periodic["status"],
-                    periodic["venue_open_orders"],
-                    len(periodic["unresolved_missing_orders"]),
-                    risk_sync.get("status", "missing"),
-                    bool(risk_sync.get("fresh")),
-                    risk_sync.get("error_code"),
-                )
-                current_dropped = getattr(handle, "dropped", None)
-                if isinstance(current_dropped, bool) or not isinstance(current_dropped, int):
-                    raise UserEventGapError("SDK user-stream dropped-event counter became invalid")
-                if current_dropped != previous_dropped:
-                    raise UserEventGapError("SDK dropped user events during REST snapshot; reconciliation required")
-                previous_dropped = current_dropped
+                # The deadline elapsed while waiting for an event on a quiet stream.
+                await refresh_periodic_snapshot()
                 continue
             except StopAsyncIteration:
                 break

@@ -13,12 +13,10 @@ from decimal import Decimal, InvalidOperation
 from collections.abc import Mapping
 from typing import Any
 
+from account_risk_policy import MAX_ACCOUNT_RISK_SNAPSHOT_AGE_SECONDS
 from live_order_preflight import evaluate_live_order_preflight
 from order_journal import OrderJournal
 from order_lifecycle import create_order_intent
-
-
-MAX_ACCOUNT_RISK_SNAPSHOT_AGE_SECONDS = 300.0
 
 
 def _blocked(*blockers: str, **extra: Any) -> dict[str, Any]:

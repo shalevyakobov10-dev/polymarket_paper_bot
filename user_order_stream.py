@@ -627,7 +627,7 @@ async def monitor_user_orders_from_env(
     private_key: str | None = None,
     wallet: str | None = None,
     max_events: int | None = None,
-    snapshot_interval_seconds: float | None = 300.0,
+    snapshot_interval_seconds: float | None = DEFAULT_ACCOUNT_RISK_REFRESH_INTERVAL_SECONDS,
     logger: logging.Logger | None = None,
 ) -> dict[str, Any]:
     """Run a read-only account monitor using secrets supplied by the environment.

@@ -79,6 +79,21 @@ class OrderJournalTests(unittest.TestCase):
         with self.assertRaises(sqlite3.DatabaseError):
             OrderJournal(corrupt_path)
 
+    def test_startup_fails_closed_on_foreign_key_corruption(self):
+        connection = sqlite3.connect(self.database)
+        try:
+            connection.execute("PRAGMA foreign_keys=OFF")
+            connection.execute(
+                "INSERT INTO order_events(client_order_id, event_type, state_json) "
+                "VALUES ('missing-parent', 'corrupt_test', '{}')"
+            )
+            connection.commit()
+        finally:
+            connection.close()
+
+        with self.assertRaises(sqlite3.IntegrityError):
+            OrderJournal(self.database)
+
     def test_online_backup_is_verified_and_can_be_reopened(self):
         created = self.journal.create_intent(new_intent())
         backup_path = Path(self.temp.name) / "backups" / "orders-backup.sqlite3"

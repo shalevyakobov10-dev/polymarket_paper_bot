@@ -19,6 +19,10 @@ from typing import Any
 from polymarket import AsyncSecureClient
 from polymarket.streams import UserSpec
 
+from account_risk_policy import (
+    DEFAULT_ACCOUNT_RISK_REFRESH_INTERVAL_SECONDS,
+    MAX_ACCOUNT_RISK_REFRESH_INTERVAL_SECONDS,
+)
 from account_risk_snapshot import collect_account_risk_snapshot
 from order_journal import OrderJournal
 
@@ -447,7 +451,7 @@ async def consume_user_order_stream(
     *,
     max_events: int | None = None,
     initial_snapshot: bool = True,
-    snapshot_interval_seconds: float | None = 300.0,
+    snapshot_interval_seconds: float | None = DEFAULT_ACCOUNT_RISK_REFRESH_INTERVAL_SECONDS,
     logger: logging.Logger | None = None,
 ) -> dict[str, Any]:
     """Subscribe first, refresh open orders, then consume the authenticated user stream.
@@ -472,6 +476,11 @@ async def consume_user_order_stream(
             or float(snapshot_interval_seconds) <= 0
         ):
             raise ValueError("snapshot_interval_seconds must be positive and finite or None")
+        if float(snapshot_interval_seconds) > MAX_ACCOUNT_RISK_REFRESH_INTERVAL_SECONDS:
+            raise ValueError(
+                "snapshot_interval_seconds must not exceed "
+                f"{MAX_ACCOUNT_RISK_REFRESH_INTERVAL_SECONDS} seconds"
+            )
 
     log = logger or logging.getLogger(__name__)
     handle = await client.subscribe(UserSpec())
@@ -653,8 +662,8 @@ def main() -> None:
     parser.add_argument(
         "--snapshot-interval-seconds",
         type=float,
-        default=float(os.environ.get("USER_ORDER_SNAPSHOT_INTERVAL_SECONDS", "300")),
-        help="REST open-order refresh interval in seconds (default: 300)",
+        default=float(os.environ.get("USER_ORDER_SNAPSHOT_INTERVAL_SECONDS", str(DEFAULT_ACCOUNT_RISK_REFRESH_INTERVAL_SECONDS))),
+        help=f"REST open-order refresh interval in seconds (default: {DEFAULT_ACCOUNT_RISK_REFRESH_INTERVAL_SECONDS:g}; maximum: {MAX_ACCOUNT_RISK_REFRESH_INTERVAL_SECONDS:g})",
     )
     args = parser.parse_args()
     data_dir = Path(os.environ.get("DATA_DIR", "data"))

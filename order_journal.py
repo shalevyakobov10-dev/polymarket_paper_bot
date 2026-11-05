@@ -18,6 +18,7 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Callable, Iterator
 
+from account_risk_policy import MAX_ACCOUNT_RISK_SNAPSHOT_AGE_SECONDS
 from order_lifecycle import (
     begin_submission as transition_begin_submission,
     reconcile_submission as transition_reconcile_submission,
@@ -569,7 +570,7 @@ class OrderJournal:
     def get_latest_account_risk_sync_state(
         self,
         *,
-        max_age_seconds: float = 300.0,
+        max_age_seconds: float = MAX_ACCOUNT_RISK_SNAPSHOT_AGE_SECONDS,
         now: datetime | None = None,
     ) -> dict[str, Any] | None:
         """Return the latest account-risk sync attempt; a failed attempt is never fresh."""
@@ -620,7 +621,7 @@ class OrderJournal:
     def get_latest_account_risk_snapshot(
         self,
         *,
-        max_age_seconds: float = 300,
+        max_age_seconds: float = MAX_ACCOUNT_RISK_SNAPSHOT_AGE_SECONDS,
         now: datetime | None = None,
     ) -> dict[str, Any] | None:
         """Return latest account risk snapshot with an explicit freshness verdict."""

@@ -114,6 +114,11 @@ class OrderJournalTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "must differ"):
             self.journal.backup_to(self.database)
 
+    def test_online_backup_refuses_to_overwrite_sqlite_sidecars(self):
+        wal_path = Path(f"{self.database}-wal")
+        with self.assertRaisesRegex(ValueError, "SQLite sidecars"):
+            self.journal.backup_to(wal_path)
+
     def test_replaying_same_intent_is_idempotent_but_changed_terms_are_rejected(self):
         first = self.journal.create_intent(new_intent())
         replay = self.journal.create_intent(new_intent())

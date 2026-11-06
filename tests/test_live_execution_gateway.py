@@ -270,7 +270,8 @@ class LiveExecutionGatewayTests(unittest.TestCase):
         state = self.journal.get_intent("paper-intent-001")
         self.assertEqual(state["status"], "rejected")
         self.assertEqual(state["submission_attempts"], 1)
-        self.assertEqual(state["venue_response"], {"kind": "rejected", "code": "fak_not_filled"})
+        self.assertEqual(state["last_reason_code"], "venue_explicit_rejection")
+        self.assertNotIn("venue_response", state)
         self.assertEqual(len(self.client.posts), 1)
 
     def test_closed_only_account_is_blocked_before_submission(self):

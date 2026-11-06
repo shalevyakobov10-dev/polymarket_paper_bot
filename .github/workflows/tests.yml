@@ -3,7 +3,7 @@ on:
   push:
     branches: [main, research/order-submission-idempotency-state-machine]
   pull_request:
-    branches: [main]
+    branches: [main, research/order-submission-idempotency-state-machine]
   workflow_dispatch:
 permissions:
   contents: read

@@ -183,6 +183,58 @@ class RestoreOrderJournalTests(unittest.TestCase):
 
         self.assertFalse(destination.exists())
 
+    def test_restore_rejects_json_valid_but_invalid_order_lifecycle_state(self):
+        self._make_backup_with_order()
+        connection = sqlite3.connect(self.backup_path)
+        try:
+            raw = connection.execute(
+                "SELECT state_json FROM order_intents WHERE client_order_id = ?",
+                ("restore-order-001",),
+            ).fetchone()[0]
+            state = json.loads(raw)
+            state["status"] = "not_a_real_order_state"
+            connection.execute(
+                "UPDATE order_intents SET state_json = ? WHERE client_order_id = ?",
+                (json.dumps(state), "restore-order-001"),
+            )
+            connection.commit()
+        finally:
+            connection.close()
+        destination = self.root / "invalid-lifecycle-restored.sqlite3"
+
+        with self.assertRaisesRegex(ValueError, "invalid order lifecycle state"):
+            restore_order_journal(self.backup_path, destination)
+
+        self.assertFalse(destination.exists())
+
+    def test_restore_rejects_latest_audit_state_that_differs_from_current_intent(self):
+        self._make_backup_with_order()
+        connection = sqlite3.connect(self.backup_path)
+        try:
+            raw = connection.execute(
+                "SELECT state_json FROM order_events "
+                "WHERE client_order_id = ? ORDER BY event_id DESC LIMIT 1",
+                ("restore-order-001",),
+            ).fetchone()[0]
+            state = json.loads(raw)
+            # Keep a valid lifecycle state and the same local/venue identifiers,
+            # but change an immutable order term so it no longer matches current.
+            state["token_id"] = "different-token-id"
+            connection.execute(
+                "UPDATE order_events SET state_json = ? "
+                "WHERE event_id = (SELECT MAX(event_id) FROM order_events WHERE client_order_id = ?)",
+                (json.dumps(state), "restore-order-001"),
+            )
+            connection.commit()
+        finally:
+            connection.close()
+        destination = self.root / "audit-mismatch-restored.sqlite3"
+
+        with self.assertRaisesRegex(ValueError, "latest audit event"):
+            restore_order_journal(self.backup_path, destination)
+
+        self.assertFalse(destination.exists())
+
     def test_restore_rejects_successful_sync_state_referencing_unknown_snapshot(self):
         self._make_backup_with_order()
         connection = sqlite3.connect(self.backup_path)

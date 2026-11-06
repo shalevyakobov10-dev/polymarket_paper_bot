@@ -223,6 +223,29 @@ class PolymarketPublicMarketSnapshotProvider:
             return {}
         return latest
 
+    def _rest_book_failure(self, book: Any, now) -> str | None:
+        """Classify one REST quote as missing/invalid or stale for diagnostics."""
+        if not isinstance(book, dict):
+            return "missing_or_invalid"
+        if book.get("book_usable") is not True or book.get("crossed_book") is True:
+            return "missing_or_invalid"
+        observed = parse_timestamp(book.get("observed_at"))
+        if observed is None:
+            return "missing_or_invalid"
+        age = (now - observed).total_seconds()
+        if age < -30 or age > self.max_age_seconds:
+            return "stale"
+        bid = _number(book.get("best_bid"))
+        ask = _number(book.get("best_ask"))
+        midpoint = _number(book.get("midpoint"))
+        if (
+            bid is None or ask is None or midpoint is None
+            or not 0 < bid < ask < 1
+            or not bid <= midpoint <= ask
+        ):
+            return "missing_or_invalid"
+        return None
+
     @staticmethod
     def _normalize_rest_book(book: Any, now) -> dict[str, Any] | None:
         if not isinstance(book, dict) or book.get("book_usable") is not True:
@@ -236,7 +259,10 @@ class PolymarketPublicMarketSnapshotProvider:
         if observed is None or bid is None or ask is None or midpoint is None:
             return None
         age = (now - observed).total_seconds()
-        if age < -30 or not 0 < bid < ask < 1 or not bid <= midpoint <= ask:
+        if (
+            age < -30 or age > self.max_age_seconds
+            or not 0 < bid < ask < 1 or not bid <= midpoint <= ask
+        ):
             return None
         return {
             "best_bid": bid,
@@ -309,13 +335,24 @@ class PolymarketPublicMarketSnapshotProvider:
                 yes_quote = no_quote = None
 
             if yes_quote is None or no_quote is None:
-                yes_quote = self._normalize_rest_book(rest_books.get(yes_token), current)
-                no_quote = self._normalize_rest_book(rest_books.get(no_token), current)
+                raw_yes_book = rest_books.get(yes_token)
+                raw_no_book = rest_books.get(no_token)
+                yes_failure = self._rest_book_failure(raw_yes_book, current)
+                no_failure = self._rest_book_failure(raw_no_book, current)
+                yes_quote = (
+                    self._normalize_rest_book(raw_yes_book, current)
+                    if yes_failure is None else None
+                )
+                no_quote = (
+                    self._normalize_rest_book(raw_no_book, current)
+                    if no_failure is None else None
+                )
                 selected_source = "official_sdk_rest_snapshot"
                 if yes_quote is None or no_quote is None:
-                    if yes_quote is None and no_quote is None:
+                    failures = {yes_failure, no_failure}
+                    if "missing_or_invalid" in failures:
                         skipped_missing_book += 1
-                    else:
+                    if "stale" in failures:
                         skipped_stale_book += 1
                     continue
                 skew = abs((yes_quote["observed_at"] - no_quote["observed_at"]).total_seconds())

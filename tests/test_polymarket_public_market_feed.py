@@ -80,7 +80,8 @@ class FakeStreamCollector:
 class PolymarketPublicMarketSnapshotProviderTests(unittest.TestCase):
     def provider(self, market=None, book_map=None, *, max_skew=5, **kwargs):
         item = market or binary_market()
-        result = book_map or rest_books()
+        result = book_map if book_map is not None else rest_books()
+        selected_book_fetcher = kwargs.pop("book_fetcher", None)
         gamma_calls = []
 
         def gamma_fetcher(page_size, offset):
@@ -100,7 +101,7 @@ class PolymarketPublicMarketSnapshotProviderTests(unittest.TestCase):
             max_markets=10,
             max_quote_skew_seconds=max_skew,
             gamma_page_fetcher=gamma_fetcher,
-            book_fetcher=book_fetcher,
+            book_fetcher=selected_book_fetcher or book_fetcher,
             **kwargs,
         )
         return provider, gamma_calls
@@ -145,6 +146,12 @@ class PolymarketPublicMarketSnapshotProviderTests(unittest.TestCase):
         provider, _ = self.provider(book_map=data)
         self.assertEqual(provider.load(now=NOW), [])
         self.assertEqual(provider.last_diagnostics["skipped_missing_or_invalid_book"], 1)
+
+    def test_future_dated_rest_book_is_skipped_as_stale(self):
+        data = rest_books(yes_age=-60, no_age=1)
+        provider, _ = self.provider(book_map=data)
+        self.assertEqual(provider.load(now=NOW), [])
+        self.assertEqual(provider.last_diagnostics["skipped_stale_book"], 1)
 
     def test_crossed_rest_book_is_skipped(self):
         data = rest_books()

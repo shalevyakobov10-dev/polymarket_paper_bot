@@ -72,6 +72,71 @@ def _validate_database(connection: sqlite3.Connection) -> dict[str, int]:
             connection.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
         )
 
+
+    # The venue-ID lookup index is part of order recovery, not a disposable
+    # cache. Verify it agrees with the immutable order state in both directions.
+    for row in connection.execute(
+        "SELECT client_order_id, state_json FROM order_intents"
+    ):
+        try:
+            state = json.loads(row["state_json"])
+        except (TypeError, ValueError, json.JSONDecodeError):
+            raise ValueError("backup contains malformed order state") from None
+        if not isinstance(state, dict) or state.get("client_order_id") != row["client_order_id"]:
+            raise ValueError("backup order state identity does not match its journal key")
+        exchange_id = state.get("exchange_order_id")
+        if exchange_id:
+            index_row = connection.execute(
+                "SELECT client_order_id FROM order_exchange_index WHERE exchange_order_id = ?",
+                (exchange_id,),
+            ).fetchone()
+            if index_row is None:
+                if state.get("status") != "manual_review":
+                    raise ValueError("backup is missing a required venue-order index entry")
+            elif index_row["client_order_id"] != row["client_order_id"]:
+                raise ValueError("backup venue-order index is inconsistent with order state")
+
+    for row in connection.execute(
+        "SELECT exchange_order_id, client_order_id FROM order_exchange_index"
+    ):
+        intent_row = connection.execute(
+            "SELECT state_json FROM order_intents WHERE client_order_id = ?",
+            (row["client_order_id"],),
+        ).fetchone()
+        if intent_row is None:
+            raise ValueError("backup venue-order index refers to a missing intent")
+        try:
+            indexed_state = json.loads(intent_row["state_json"])
+        except (TypeError, ValueError, json.JSONDecodeError):
+            raise ValueError("backup contains malformed indexed order state") from None
+        if not isinstance(indexed_state, dict) or indexed_state.get("exchange_order_id") != row["exchange_order_id"]:
+            raise ValueError("backup venue-order index points to a conflicting intent")
+
+    sync_row = connection.execute(
+        "SELECT status, snapshot_id, error_code FROM account_risk_sync_state WHERE singleton_id = 1"
+    ).fetchone()
+    if sync_row is not None:
+        if sync_row["status"] == "success":
+            if not sync_row["snapshot_id"] or sync_row["error_code"] is not None:
+                raise ValueError("backup successful account sync state is malformed")
+            snapshot_row = connection.execute(
+                "SELECT captured_at_utc FROM account_risk_snapshots WHERE snapshot_id = ?",
+                (sync_row["snapshot_id"],),
+            ).fetchone()
+            if snapshot_row is None:
+                raise ValueError("backup account sync state references an unknown snapshot")
+            latest_snapshot = connection.execute(
+                "SELECT snapshot_id FROM account_risk_snapshots "
+                "ORDER BY captured_at_utc DESC, snapshot_seq DESC LIMIT 1"
+            ).fetchone()
+            if latest_snapshot is None or latest_snapshot["snapshot_id"] != sync_row["snapshot_id"]:
+                raise ValueError("backup successful account sync state is not bound to the latest snapshot")
+        elif sync_row["status"] == "failed":
+            if sync_row["snapshot_id"] is not None or not sync_row["error_code"]:
+                raise ValueError("backup failed account sync state is malformed")
+        else:
+            raise ValueError("backup account sync state has an unknown status")
+
     # Parse every persisted state document before publishing the restore.
     # Reject JSON extensions such as NaN/Infinity and non-object payloads.
     for table, column in _JSON_COLUMNS.items():

@@ -337,6 +337,48 @@ class RestoreOrderJournalTests(unittest.TestCase):
 
         self.assertFalse(destination.exists())
 
+    def test_restore_rejects_json_valid_but_inconsistent_account_risk_arithmetic(self):
+        self._make_backup_with_order()
+        connection = sqlite3.connect(self.backup_path)
+        try:
+            raw = connection.execute(
+                "SELECT snapshot_json FROM account_risk_snapshots LIMIT 1"
+            ).fetchone()[0]
+            snapshot = json.loads(raw)
+            snapshot["open_buy_commitment_usd"] = "10"
+            connection.execute(
+                "UPDATE account_risk_snapshots SET snapshot_json = ?",
+                (json.dumps(snapshot),),
+            )
+            connection.commit()
+        finally:
+            connection.close()
+        destination = self.root / "risk-arithmetic-restored.sqlite3"
+
+        with self.assertRaisesRegex(ValueError, "available collateral is inconsistent"):
+            restore_order_journal(self.backup_path, destination)
+
+        self.assertFalse(destination.exists())
+
+    def test_restore_rejects_success_sync_timestamp_not_matching_snapshot(self):
+        self._make_backup_with_order()
+        connection = sqlite3.connect(self.backup_path)
+        try:
+            connection.execute(
+                "UPDATE account_risk_sync_state "
+                "SET attempted_at_utc = ? WHERE singleton_id = 1",
+                ("2020-01-01T00:00:00+00:00",),
+            )
+            connection.commit()
+        finally:
+            connection.close()
+        destination = self.root / "risk-sync-time-restored.sqlite3"
+
+        with self.assertRaisesRegex(ValueError, "timestamp differs"):
+            restore_order_journal(self.backup_path, destination)
+
+        self.assertFalse(destination.exists())
+
     def test_restore_rejects_successful_sync_state_referencing_unknown_snapshot(self):
         self._make_backup_with_order()
         connection = sqlite3.connect(self.backup_path)

@@ -1,6 +1,7 @@
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 from types import SimpleNamespace
 
 from order_journal import OrderJournal
@@ -675,6 +676,54 @@ class UserOrderStreamTests(unittest.TestCase):
         )
         self.assertEqual(result["received"], 3)
         self.assertGreaterEqual(len(result["periodic_open_orders_snapshots"]), 1)
+        self.assertTrue(handle.closed)
+
+    def test_periodic_snapshot_history_is_bounded_and_stores_only_summaries(self):
+        import asyncio
+
+        calls = 0
+
+        async def fake_reconcile(_client, _journal):
+            nonlocal calls
+            calls += 1
+            return {
+                "status": "open_orders_refreshed",
+                "venue_open_orders": 1,
+                "unresolved_missing_orders": [{"client_order_id": "private-local-id"}],
+                "updated": 0,
+                "duplicate": 0,
+                "manual_review": 0,
+                "untracked": 0,
+                "ignored": 0,
+                "malformed": 0,
+                "account_risk_snapshot_complete": True,
+                "account_risk_snapshot_id": "snapshot-private-id",
+                "account_risk_snapshot_error": None,
+                "account_risk_sync_state": {"status": "success", "fresh": True},
+                "account_risk_snapshot": {"positions": [{"asset_id": "private-asset"}]},
+                "execution": "none",
+            }
+
+        events = [order_event(size_matched="0") for _ in range(35)]
+        handle = BusyFakeHandle(events)
+        client = FakeClient(handle)
+        with patch("user_order_stream.reconcile_open_orders_snapshot", new=fake_reconcile):
+            result = asyncio.run(
+                consume_user_order_stream(
+                    client,
+                    self.journal,
+                    max_events=len(events),
+                    initial_snapshot=False,
+                    snapshot_interval_seconds=0.005,
+                )
+            )
+
+        history = result["periodic_open_orders_snapshots"]
+        self.assertGreater(calls, 20)
+        self.assertEqual(len(history), 20)
+        self.assertTrue(all(item["unresolved_missing_orders_count"] == 1 for item in history))
+        self.assertTrue(all("account_risk_snapshot" not in item for item in history))
+        self.assertTrue(all("unresolved_missing_orders" not in item for item in history))
         self.assertTrue(handle.closed)
 
     def test_consumer_rejects_invalid_periodic_snapshot_interval(self):

@@ -310,7 +310,9 @@ class LiveExecutionGateway:
             allowances = _field(balance_allowance, "allowances")
             if not isinstance(allowances, dict) or not allowances:
                 return self._blocked("collateral_allowance_map_unavailable")
-            allowance_units = max(
+            # Use the smallest reported allowance so a large approval for
+            # another spender cannot mask a smaller allowance in the SDK map.
+            allowance_units = min(
                 (_decimal(value, "collateral_allowance_base_units") for value in allowances.values()),
                 default=Decimal("0"),
             )

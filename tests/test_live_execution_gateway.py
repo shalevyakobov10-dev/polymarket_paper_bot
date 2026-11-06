@@ -265,6 +265,20 @@ class LiveExecutionGatewayTests(unittest.TestCase):
         self.assertEqual(self.client.posts, [])
         self.assertEqual(self.journal.get_intent("paper-intent-001")["status"], "prepared")
 
+    def test_collateral_allowance_uses_conservative_minimum_spender_value(self):
+        class MixedAllowanceClient(FakeClient):
+            def get_balance_allowance(self, *, asset_type):
+                return {
+                    "balance": self.balance,
+                    "allowances": {"large": "100000000", "small": "100000"},
+                    "asset_type": str(asset_type),
+                }
+        client = MixedAllowanceClient()
+        result = self._run_gateway(client_factory=lambda _key, _wallet: client)
+        self.assertEqual(result["reason"], "live_collateral_or_allowance_insufficient")
+        self.assertEqual(client.created, [])
+        self.assertEqual(client.posts, [])
+
     def test_missing_trading_approvals_blocks_before_signing(self):
         class MissingApprovalsClient(FakeClient):
             def get_trading_approvals_state(self):

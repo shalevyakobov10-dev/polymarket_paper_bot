@@ -61,7 +61,11 @@ def live_env():
 
 class FakeClient:
     def __init__(self, *, response=None, post_exception=None, balance="100000000", allowance="100000000", closed_only=False):
-        self.response = response if response is not None else {"order_id": "venue-order-001", "ok": True}
+        self.response = response if response is not None else {
+            "order_id": "venue-order-001", "ok": True, "status": "matched",
+            "making_amount": "5.00", "taking_amount": "10.00",
+            "trade_ids": ["trade-001"], "transactions_hashes": ["0x" + "a" * 64],
+        }
         self.post_exception = post_exception
         self.balance = balance
         self.allowance = allowance
@@ -225,6 +229,13 @@ class LiveExecutionGatewayTests(unittest.TestCase):
         state = self.journal.get_intent("paper-intent-001")
         self.assertEqual(state["status"], "open")
         self.assertEqual(state["submission_attempts"], 1)
+        self.assertEqual(state["venue_response"]["kind"], "accepted")
+        self.assertEqual(state["venue_response"]["status"], "matched")
+        self.assertEqual(state["venue_response"]["making_amount"], "5.00")
+        self.assertEqual(state["venue_response"]["taking_amount"], "10.00")
+        self.assertEqual(state["venue_response"]["trade_ids"], ["trade-001"])
+        self.assertEqual(state["venue_response"]["transactions_hashes"], ["0x" + "a" * 64])
+        self.assertEqual(result["reported_trade_count"], 1)
         self.assertTrue(self.client.closed)
 
     def test_ambiguous_transport_outcome_is_not_retried(self):
@@ -249,6 +260,7 @@ class LiveExecutionGatewayTests(unittest.TestCase):
         state = self.journal.get_intent("paper-intent-001")
         self.assertEqual(state["status"], "rejected")
         self.assertEqual(state["submission_attempts"], 1)
+        self.assertEqual(state["venue_response"], {"kind": "rejected", "code": "fak_not_filled"})
         self.assertEqual(len(self.client.posts), 1)
 
     def test_closed_only_account_is_blocked_before_submission(self):

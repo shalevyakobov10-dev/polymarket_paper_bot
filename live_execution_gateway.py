@@ -82,6 +82,53 @@ def _response_order_id(response: Any) -> str | None:
     return None
 
 
+def _accepted_venue_receipt(response: Any, order_id: str) -> dict[str, Any]:
+    """Copy only safe, bounded SDK acknowledgement fields into the local journal."""
+    status = str(_field(response, "status") or "").lower()
+    if status not in {"live", "matched", "delayed"}:
+        raise ValueError("accepted SDK response has an unsupported status")
+
+    def amount(name: str) -> str | None:
+        value = _field(response, name)
+        if value is None:
+            return None
+        parsed = _decimal(value, f"venue_response.{name}")
+        if parsed < 0:
+            raise ValueError("accepted SDK response contains a negative amount")
+        return str(parsed)
+
+    def identifiers(name: str) -> list[str]:
+        values = _field(response, name, ()) or ()
+        if not isinstance(values, (list, tuple)):
+            raise ValueError(f"venue_response.{name} must be a sequence")
+        if len(values) > 100:
+            raise ValueError(f"venue_response.{name} exceeds the receipt limit")
+        result = []
+        for value in values:
+            identifier = str(value).strip()
+            if not identifier or len(identifier) > 256:
+                raise ValueError(f"venue_response.{name} contains an invalid identifier")
+            result.append(identifier)
+        return result
+
+    return {
+        "kind": "accepted",
+        "order_id": order_id,
+        "status": status,
+        "making_amount": amount("making_amount"),
+        "taking_amount": amount("taking_amount"),
+        "trade_ids": identifiers("trade_ids"),
+        "transactions_hashes": identifiers("transactions_hashes"),
+    }
+
+
+def _rejected_venue_receipt(response: Any) -> dict[str, Any]:
+    code = str(_field(response, "code") or "unknown").strip().lower()
+    if not re.fullmatch(r"[a-z0-9_]{1,64}", code):
+        code = "unknown"
+    return {"kind": "rejected", "code": code}
+
+
 def _safe_reason(exc: Exception) -> str:
     # Exception text can contain request details. Persist only a stable type code.
     name = type(exc).__name__.lower()
@@ -385,15 +432,22 @@ class LiveExecutionGateway:
             submission_started = True
             response = client.post_order(signed_order)
             order_id = _response_order_id(response)
-            if order_id:
+            if order_id and _field(response, "ok") is not False:
+                receipt = _accepted_venue_receipt(response, order_id)
                 self.journal.record_submission_response(
-                    client_order_id, outcome="accepted", exchange_order_id=order_id
+                    client_order_id,
+                    outcome="accepted",
+                    exchange_order_id=order_id,
+                    venue_response=receipt,
                 )
                 return {
                     "status": "accepted_for_venue_processing",
                     "client_order_id": client_order_id,
                     "exchange_order_id": order_id,
                     "order_type": LIVE_ORDER_TYPE,
+                    "venue_status": receipt["status"],
+                    "reported_trade_count": len(receipt["trade_ids"]),
+                    "reported_taking_amount": receipt["taking_amount"],
                     "notional_usd": float(notional),
                     "geoblock": {"country": geo.get("country"), "region": geo.get("region")},
                     "execution": "live_order_submitted",
@@ -405,8 +459,12 @@ class LiveExecutionGateway:
                 or _field(response, "message")
             )
             if explicit_error or _field(response, "success") is False or _field(response, "ok") is False:
+                receipt = _rejected_venue_receipt(response)
                 self.journal.record_submission_response(
-                    client_order_id, outcome="rejected", reason_code="explicit_venue_rejection"
+                    client_order_id,
+                    outcome="rejected",
+                    reason_code="explicit_venue_rejection",
+                    venue_response=receipt,
                 )
                 return self._blocked(
                     "venue_rejected_order",

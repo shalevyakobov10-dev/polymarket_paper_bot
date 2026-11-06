@@ -337,6 +337,57 @@ class RestoreOrderJournalTests(unittest.TestCase):
 
         self.assertFalse(destination.exists())
 
+    def test_restore_rejects_asset_ids_that_duplicate_after_normalization(self):
+        self._make_backup_with_order()
+        connection = sqlite3.connect(self.backup_path)
+        try:
+            raw = connection.execute(
+                "SELECT snapshot_json FROM account_risk_snapshots LIMIT 1"
+            ).fetchone()[0]
+            snapshot = json.loads(raw)
+            snapshot["open_order_assets_by_condition"] = {
+                "condition-1": ["token-1", " token-1 "]
+            }
+            connection.execute(
+                "UPDATE account_risk_snapshots SET snapshot_json = ?",
+                (json.dumps(snapshot),),
+            )
+            connection.commit()
+        finally:
+            connection.close()
+        destination = self.root / "duplicate-assets-restored.sqlite3"
+
+        with self.assertRaisesRegex(ValueError, "duplicate asset IDs"):
+            restore_order_journal(self.backup_path, destination)
+
+        self.assertFalse(destination.exists())
+
+    def test_restore_rejects_audit_attempt_counter_jump_without_transition(self):
+        self._make_backup_with_order()
+        connection = sqlite3.connect(self.backup_path)
+        try:
+            raw = connection.execute(
+                "SELECT state_json FROM order_events "
+                "WHERE client_order_id = ? ORDER BY event_id DESC LIMIT 1",
+                ("restore-order-001",),
+            ).fetchone()[0]
+            state = json.loads(raw)
+            state["reconciliation_attempts"] = 1
+            connection.execute(
+                "UPDATE order_events SET state_json = ? "
+                "WHERE event_id = (SELECT MAX(event_id) FROM order_events WHERE client_order_id = ?)",
+                (json.dumps(state), "restore-order-001"),
+            )
+            connection.commit()
+        finally:
+            connection.close()
+        destination = self.root / "counter-jump-restored.sqlite3"
+
+        with self.assertRaisesRegex(ValueError, "reconciliation counter has an invalid transition"):
+            restore_order_journal(self.backup_path, destination)
+
+        self.assertFalse(destination.exists())
+
     def test_restore_rejects_json_valid_but_inconsistent_account_risk_arithmetic(self):
         self._make_backup_with_order()
         connection = sqlite3.connect(self.backup_path)

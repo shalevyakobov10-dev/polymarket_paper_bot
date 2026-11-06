@@ -177,6 +177,16 @@ class LiveExecutionGatewayTests(unittest.TestCase):
                 risk_context=self._risk_context(),
             )
 
+    def test_default_client_factory_blocks_non_eoa_wallet_before_sdk_create(self):
+        from eth_account import Account
+
+        signer = Account.create()
+        different_wallet = "0x" + "2" * 40
+        with self.assertRaisesRegex(RuntimeError, "non_eoa_wallet_flow_blocked"):
+            LiveExecutionGateway._create_secure_client(
+                signer.key.hex(), different_wallet
+            )
+
     def test_default_configuration_does_not_arm_live_orders(self):
         with patch.dict(os.environ, {}, clear=True):
             config = LiveExecutionConfig()

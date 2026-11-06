@@ -218,6 +218,17 @@ class LiveExecutionGateway:
 
     @staticmethod
     def _create_secure_client(private_key: str, wallet: str) -> Any:
+        # SecureClient.create() may deploy an undeployed Deposit Wallet as part
+        # of _ensure_wallet_ready(). Keep this adapter's client construction
+        # strictly side-effect free by supporting EOA-only until a separately
+        # reviewed, explicit deployment lifecycle exists.
+        from eth_account import Account
+
+        signer_address = str(Account.from_key(private_key).address)
+        if signer_address.lower() != str(wallet).strip().lower():
+            raise RuntimeError(
+                "non_eoa_wallet_flow_blocked_to_prevent_implicit_deposit_wallet_deployment"
+            )
         from polymarket import SecureClient
         return SecureClient.create(private_key=private_key, wallet=wallet)
 

@@ -36,7 +36,7 @@ def execution_readiness_payload() -> dict[str, Any]:
         },
         {
             "code": "account_eligibility_not_verified",
-            "detail": "Polymarket Terms of Use effective 2026-08-11 require users to be at least 18. The operator has self-reported age 41, but account-level identity and eligibility still require verification.",
+            "detail": "Polymarket Terms of Use effective 2026-08-11 state that users must be 18 or older. The operator has self-reported age 41, but account-level identity and eligibility still require verification.",
         },
         {
             "code": "jurisdiction_and_legal_review_not_verified",

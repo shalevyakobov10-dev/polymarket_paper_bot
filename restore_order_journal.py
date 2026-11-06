@@ -113,9 +113,17 @@ def _validate_event_transition(
     if event_type.startswith("reconciliation_"):
         valid_predecessors = {"submission_unknown"}
     elif event_type.startswith("order_observation_"):
-        valid_predecessors = {
-            "open", "partially_filled", "filled", "cancelled", "rejected"
-        }
+        # Normal status observations can only advance an active venue order.
+        # The lifecycle function returns an unchanged state for duplicate
+        # terminal snapshots, so those no-op reads never create audit events.
+        # Identity/terms mismatches are checked before the terminal-state guard
+        # and intentionally move even a terminal order to manual_review.
+        if status == "manual_review":
+            valid_predecessors = {
+                "open", "partially_filled", "filled", "cancelled", "rejected"
+            }
+        else:
+            valid_predecessors = {"open", "partially_filled"}
     else:
         valid_predecessors = predecessor_by_event.get(event_type, set())
     if previous_status not in valid_predecessors:

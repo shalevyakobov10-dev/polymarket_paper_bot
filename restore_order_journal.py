@@ -158,6 +158,7 @@ def restore_order_journal(
         source_counts = _validate_database(source_connection)
 
         target_connection = sqlite3.connect(str(temporary), timeout=15.0)
+        target_connection.row_factory = sqlite3.Row
         source_connection.backup(target_connection, pages=256, sleep=0.05)
         target_counts = _validate_database(target_connection)
         if target_counts != source_counts:

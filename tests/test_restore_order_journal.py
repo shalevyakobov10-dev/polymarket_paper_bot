@@ -154,6 +154,53 @@ class RestoreOrderJournalTests(unittest.TestCase):
 
         self.assertFalse(destination.exists())
 
+    def test_restore_rejects_venue_order_index_pointing_to_wrong_intent(self):
+        self._make_backup_with_order()
+        second_intent = create_order_intent(
+            client_order_id="restore-order-002",
+            token_id="token-restore",
+            side="BUY",
+            limit_price=0.42,
+            size=10,
+        )
+        self.journal.create_intent(second_intent)
+        # Rebuild backup so both intents exist, then create a logically corrupt
+        # index that still satisfies the database foreign-key constraint.
+        self.journal.backup_to(self.backup_path)
+        connection = sqlite3.connect(self.backup_path)
+        try:
+            connection.execute(
+                "UPDATE order_exchange_index SET client_order_id = ?",
+                ("restore-order-002",),
+            )
+            connection.commit()
+        finally:
+            connection.close()
+        destination = self.root / "index-corrupt-restored.sqlite3"
+
+        with self.assertRaisesRegex(ValueError, "venue-order index"):
+            restore_order_journal(self.backup_path, destination)
+
+        self.assertFalse(destination.exists())
+
+    def test_restore_rejects_successful_sync_state_referencing_unknown_snapshot(self):
+        self._make_backup_with_order()
+        connection = sqlite3.connect(self.backup_path)
+        try:
+            connection.execute(
+                "UPDATE account_risk_sync_state SET snapshot_id = ? WHERE singleton_id = 1",
+                ("missing-snapshot-id",),
+            )
+            connection.commit()
+        finally:
+            connection.close()
+        destination = self.root / "sync-corrupt-restored.sqlite3"
+
+        with self.assertRaisesRegex(ValueError, "unknown snapshot"):
+            restore_order_journal(self.backup_path, destination)
+
+        self.assertFalse(destination.exists())
+
     def test_restore_rejects_same_source_and_destination(self):
         self._make_backup_with_order()
 

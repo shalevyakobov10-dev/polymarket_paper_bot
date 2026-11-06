@@ -148,6 +148,26 @@ class DelayedFakeHandle(FakeHandle):
         return await super().__anext__()
 
 
+class CancellationSensitiveDelayedHandle(FakeHandle):
+    """Fake websocket iterator that fails loudly if an in-flight read is cancelled."""
+
+    def __init__(self, events=()):
+        super().__init__(events)
+        self.first_wait = True
+        self.cancelled_reads = 0
+
+    async def __anext__(self):
+        if self.first_wait:
+            self.first_wait = False
+            import asyncio
+            try:
+                await asyncio.sleep(0.04)
+            except asyncio.CancelledError:
+                self.cancelled_reads += 1
+                raise RuntimeError("websocket receive was cancelled")
+        return await super().__anext__()
+
+
 class BusyFakeHandle(FakeHandle):
     async def __anext__(self):
         import asyncio
@@ -592,6 +612,36 @@ class UserOrderStreamTests(unittest.TestCase):
         self.assertEqual(len(result["periodic_open_orders_snapshots"]), 1)
         self.assertEqual(result["periodic_open_orders_snapshots"][0]["updated"], 1)
         self.assertEqual(result["duplicate"], 1)
+        self.assertEqual(self.journal.get_intent("local-123")["filled_size"], "4")
+        self.assertTrue(handle.closed)
+
+    def test_periodic_refresh_does_not_cancel_an_inflight_websocket_receive(self):
+        open_order = SimpleNamespace(
+            id="venue-123",
+            asset_id="token-456",
+            side="BUY",
+            original_size="12",
+            size_matched="4",
+            price="0.37",
+            status="LIVE",
+        )
+        page = SimpleNamespace(items=(open_order,), limit_reached=False, has_more=False)
+        handle = CancellationSensitiveDelayedHandle([order_event(size_matched="4")])
+        client = FakeClient(handle, [page])
+        import asyncio
+
+        result = asyncio.run(
+            consume_user_order_stream(
+                client,
+                self.journal,
+                max_events=1,
+                initial_snapshot=False,
+                snapshot_interval_seconds=0.015,
+            )
+        )
+        self.assertEqual(handle.cancelled_reads, 0)
+        self.assertEqual(result["received"], 1)
+        self.assertGreaterEqual(len(result["periodic_open_orders_snapshots"]), 1)
         self.assertEqual(self.journal.get_intent("local-123")["filled_size"], "4")
         self.assertTrue(handle.closed)
 

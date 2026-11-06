@@ -197,14 +197,13 @@ class LiveExecutionGatewayTests(unittest.TestCase):
         self.assertEqual(self.client.posts, [])
 
     def test_stale_risk_context_fails_closed(self):
-        result = self._run_gateway()
-        # Re-run on a still-prepared intent with a stale context through an explicit gateway.
         with patch.dict(os.environ, self.config_env, clear=True):
             gateway = LiveExecutionGateway(self.journal, config=LiveExecutionConfig(), **self.gateway_kwargs)
             stale = self._risk_context(captured_at_utc="2020-01-01T00:00:00+00:00")
             blocked = gateway.submit_prepared_buy("another-id", risk_context=stale)
         self.assertEqual(blocked["reason"], "risk_context_stale_or_future_dated")
-        self.assertEqual(result["status"], "accepted_for_venue_processing")
+        self.assertEqual(self.journal.get_intent("paper-intent-001")["status"], "prepared")
+        self.assertEqual(self.client.posts, [])
 
     def test_success_posts_one_fak_buy_and_records_exchange_id(self):
         result = self._run_gateway()

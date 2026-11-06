@@ -8,7 +8,7 @@ from decimal import Decimal, InvalidOperation
 from typing import Any
 
 
-LIVE_ORDER_SUBMISSION_IMPLEMENTED = False
+LIVE_ORDER_SUBMISSION_IMPLEMENTED = True
 REQUIRED_RELEASE_GATES = (
     "account_eligibility_verified",
     "jurisdiction_and_legal_review_approved",

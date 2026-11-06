@@ -11,6 +11,13 @@ from typing import Any
 
 LIVE_ORDER_SUBMISSION_IMPLEMENTED = False
 
+# Polymarket Terms of Use effective 2026-08-11 state the Site and Features
+# are intended only for users aged 18 or older. This is a documented readiness
+# condition, never a switch that authorizes execution.
+POLYMARKET_MINIMUM_USER_AGE_YEARS = 18
+POLYMARKET_TERMS_EFFECTIVE_DATE = "2026-08-11"
+POLYMARKET_TERMS_URL = "https://polymarket.com/es/tos"
+
 
 def execution_readiness_payload() -> dict[str, Any]:
     """Return an explicit, fail-closed report for the current execution mode."""
@@ -25,7 +32,7 @@ def execution_readiness_payload() -> dict[str, Any]:
         },
         {
             "code": "account_eligibility_not_verified",
-            "detail": "The account operator's age and platform eligibility have not been independently verified.",
+            "detail": "Polymarket Terms of Use effective 2026-08-11 state that the Site and Features are intended only for users aged 18 or older; the operator's age and current platform eligibility have not been independently verified.",
         },
         {
             "code": "jurisdiction_and_legal_review_not_verified",
@@ -44,13 +51,19 @@ def execution_readiness_payload() -> dict[str, Any]:
         "mode": "paper_only",
         "status": "blocked",
         "live_order_submission_implemented": LIVE_ORDER_SUBMISSION_IMPLEMENTED,
+        "platform_eligibility_policy": {
+            "minimum_user_age_years": POLYMARKET_MINIMUM_USER_AGE_YEARS,
+            "terms_effective_date": POLYMARKET_TERMS_EFFECTIVE_DATE,
+            "source_url": POLYMARKET_TERMS_URL,
+            "independent_verification_required": True,
+        },
         "live_execution_enabled": False,
         "order_submission_allowed": False,
         "order_signing_enabled": False,
         "kill_switch": "engaged",
         "blockers": blockers,
         "requirements_before_any_separate_live_launch_review": [
-            "Verify the account operator meets Polymarket's current age and account-eligibility requirements.",
+            "Independently verify the operator is at least 18 years old under the current Polymarket Terms of Use (effective 2026-08-11) and is otherwise eligible; do not rely on self-reported runtime flags.",
             "Obtain qualified review of applicable local law and confirm current platform geographic eligibility.",
             "Validate a strategy on sufficiently large, chronological out-of-sample data after realistic fees, spread, slippage, and partial fills.",
             "Complete independent security review of wallet custody, key isolation, authentication, and secrets handling.",

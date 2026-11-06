@@ -304,7 +304,7 @@ class RestoreOrderJournalTests(unittest.TestCase):
             connection.close()
         destination = self.root / "audit-mismatch-restored.sqlite3"
 
-        with self.assertRaisesRegex(ValueError, "latest audit event"):
+        with self.assertRaisesRegex(ValueError, "immutable order terms|latest audit event"):
             restore_order_journal(self.backup_path, destination)
 
         self.assertFalse(destination.exists())

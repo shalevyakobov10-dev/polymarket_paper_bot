@@ -43,6 +43,82 @@ def _read_only_connection(path: Path) -> sqlite3.Connection:
     return connection
 
 
+def _validate_event_transition(
+    event_type: str,
+    previous_state: dict[str, Any] | None,
+    state: dict[str, Any],
+) -> None:
+    """Validate event label, target status, and legal predecessor status."""
+    status = state.get("status")
+    fixed_targets = {
+        "intent_created": {"prepared"},
+        "submission_started": {"submission_pending"},
+        "submission_response_accepted": {"open"},
+        "submission_response_rejected": {"rejected"},
+        "submission_response_ambiguous": {"submission_unknown"},
+        "interrupted_submission_recovered": {"submission_unknown"},
+    }
+    if event_type in fixed_targets:
+        allowed_targets = fixed_targets[event_type]
+    elif event_type.startswith("reconciliation_"):
+        outcome = event_type.removeprefix("reconciliation_")
+        targets = {
+            "not_found": {"submission_unknown"},
+            "lookup_error": {"submission_unknown"},
+            "found_open": {"open"},
+            "found_partially_filled": {"partially_filled"},
+            "found_filled": {"filled"},
+            "found_cancelled": {"cancelled"},
+            "found_rejected": {"rejected"},
+        }
+        allowed_targets = targets.get(outcome, set())
+        if outcome.startswith("found_"):
+            allowed_targets = allowed_targets | {"manual_review"}
+    elif event_type.startswith("order_observation_"):
+        outcome = event_type.removeprefix("order_observation_")
+        targets = {
+            "open": {"open", "partially_filled", "filled"},
+            "partially_filled": {"partially_filled"},
+            "filled": {"filled"},
+            "cancelled": {"cancelled"},
+            "rejected": {"rejected"},
+        }
+        allowed_targets = targets.get(outcome, set()) | {"manual_review"}
+    else:
+        allowed_targets = set()
+
+    if not allowed_targets or status not in allowed_targets:
+        raise ValueError("backup audit event type does not match its lifecycle state")
+
+    if previous_state is None:
+        if event_type != "intent_created" or status != "prepared":
+            raise ValueError("backup audit history must begin with a prepared intent")
+        if state.get("submission_attempts") != 0 or state.get("reconciliation_attempts") != 0:
+            raise ValueError("backup initial intent has nonzero lifecycle counters")
+        if state.get("exchange_order_id") is not None:
+            raise ValueError("backup initial intent already has an exchange order ID")
+        return
+
+    previous_status = previous_state.get("status")
+    predecessor_by_event = {
+        "submission_started": {"prepared"},
+        "submission_response_accepted": {"submission_pending"},
+        "submission_response_rejected": {"submission_pending"},
+        "submission_response_ambiguous": {"submission_pending"},
+        "interrupted_submission_recovered": {"submission_pending"},
+    }
+    if event_type.startswith("reconciliation_"):
+        valid_predecessors = {"submission_unknown"}
+    elif event_type.startswith("order_observation_"):
+        valid_predecessors = {
+            "open", "partially_filled", "filled", "cancelled", "rejected"
+        }
+    else:
+        valid_predecessors = predecessor_by_event.get(event_type, set())
+    if previous_status not in valid_predecessors:
+        raise ValueError("backup audit event sequence contains an illegal state transition")
+
+
 def _validate_database(connection: sqlite3.Connection) -> dict[str, int]:
     integrity = [str(row[0]) for row in connection.execute("PRAGMA integrity_check")]
     if integrity != ["ok"]:
@@ -111,6 +187,7 @@ def _validate_database(connection: sqlite3.Connection) -> dict[str, int]:
             i.client_order_id AS client_order_id,
             i.state_json AS current_state_json,
             e.state_json AS event_state_json,
+            e.event_type AS event_type,
             e.event_id AS event_id
         FROM order_intents AS i
         LEFT JOIN order_events AS e
@@ -120,6 +197,7 @@ def _validate_database(connection: sqlite3.Connection) -> dict[str, int]:
     )
     active_client_id: str | None = None
     latest_event_state: dict[str, Any] | None = None
+    previous_event_state: dict[str, Any] | None = None
     current_state: dict[str, Any] | None = None
 
     def verify_event_group() -> None:
@@ -146,6 +224,7 @@ def _validate_database(connection: sqlite3.Connection) -> dict[str, int]:
             except (TypeError, ValueError):
                 raise ValueError("backup contains an invalid current order lifecycle state") from None
             latest_event_state = None
+            previous_event_state = None
 
         if row["event_id"] is None:
             raise ValueError("backup intent is missing its audit event history")
@@ -159,6 +238,28 @@ def _validate_database(connection: sqlite3.Connection) -> dict[str, int]:
             submission_policy(event_state)
         except (TypeError, ValueError):
             raise ValueError("backup contains an invalid order audit lifecycle state") from None
+        event_type = row["event_type"]
+        if not isinstance(event_type, str):
+            raise ValueError("backup audit event type is missing or invalid")
+        _validate_event_transition(event_type, previous_event_state, event_state)
+        if previous_event_state is not None:
+            immutable_fields = (
+                "client_order_id", "token_id", "side", "limit_price", "size",
+                "market_condition_id", "account_risk_snapshot_id", "preflight_report",
+            )
+            if any(
+                previous_event_state.get(field) != event_state.get(field)
+                for field in immutable_fields
+            ):
+                raise ValueError("backup audit history changes immutable order terms or preflight evidence")
+            if event_state["submission_attempts"] < previous_event_state["submission_attempts"]:
+                raise ValueError("backup audit submission attempt count moves backwards")
+            if event_state["reconciliation_attempts"] < previous_event_state["reconciliation_attempts"]:
+                raise ValueError("backup audit reconciliation count moves backwards")
+            from decimal import Decimal
+            if Decimal(event_state["filled_size"]) < Decimal(previous_event_state["filled_size"]):
+                raise ValueError("backup audit cumulative filled size moves backwards")
+        previous_event_state = event_state
         latest_event_state = event_state
 
     verify_event_group()

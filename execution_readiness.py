@@ -20,6 +20,10 @@ def execution_readiness_payload() -> dict[str, Any]:
             "detail": "A separate authenticated account monitor can read open orders and user events, but there is no reviewed order-placement adapter or order-signing workflow.",
         },
         {
+            "code": "venue_order_watchdog_not_verified",
+            "detail": "No venue-side order heartbeat/dead-man-switch policy or tested disconnect behavior is implemented; any future resting-order adapter must explicitly validate watchdog semantics and cancellation/recovery behavior before launch.",
+        },
+        {
             "code": "account_eligibility_not_verified",
             "detail": "The account operator's age and platform eligibility have not been independently verified.",
         },
@@ -51,6 +55,7 @@ def execution_readiness_payload() -> dict[str, Any]:
             "Validate a strategy on sufficiently large, chronological out-of-sample data after realistic fees, spread, slippage, and partial fills.",
             "Complete independent security review of wallet custody, key isolation, authentication, and secrets handling.",
             "Define hard position, exposure, daily-loss, drawdown, stale-data, and emergency-stop limits.",
+            "For any resting-order workflow, verify venue heartbeat/dead-man-switch semantics, heartbeat failure behavior, and reconciliation after disconnect before launch.",
             "Verify cloud uptime, persistent state, alerting, backups, and incident recovery.",
             "Require a separate, explicit release decision after all gates are evidenced.",
         ],

@@ -343,6 +343,12 @@ Any future resting-order adapter must also independently validate the venue's cu
 This remains a safety scaffold only. The repository has a read-only authenticated account monitor, but no order-placement adapter, signing workflow, or order-placement call. The local client order ID is not claimed to be a venue-supported idempotency field.
 
 
+
+## Long-running authenticated stream behavior
+
+The read-only account monitor keeps one pending user-stream receive alive while its periodic REST reconciliation runs. The refresh deadline is observed with `asyncio.wait()` rather than cancelling the in-flight `__anext__()` receive, avoiding cancellation-sensitive WebSocket iterator behavior. Periodic reconciliation diagnostics retain only a rolling window of the latest 20 compact summaries; full account snapshots and per-order unresolved details are not accumulated in process memory. This bound applies to the monitor's diagnostic return value only; SQLite remains the durable journal.
+
+
 ## Process supervisor status
 
 When the service runs in Docker, the supervisor writes a sanitized atomic status record to `DATA_DIR/service_supervisor_status.json`. The read-only `/service-supervisor` endpoint shows whether the HTTP worker is starting/running/stopped, whether the authenticated monitor is enabled/running/restarting, the monitor restart count, last exit code and next restart time. The supervisor refreshes a heartbeat every 15 seconds, including while waiting to restart the monitor; `/service-supervisor` includes `status_fresh` and `status_age_seconds`, marking the record stale after 45 seconds. It deliberately excludes process arguments, environment variables, API credentials and wallet data. When running `app.py` directly without the supervisor, the endpoint reports `supervised=false` and `status_error=status_file_missing`; this is distinct from a healthy supervised account monitor. The endpoint does not prove that credentials are valid or that account data is current: use the account snapshot timestamps and monitor logs for that verification.

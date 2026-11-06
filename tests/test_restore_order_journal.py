@@ -236,6 +236,34 @@ class RestoreOrderJournalTests(unittest.TestCase):
 
         self.assertFalse(destination.exists())
 
+    def test_restore_rejects_valid_event_state_with_illegal_predecessor(self):
+        self._make_backup_with_order()
+        connection = sqlite3.connect(self.backup_path)
+        try:
+            rows = connection.execute(
+                "SELECT event_id, state_json FROM order_events "
+                "WHERE client_order_id = ? ORDER BY event_id",
+                ("restore-order-001",),
+            ).fetchall()
+            event_id, raw = rows[1]
+            state = json.loads(raw)
+            state["status"] = "submission_unknown"
+            state["last_reason_code"] = "order_not_visible_yet"
+            state["reconciliation_attempts"] = 1
+            connection.execute(
+                "UPDATE order_events SET event_type = ?, state_json = ? WHERE event_id = ?",
+                ("reconciliation_not_found", json.dumps(state), event_id),
+            )
+            connection.commit()
+        finally:
+            connection.close()
+        destination = self.root / "illegal-predecessor-restored.sqlite3"
+
+        with self.assertRaisesRegex(ValueError, "illegal state transition"):
+            restore_order_journal(self.backup_path, destination)
+
+        self.assertFalse(destination.exists())
+
     def test_restore_rejects_event_type_that_disagrees_with_its_target_state(self):
         self._make_backup_with_order()
         connection = sqlite3.connect(self.backup_path)

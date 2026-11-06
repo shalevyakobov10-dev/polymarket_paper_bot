@@ -13,7 +13,8 @@ import os
 import sqlite3
 import tempfile
 from pathlib import Path
-from decimal import Decimal
+from datetime import datetime, timezone
+from decimal import Decimal, InvalidOperation
 from typing import Any
 from urllib.parse import quote
 
@@ -118,6 +119,148 @@ def _validate_event_transition(
         valid_predecessors = predecessor_by_event.get(event_type, set())
     if previous_status not in valid_predecessors:
         raise ValueError("backup audit event sequence contains an illegal state transition")
+
+
+def _snapshot_decimal(
+    value: Any,
+    field: str,
+    *,
+    allow_negative: bool = False,
+) -> Decimal:
+    if isinstance(value, bool) or value is None:
+        raise ValueError(f"backup account-risk field {field} is invalid")
+    try:
+        parsed = Decimal(str(value))
+    except (InvalidOperation, TypeError, ValueError):
+        raise ValueError(f"backup account-risk field {field} is invalid") from None
+    if not parsed.is_finite() or (not allow_negative and parsed < 0):
+        raise ValueError(f"backup account-risk field {field} is outside valid bounds")
+    return parsed
+
+
+def _validate_account_risk_snapshot_document(
+    snapshot: Any,
+    captured_at_column: Any,
+) -> None:
+    """Apply the same structural and arithmetic safety checks used at journal write."""
+    if not isinstance(snapshot, dict) or snapshot.get("snapshot_complete") is not True:
+        raise ValueError("backup contains an incomplete account-risk snapshot")
+    if snapshot.get("execution") != "none":
+        raise ValueError("backup account-risk snapshot is not read-only")
+
+    required = (
+        "captured_at_utc",
+        "collateral_decimals",
+        "collateral_balance_base_units",
+        "collateral_balance_usd",
+        "open_buy_commitment_usd",
+        "conservative_available_collateral_usd",
+        "collateral_shortfall_usd",
+        "current_open_exposure_usd",
+        "open_position_value_usd",
+        "open_position_cost_usd",
+        "open_position_risk_exposure_usd",
+        "open_unrealized_pnl_usd",
+        "open_sell_remaining_shares",
+        "current_open_positions",
+        "current_open_orders",
+        "open_position_assets_by_condition",
+        "open_order_assets_by_condition",
+    )
+    if any(field not in snapshot for field in required):
+        raise ValueError("backup account-risk snapshot is missing required fields")
+
+    captured_raw = snapshot["captured_at_utc"]
+    if not isinstance(captured_raw, str) or not captured_raw.strip():
+        raise ValueError("backup account-risk snapshot timestamp is invalid")
+    try:
+        captured = datetime.fromisoformat(captured_raw)
+        column_captured = datetime.fromisoformat(str(captured_at_column))
+    except (TypeError, ValueError):
+        raise ValueError("backup account-risk snapshot timestamp is malformed") from None
+    if (
+        captured.tzinfo is None or captured.utcoffset() is None
+        or column_captured.tzinfo is None or column_captured.utcoffset() is None
+    ):
+        raise ValueError("backup account-risk snapshot timestamps must be timezone-aware")
+    captured_utc = captured.astimezone(timezone.utc)
+    if captured_utc != column_captured.astimezone(timezone.utc):
+        raise ValueError("backup account-risk snapshot JSON timestamp differs from journal timestamp")
+    if (captured_utc - datetime.now(timezone.utc)).total_seconds() > 60:
+        raise ValueError("backup account-risk snapshot timestamp is in the future")
+
+    decimals = snapshot["collateral_decimals"]
+    if isinstance(decimals, bool) or not isinstance(decimals, int) or not 0 <= decimals <= 18:
+        raise ValueError("backup account-risk collateral decimals are invalid")
+    raw_balance = snapshot["collateral_balance_base_units"]
+    if (
+        not isinstance(raw_balance, str)
+        or not raw_balance.isascii()
+        or not raw_balance.isdigit()
+    ):
+        raise ValueError("backup account-risk collateral base units are invalid")
+
+    for field in ("current_open_positions", "current_open_orders"):
+        value = snapshot[field]
+        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+            raise ValueError(f"backup account-risk count {field} is invalid")
+
+    amount_fields = (
+        "collateral_balance_usd",
+        "open_buy_commitment_usd",
+        "conservative_available_collateral_usd",
+        "collateral_shortfall_usd",
+        "current_open_exposure_usd",
+        "open_position_value_usd",
+        "open_position_cost_usd",
+        "open_position_risk_exposure_usd",
+        "open_sell_remaining_shares",
+    )
+    amounts = {field: _snapshot_decimal(snapshot[field], field) for field in amount_fields}
+    amounts["open_unrealized_pnl_usd"] = _snapshot_decimal(
+        snapshot["open_unrealized_pnl_usd"],
+        "open_unrealized_pnl_usd",
+        allow_negative=True,
+    )
+
+    base_balance = Decimal(int(raw_balance)) / (Decimal(10) ** decimals)
+    if amounts["collateral_balance_usd"] != base_balance:
+        raise ValueError("backup account-risk collateral balance does not match base units")
+    expected_available = max(
+        Decimal("0"),
+        amounts["collateral_balance_usd"] - amounts["open_buy_commitment_usd"],
+    )
+    if amounts["conservative_available_collateral_usd"] != expected_available:
+        raise ValueError("backup account-risk available collateral is inconsistent")
+    expected_shortfall = max(
+        Decimal("0"),
+        amounts["open_buy_commitment_usd"] - amounts["collateral_balance_usd"],
+    )
+    if amounts["collateral_shortfall_usd"] != expected_shortfall:
+        raise ValueError("backup account-risk collateral shortfall is inconsistent")
+    if amounts["open_position_risk_exposure_usd"] < max(
+        amounts["open_position_value_usd"],
+        amounts["open_position_cost_usd"],
+    ):
+        raise ValueError("backup account-risk position exposure is below value or cost")
+    if amounts["current_open_exposure_usd"] != (
+        amounts["open_position_risk_exposure_usd"] + amounts["open_buy_commitment_usd"]
+    ):
+        raise ValueError("backup account-risk total exposure is inconsistent")
+
+    for field in ("open_position_assets_by_condition", "open_order_assets_by_condition"):
+        mapping = snapshot[field]
+        if not isinstance(mapping, dict):
+            raise ValueError(f"backup account-risk field {field} must be a mapping")
+        for condition_id, assets in mapping.items():
+            if not isinstance(condition_id, str) or not condition_id.strip():
+                raise ValueError(f"backup account-risk field {field} has an invalid condition ID")
+            if not isinstance(assets, list):
+                raise ValueError(f"backup account-risk field {field} values must be lists")
+            if any(not isinstance(asset, str) or not asset.strip() for asset in assets):
+                raise ValueError(f"backup account-risk field {field} has an invalid asset ID")
+            if len(assets) != len(set(assets)):
+                raise ValueError(f"backup account-risk field {field} has duplicate asset IDs")
 
 
 def _validate_database(connection: sqlite3.Connection) -> dict[str, int]:

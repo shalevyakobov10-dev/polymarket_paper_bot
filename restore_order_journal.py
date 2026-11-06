@@ -253,14 +253,20 @@ def _validate_account_risk_snapshot_document(
         mapping = snapshot[field]
         if not isinstance(mapping, dict):
             raise ValueError(f"backup account-risk field {field} must be a mapping")
+        normalized_conditions: set[str] = set()
         for condition_id, assets in mapping.items():
             if not isinstance(condition_id, str) or not condition_id.strip():
                 raise ValueError(f"backup account-risk field {field} has an invalid condition ID")
+            normalized_condition = condition_id.strip()
+            if normalized_condition in normalized_conditions:
+                raise ValueError(f"backup account-risk field {field} has duplicate condition IDs")
+            normalized_conditions.add(normalized_condition)
             if not isinstance(assets, list):
                 raise ValueError(f"backup account-risk field {field} values must be lists")
             if any(not isinstance(asset, str) or not asset.strip() for asset in assets):
                 raise ValueError(f"backup account-risk field {field} has an invalid asset ID")
-            if len(assets) != len(set(assets)):
+            normalized_assets = [asset.strip() for asset in assets]
+            if len(normalized_assets) != len(set(normalized_assets)):
                 raise ValueError(f"backup account-risk field {field} has duplicate asset IDs")
 
 
@@ -422,10 +428,18 @@ def _validate_database(connection: sqlite3.Connection) -> dict[str, int]:
                 for field in immutable_fields
             ):
                 raise ValueError("backup audit history changes immutable order terms or preflight evidence")
-            if event_state["submission_attempts"] < previous_event_state["submission_attempts"]:
-                raise ValueError("backup audit submission attempt count moves backwards")
-            if event_state["reconciliation_attempts"] < previous_event_state["reconciliation_attempts"]:
-                raise ValueError("backup audit reconciliation count moves backwards")
+            expected_submission_attempts = (
+                previous_event_state["submission_attempts"]
+                + (1 if event_type == "submission_started" else 0)
+            )
+            if event_state["submission_attempts"] != expected_submission_attempts:
+                raise ValueError("backup audit submission attempt counter has an invalid transition")
+            expected_reconciliation_attempts = (
+                previous_event_state["reconciliation_attempts"]
+                + (1 if event_type.startswith("reconciliation_") else 0)
+            )
+            if event_state["reconciliation_attempts"] != expected_reconciliation_attempts:
+                raise ValueError("backup audit reconciliation counter has an invalid transition")
             if Decimal(event_state["filled_size"]) < Decimal(previous_event_state["filled_size"]):
                 raise ValueError("backup audit cumulative filled size moves backwards")
         previous_event_state = event_state

@@ -88,6 +88,35 @@ class RestoreOrderJournalTests(unittest.TestCase):
         )
         self.assertTrue(restored.get_latest_account_risk_snapshot()["fresh"])
 
+    def test_restore_preserves_interrupted_submission_until_exclusive_recovery(self):
+        intent = create_order_intent(
+            client_order_id="restore-pending-001",
+            token_id="token-restore",
+            side="BUY",
+            limit_price=0.42,
+            size=10,
+        )
+        self.journal.create_intent(intent)
+        self.journal.begin_submission("restore-pending-001")
+        self.journal.backup_to(self.backup_path)
+        destination = self.root / "pending-restored.sqlite3"
+
+        restore_order_journal(self.backup_path, destination)
+        restored = OrderJournal(destination)
+
+        self.assertEqual(
+            restored.get_intent("restore-pending-001")["status"],
+            "submission_pending",
+        )
+        self.assertEqual(restored.recover_interrupted_submissions(), 1)
+        state = restored.get_intent("restore-pending-001")
+        self.assertEqual(state["status"], "submission_unknown")
+        self.assertEqual(state["submission_attempts"], 1)
+        self.assertEqual(
+            state["last_reason_code"],
+            "process_restart_during_submission",
+        )
+
     def test_restore_never_overwrites_an_existing_destination(self):
         self._make_backup_with_order()
         destination = self.root / "already-exists.sqlite3"

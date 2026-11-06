@@ -35,6 +35,11 @@ class OfflineNewsPaperBotTests(unittest.TestCase):
         }
         return patch.dict(os.environ, env, clear=True)
 
+    def test_unknown_market_data_source_is_rejected(self):
+        with patch.dict(os.environ, {"MARKET_DATA_SOURCE": "authenticated_account"}, clear=True):
+            with self.assertRaisesRegex(ValueError, "MARKET_DATA_SOURCE"):
+                PaperConfig()
+
     def test_live_execution_flag_is_rejected(self):
         with tempfile.TemporaryDirectory() as folder:
             with patch.dict(os.environ, {"DRY_RUN": "true", "LIVE_EXECUTION_ENABLED": "true"}, clear=True):

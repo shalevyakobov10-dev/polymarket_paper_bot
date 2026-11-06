@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+from collections import deque
 import json
 import logging
 import math
@@ -523,7 +524,10 @@ async def consume_user_order_stream(
                 raise UserEventGapError("SDK dropped user events during the REST snapshot; reconciliation required")
             previous_dropped = current_dropped
 
-        periodic_snapshots: list[dict[str, Any]] = []
+        # Retain only a small diagnostic window. Full REST reconciliations
+        # include account positions and order metadata; keeping every snapshot
+        # in a 24/7 process would create an unbounded memory leak.
+        periodic_snapshots: deque[dict[str, Any]] = deque(maxlen=20)
         iterator = handle.__aiter__()
         loop = asyncio.get_running_loop()
         next_snapshot_at = (
@@ -537,8 +541,27 @@ async def consume_user_order_stream(
             # Refresh on a monotonic deadline, not only after an idle timeout.
             # A continuously busy user stream must not starve account-risk refresh.
             periodic = await reconcile_open_orders_snapshot(client, journal)
-            periodic_snapshots.append(periodic)
             risk_sync = periodic.get("account_risk_sync_state") or {}
+            periodic_snapshots.append({
+                "status": periodic.get("status"),
+                "venue_open_orders": periodic.get("venue_open_orders"),
+                "unresolved_missing_orders_count": len(
+                    periodic.get("unresolved_missing_orders", [])
+                ),
+                "updated": periodic.get("updated", 0),
+                "duplicate": periodic.get("duplicate", 0),
+                "manual_review": periodic.get("manual_review", 0),
+                "untracked": periodic.get("untracked", 0),
+                "ignored": periodic.get("ignored", 0),
+                "malformed": periodic.get("malformed", 0),
+                "account_risk_snapshot_complete": periodic.get(
+                    "account_risk_snapshot_complete", False
+                ),
+                "account_risk_snapshot_id": periodic.get("account_risk_snapshot_id"),
+                "account_risk_snapshot_error": periodic.get("account_risk_snapshot_error"),
+                "account_risk_sync_state": risk_sync,
+                "execution": "none",
+            })
             log.info(
                 "periodic open-order snapshot status=%s orders=%s unresolved=%s account_risk_sync=%s fresh=%s error_code=%s",
                 periodic["status"],
@@ -630,7 +653,7 @@ async def consume_user_order_stream(
         return {
             **counts,
             "initial_open_orders_snapshot": snapshot,
-            "periodic_open_orders_snapshots": periodic_snapshots,
+            "periodic_open_orders_snapshots": list(periodic_snapshots),
         }
     finally:
         if event_task is not None:

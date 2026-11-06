@@ -498,6 +498,7 @@ async def consume_user_order_stream(
     if isinstance(previous_dropped, bool) or not isinstance(previous_dropped, int):
         await handle.close()
         raise UserEventGapError("SDK user-stream handle has no valid dropped-event counter")
+    event_task: asyncio.Future[Any] | None = None
     try:
         if previous_dropped:
             raise UserEventGapError("SDK reported dropped user events before consumption began")
@@ -559,24 +560,38 @@ async def consume_user_order_stream(
                 next_snapshot_at = loop.time() + float(snapshot_interval_seconds)
 
         while True:
-            try:
-                if snapshot_interval_seconds is None:
+            if snapshot_interval_seconds is None:
+                try:
                     event = await iterator.__anext__()
-                else:
-                    remaining = next_snapshot_at - loop.time()
-                    if remaining <= 0:
-                        await refresh_periodic_snapshot()
-                        continue
-                    event = await asyncio.wait_for(
-                        iterator.__anext__(),
-                        timeout=remaining,
-                    )
-            except asyncio.TimeoutError:
-                # The deadline elapsed while waiting for an event on a quiet stream.
-                await refresh_periodic_snapshot()
-                continue
-            except StopAsyncIteration:
-                break
+                except StopAsyncIteration:
+                    break
+            else:
+                # Keep exactly one receive operation outstanding. asyncio.wait()
+                # observes the refresh deadline without cancelling __anext__.
+                # Some websocket iterators are not safe to resume after a
+                # cancelled receive, so wait_for() must not wrap the socket read.
+                if event_task is None:
+                    event_task = asyncio.ensure_future(iterator.__anext__())
+                remaining = next_snapshot_at - loop.time()
+                if remaining <= 0:
+                    await refresh_periodic_snapshot()
+                    continue
+                done, _pending = await asyncio.wait(
+                    (event_task,),
+                    timeout=remaining,
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
+                if not done:
+                    # The receive task remains pending while REST reconciliation
+                    # runs; any event it receives is processed immediately after.
+                    await refresh_periodic_snapshot()
+                    continue
+                completed_event_task = event_task
+                event_task = None
+                try:
+                    event = await completed_event_task
+                except StopAsyncIteration:
+                    break
 
             current_dropped = getattr(handle, "dropped", None)
             if isinstance(current_dropped, bool) or not isinstance(current_dropped, int):
@@ -618,6 +633,13 @@ async def consume_user_order_stream(
             "periodic_open_orders_snapshots": periodic_snapshots,
         }
     finally:
+        if event_task is not None:
+            if not event_task.done():
+                event_task.cancel()
+            try:
+                await event_task
+            except (asyncio.CancelledError, StopAsyncIteration):
+                pass
         await handle.close()
 
 

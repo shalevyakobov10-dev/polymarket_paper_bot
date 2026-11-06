@@ -324,6 +324,10 @@ The scheduled/manual historical backtest workflow is also serialized with a shar
 
 After a process restart, the operator must call `recover_interrupted_submissions()` during exclusive recovery before starting an execution worker. It converts any stranded `submission_pending` record to `submission_unknown`; it never resets an attempt to prepared. The journal serializes concurrent writers with SQLite transactions and rejects reuse of an ID with different order terms.
 
+## Platform age and eligibility release gate
+
+The execution-readiness report records the current Polymarket Terms of Use policy: the Site and Features are intended only for users aged **18 or older** (Terms effective 2026-08-11; [official terms](https://polymarket.com/es/tos)). Age and current platform/account eligibility require independent verification before any separate live-launch review. The policy is a blocker, not a runtime toggle, and cannot enable order submission. Applicable local law and geographic eligibility require separate qualified review.
+
 ## SQLite durability, integrity and backups
 
 The journal requires SQLite WAL mode and configures full synchronous commits plus a 15-second busy timeout. Startup runs `PRAGMA quick_check` and `PRAGMA foreign_key_check` before schema migration; if SQLite refuses WAL or either check reports an error, the journal refuses to start rather than silently proceeding with a questionable database.

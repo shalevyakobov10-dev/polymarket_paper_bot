@@ -236,6 +236,32 @@ class RestoreOrderJournalTests(unittest.TestCase):
 
         self.assertFalse(destination.exists())
 
+    def test_restore_rejects_json_valid_but_invalid_audit_lifecycle_state(self):
+        self._make_backup_with_order()
+        connection = sqlite3.connect(self.backup_path)
+        try:
+            raw = connection.execute(
+                "SELECT state_json FROM order_events "
+                "WHERE client_order_id = ? ORDER BY event_id LIMIT 1",
+                ("restore-order-001",),
+            ).fetchone()[0]
+            state = json.loads(raw)
+            state["automatic_retry_permitted"] = True
+            connection.execute(
+                "UPDATE order_events SET state_json = ? "
+                "WHERE event_id = (SELECT MIN(event_id) FROM order_events WHERE client_order_id = ?)",
+                (json.dumps(state), "restore-order-001"),
+            )
+            connection.commit()
+        finally:
+            connection.close()
+        destination = self.root / "invalid-audit-state-restored.sqlite3"
+
+        with self.assertRaisesRegex(ValueError, "invalid order audit lifecycle state"):
+            restore_order_journal(self.backup_path, destination)
+
+        self.assertFalse(destination.exists())
+
     def test_restore_rejects_latest_audit_state_that_differs_from_current_intent(self):
         self._make_backup_with_order()
         connection = sqlite3.connect(self.backup_path)

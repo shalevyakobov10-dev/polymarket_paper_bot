@@ -16,6 +16,8 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import quote
 
+from order_lifecycle import submission_policy
+
 
 _REQUIRED_COLUMNS = {
     "order_intents": {"client_order_id", "state_json", "created_at", "updated_at"},
@@ -84,6 +86,10 @@ def _validate_database(connection: sqlite3.Connection) -> dict[str, int]:
             raise ValueError("backup contains malformed order state") from None
         if not isinstance(state, dict) or state.get("client_order_id") != row["client_order_id"]:
             raise ValueError("backup order state identity does not match its journal key")
+        try:
+            submission_policy(state)
+        except (TypeError, ValueError):
+            raise ValueError("backup contains an invalid order lifecycle state") from None
         exchange_id = state.get("exchange_order_id")
         if exchange_id:
             index_row = connection.execute(
@@ -95,6 +101,67 @@ def _validate_database(connection: sqlite3.Connection) -> dict[str, int]:
                     raise ValueError("backup is missing a required venue-order index entry")
             elif index_row["client_order_id"] != row["client_order_id"]:
                 raise ValueError("backup venue-order index is inconsistent with order state")
+
+    # Audit snapshots are recovery evidence too. Validate every state with
+    # the same transition invariants as the live journal and ensure the final
+    # event for each intent is exactly the current durable state.
+    event_cursor = connection.execute(
+        """
+        SELECT
+            i.client_order_id AS client_order_id,
+            i.state_json AS current_state_json,
+            e.state_json AS event_state_json,
+            e.event_id AS event_id
+        FROM order_intents AS i
+        LEFT JOIN order_events AS e
+            ON e.client_order_id = i.client_order_id
+        ORDER BY i.client_order_id, e.event_id
+        """
+    )
+    active_client_id: str | None = None
+    latest_event_state: dict[str, Any] | None = None
+    current_state: dict[str, Any] | None = None
+
+    def verify_event_group() -> None:
+        if active_client_id is None:
+            return
+        if latest_event_state is None or current_state is None:
+            raise ValueError("backup intent is missing its audit event history")
+        if latest_event_state != current_state:
+            raise ValueError("backup latest audit event does not match current order state")
+
+    for row in event_cursor:
+        client_id = row["client_order_id"]
+        if client_id != active_client_id:
+            verify_event_group()
+            active_client_id = client_id
+            try:
+                current_state = json.loads(row["current_state_json"])
+            except (TypeError, ValueError, json.JSONDecodeError):
+                raise ValueError("backup contains malformed current order state") from None
+            if not isinstance(current_state, dict) or current_state.get("client_order_id") != client_id:
+                raise ValueError("backup current order state identity is inconsistent")
+            try:
+                submission_policy(current_state)
+            except (TypeError, ValueError):
+                raise ValueError("backup contains an invalid current order lifecycle state") from None
+            latest_event_state = None
+
+        if row["event_id"] is None:
+            raise ValueError("backup intent is missing its audit event history")
+        try:
+            event_state = json.loads(row["event_state_json"])
+        except (TypeError, ValueError, json.JSONDecodeError):
+            raise ValueError("backup contains malformed order audit state") from None
+        if not isinstance(event_state, dict) or event_state.get("client_order_id") != client_id:
+            raise ValueError("backup order audit state identity is inconsistent")
+        try:
+            submission_policy(event_state)
+        except (TypeError, ValueError):
+            raise ValueError("backup contains an invalid order audit lifecycle state") from None
+        latest_event_state = event_state
+
+    verify_event_group()
 
     for row in connection.execute(
         "SELECT exchange_order_id, client_order_id FROM order_exchange_index"

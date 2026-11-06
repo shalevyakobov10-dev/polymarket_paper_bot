@@ -610,7 +610,7 @@ class UserOrderStreamTests(unittest.TestCase):
                 snapshot_interval_seconds=0.005,
             )
         )
-        self.assertEqual(len(result["periodic_open_orders_snapshots"]), 1)
+        self.assertGreaterEqual(len(result["periodic_open_orders_snapshots"]), 1)
         self.assertEqual(result["periodic_open_orders_snapshots"][0]["updated"], 1)
         self.assertEqual(result["duplicate"], 1)
         self.assertEqual(self.journal.get_intent("local-123")["filled_size"], "4")

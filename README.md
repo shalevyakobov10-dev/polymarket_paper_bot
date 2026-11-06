@@ -338,6 +338,8 @@ The command requires an existing source journal, refuses to overwrite the live d
 
 This is a backup primitive, not a backup service: it does not schedule copies, encrypt or upload them, enforce retention, or prove that the destination survives loss of the app host/volume. Production operations must schedule this command to an independently durable off-host destination, protect access to the backup (it contains account/order metadata), retain multiple generations, and periodically test a restore. The Railway IaC currently defines no off-host backup target or scheduled backup job.
 
+Any future resting-order adapter must also independently validate the venue's current heartbeat/dead-man-switch behavior, including what happens when heartbeats stop, how open orders are canceled (if applicable), and how order state is reconciled after a disconnect. The current repository does not implement or activate a venue order heartbeat. This is a separate release gate, not a substitute for local kill switches or reconciliation.
+
 This remains a safety scaffold only. The repository has a read-only authenticated account monitor, but no order-placement adapter, signing workflow, or order-placement call. The local client order ID is not claimed to be a venue-supported idempotency field.
 
 

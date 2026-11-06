@@ -304,8 +304,21 @@ class LiveExecutionGateway:
             if client.get_closed_only_mode() is True:
                 return self._blocked("account_is_closed_only")
             balance_allowance = client.get_balance_allowance(asset_type=self._collateral_asset_type())
-            balance = _decimal(_field(balance_allowance, "balance"), "collateral_balance")
-            allowance = _decimal(_field(balance_allowance, "allowance"), "collateral_allowance")
+            # The official SDK returns collateral balance and allowances in
+            # base units (USDC uses six decimals), not whole-dollar values.
+            balance_units = _decimal(_field(balance_allowance, "balance"), "collateral_balance_base_units")
+            allowances = _field(balance_allowance, "allowances")
+            if not isinstance(allowances, dict) or not allowances:
+                return self._blocked("collateral_allowance_map_unavailable")
+            allowance_units = max(
+                (_decimal(value, "collateral_allowance_base_units") for value in allowances.values()),
+                default=Decimal("0"),
+            )
+            balance = balance_units / Decimal("1000000")
+            allowance = allowance_units / Decimal("1000000")
+            approval_state = client.get_trading_approvals_state()
+            if _field(approval_state, "is_fully_approved") is not True:
+                return self._blocked("required_trading_approvals_missing")
             if balance <= 0 or allowance <= 0:
                 return self._blocked("collateral_balance_or_allowance_unavailable")
             conservative_available = _decimal(
@@ -384,8 +397,12 @@ class LiveExecutionGateway:
                     "execution": "live_order_submitted",
                     "automatic_retry_permitted": False,
                 }
-            explicit_error = _field(response, "error_msg") or _field(response, "error")
-            if explicit_error or _field(response, "success") is False:
+            explicit_error = (
+                _field(response, "error_msg")
+                or _field(response, "error")
+                or _field(response, "message")
+            )
+            if explicit_error or _field(response, "success") is False or _field(response, "ok") is False:
                 self.journal.record_submission_response(
                     client_order_id, outcome="rejected", reason_code="explicit_venue_rejection"
                 )

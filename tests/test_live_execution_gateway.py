@@ -60,8 +60,8 @@ def live_env():
 
 
 class FakeClient:
-    def __init__(self, *, response=None, post_exception=None, balance="100", allowance="100", closed_only=False):
-        self.response = response if response is not None else {"order_id": "venue-order-001", "success": True}
+    def __init__(self, *, response=None, post_exception=None, balance="100000000", allowance="100000000", closed_only=False):
+        self.response = response if response is not None else {"order_id": "venue-order-001", "ok": True}
         self.post_exception = post_exception
         self.balance = balance
         self.allowance = allowance
@@ -74,7 +74,14 @@ class FakeClient:
         return self.closed_only
 
     def get_balance_allowance(self, *, asset_type):
-        return {"balance": self.balance, "allowance": self.allowance, "asset_type": str(asset_type)}
+        return {
+            "balance": self.balance,
+            "allowances": {"exchange": self.allowance},
+            "asset_type": str(asset_type),
+        }
+
+    def get_trading_approvals_state(self):
+        return {"is_fully_approved": True, "missing": {"erc20": [], "erc1155": []}}
 
     def create_market_order(self, **kwargs):
         self.created.append(kwargs)
@@ -200,7 +207,7 @@ class LiveExecutionGatewayTests(unittest.TestCase):
         with patch.dict(os.environ, self.config_env, clear=True):
             gateway = LiveExecutionGateway(self.journal, config=LiveExecutionConfig(), **self.gateway_kwargs)
             stale = self._risk_context(captured_at_utc="2020-01-01T00:00:00+00:00")
-            blocked = gateway.submit_prepared_buy("another-id", risk_context=stale)
+            blocked = gateway.submit_prepared_buy("paper-intent-001", risk_context=stale)
         self.assertEqual(blocked["reason"], "risk_context_stale_or_future_dated")
         self.assertEqual(self.journal.get_intent("paper-intent-001")["status"], "prepared")
         self.assertEqual(self.client.posts, [])
@@ -252,11 +259,30 @@ class LiveExecutionGatewayTests(unittest.TestCase):
         self.assertEqual(self.journal.get_intent("paper-intent-001")["status"], "prepared")
 
     def test_insufficient_collateral_is_blocked_before_submission(self):
-        self.client.balance = "1"
+        self.client.balance = "1000000"
         result = self._run_gateway()
         self.assertEqual(result["reason"], "live_collateral_or_allowance_insufficient")
         self.assertEqual(self.client.posts, [])
         self.assertEqual(self.journal.get_intent("paper-intent-001")["status"], "prepared")
+
+    def test_missing_trading_approvals_blocks_before_signing(self):
+        class MissingApprovalsClient(FakeClient):
+            def get_trading_approvals_state(self):
+                return {"is_fully_approved": False, "missing": {"erc20": ["spender"], "erc1155": []}}
+        client = MissingApprovalsClient()
+        result = self._run_gateway(client_factory=lambda _key, _wallet: client)
+        self.assertEqual(result["reason"], "required_trading_approvals_missing")
+        self.assertEqual(client.created, [])
+        self.assertEqual(client.posts, [])
+        self.assertEqual(self.journal.get_intent("paper-intent-001")["status"], "prepared")
+
+    def test_sdk_rejected_order_ok_false_is_recorded_as_rejected(self):
+        self.client.response = {"ok": False, "code": "fak_not_filled", "message": "no match"}
+        result = self._run_gateway()
+        self.assertEqual(result["reason"], "venue_rejected_order")
+        state = self.journal.get_intent("paper-intent-001")
+        self.assertEqual(state["status"], "rejected")
+        self.assertEqual(state["submission_attempts"], 1)
 
     def test_missing_release_gate_blocks_before_submission(self):
         with patch.dict(os.environ, self.config_env, clear=True):

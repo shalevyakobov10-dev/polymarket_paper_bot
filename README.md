@@ -336,6 +336,14 @@ python backup_order_journal.py --destination /mnt/independent-backups/order-jour
 
 The command requires an existing source journal, refuses to overwrite the live database, uses SQLite's online backup API (so committed WAL data is included), verifies the copied database and foreign keys, then atomically replaces the destination only after verification. A failed backup leaves a previous destination untouched. The output reports the backup path, byte size and completion time.
 
+Restore a verified standalone backup into a **new, unused path** (do this with the service stopped and follow the deployment's exclusive-recovery procedure before replacing any configured live database path):
+
+```bash
+python restore_order_journal.py --source /mnt/independent-backups/order-journal.sqlite3 --destination /mnt/restore-staging/order-journal.sqlite3
+```
+
+The restore command opens the backup read-only, refuses backup files with SQLite sidecars, checks integrity, foreign keys, required journal schema and every persisted JSON state document, then copies into a temporary file and validates the copy again. It publishes using an atomic no-overwrite operation: an existing destination is never replaced. After validation, open the restored file with the matching application version and verify the order/event/snapshot counts before using it. The command does not schedule backups, upload files, decrypt them, stop services, or switch the running application to the restored database.
+
 This is a backup primitive, not a backup service: it does not schedule copies, encrypt or upload them, enforce retention, or prove that the destination survives loss of the app host/volume. Production operations must schedule this command to an independently durable off-host destination, protect access to the backup (it contains account/order metadata), retain multiple generations, and periodically test a restore. The Railway IaC currently defines no off-host backup target or scheduled backup job.
 
 Any future resting-order adapter must also independently validate the venue's current heartbeat/dead-man-switch behavior, including what happens when heartbeats stop, how open orders are canceled (if applicable), and how order state is reconciled after a disconnect. The current repository does not implement or activate a venue order heartbeat. This is a separate release gate, not a substitute for local kill switches or reconciliation.

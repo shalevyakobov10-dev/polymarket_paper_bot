@@ -236,6 +236,25 @@ class RestoreOrderJournalTests(unittest.TestCase):
 
         self.assertFalse(destination.exists())
 
+    def test_restore_rejects_event_type_that_disagrees_with_its_target_state(self):
+        self._make_backup_with_order()
+        connection = sqlite3.connect(self.backup_path)
+        try:
+            connection.execute(
+                "UPDATE order_events SET event_type = ? "
+                "WHERE event_id = (SELECT MAX(event_id) FROM order_events WHERE client_order_id = ?)",
+                ("submission_started", "restore-order-001"),
+            )
+            connection.commit()
+        finally:
+            connection.close()
+        destination = self.root / "event-type-mismatch-restored.sqlite3"
+
+        with self.assertRaisesRegex(ValueError, "event type does not match"):
+            restore_order_journal(self.backup_path, destination)
+
+        self.assertFalse(destination.exists())
+
     def test_restore_rejects_json_valid_but_invalid_audit_lifecycle_state(self):
         self._make_backup_with_order()
         connection = sqlite3.connect(self.backup_path)

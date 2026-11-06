@@ -246,8 +246,7 @@ class PolymarketPublicMarketSnapshotProvider:
             return "missing_or_invalid"
         return None
 
-    @staticmethod
-    def _normalize_rest_book(book: Any, now) -> dict[str, Any] | None:
+    def _normalize_rest_book(self, book: Any, now) -> dict[str, Any] | None:
         if not isinstance(book, dict) or book.get("book_usable") is not True:
             return None
         if book.get("crossed_book") is True:

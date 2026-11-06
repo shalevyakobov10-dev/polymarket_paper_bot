@@ -13,6 +13,7 @@ import os
 import sqlite3
 import tempfile
 from pathlib import Path
+from decimal import Decimal
 from typing import Any
 from urllib.parse import quote
 
@@ -256,7 +257,6 @@ def _validate_database(connection: sqlite3.Connection) -> dict[str, int]:
                 raise ValueError("backup audit submission attempt count moves backwards")
             if event_state["reconciliation_attempts"] < previous_event_state["reconciliation_attempts"]:
                 raise ValueError("backup audit reconciliation count moves backwards")
-            from decimal import Decimal
             if Decimal(event_state["filled_size"]) < Decimal(previous_event_state["filled_size"]):
                 raise ValueError("backup audit cumulative filled size moves backwards")
         previous_event_state = event_state

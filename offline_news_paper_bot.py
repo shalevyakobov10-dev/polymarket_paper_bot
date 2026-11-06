@@ -103,6 +103,7 @@ class PaperConfig:
         self.starting_cash = _float_env("PAPER_STARTING_CASH", 100.0, 1.0, 1_000_000.0)
         self.max_position_usd = _float_env("PAPER_MAX_POSITION_USD", 5.0, 0.1, 100_000.0)
         self.max_open_exposure_usd = _float_env("PAPER_MAX_OPEN_EXPOSURE_USD", 20.0, 0.1, 1_000_000.0)
+        self.max_open_positions = _int_env("PAPER_MAX_OPEN_POSITIONS", 5, 1, 100)
         self.risk_per_trade_pct = _float_env("PAPER_RISK_PER_TRADE_PCT", 0.01, 0.001, 0.05)
         self.max_daily_drawdown_pct = _float_env("PAPER_MAX_DAILY_DRAWDOWN_PCT", 0.05, 0.005, 0.25)
         self.max_portfolio_drawdown_pct = _float_env("PAPER_MAX_PORTFOLIO_DRAWDOWN_PCT", 0.20, 0.01, 0.75)
@@ -346,6 +347,8 @@ class OfflineNewsPaperBot:
         signal: dict[str, Any],
         now: datetime,
     ) -> tuple[dict[str, Any] | None, str]:
+        if len(self._open_trades()) >= self.config.max_open_positions:
+            return None, "maximum_open_positions_reached"
         if self.db.execute(
             "SELECT 1 FROM trades WHERE status='OPEN' AND market_id=?",
             (snapshot["market_id"],),
@@ -533,6 +536,8 @@ class OfflineNewsPaperBot:
                 direction = "YES" if score > 0 else "NO"
                 eligible = abs(score) >= threshold_now
                 reason = "signal_threshold_not_met"
+                if eligible:
+                    gates = self._update_equity_and_gates(current)
                 if eligible and not gates["new_entries_allowed"]:
                     eligible = False
                     reason = "daily_or_portfolio_drawdown_limit"

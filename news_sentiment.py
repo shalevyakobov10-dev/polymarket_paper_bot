@@ -33,7 +33,7 @@ def analyze_news_sentiment(text: str) -> dict[str, Any]:
             "supported": False, "reason": "vader_dependency_missing", "model": "vader_lexicon",
         }
     letters = [char for char in source if char.isalpha()]
-    non_latin = sum(1 for char in letters if _HEBREW_OR_ARABIC.match(char))
+    non_latin = sum(1 for char in letters if not char.isascii())
     latin_words = _WORD.findall(source)
     if not latin_words or (letters and non_latin / max(1, len(letters)) > 0.10):
         return {

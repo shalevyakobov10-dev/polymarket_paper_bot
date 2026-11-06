@@ -32,6 +32,12 @@ class ExecutionReadinessTests(unittest.TestCase):
     def test_blockers_include_nontechnical_requirements(self):
         codes = {item["code"] for item in execution_readiness_payload()["blockers"]}
         self.assertIn("live_order_adapter_not_implemented", codes)
+        self.assertIn("venue_order_watchdog_not_verified", codes)
+        watchdog_blocker = next(
+            item for item in execution_readiness_payload()["blockers"]
+            if item["code"] == "venue_order_watchdog_not_verified"
+        )
+        self.assertIn("heartbeat/dead-man-switch", watchdog_blocker["detail"])
         adapter_blocker = next(
             item for item in execution_readiness_payload()["blockers"]
             if item["code"] == "live_order_adapter_not_implemented"

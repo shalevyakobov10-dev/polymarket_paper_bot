@@ -264,6 +264,75 @@ class RestoreOrderJournalTests(unittest.TestCase):
 
         self.assertFalse(destination.exists())
 
+    def test_restore_rejects_a_new_normal_observation_after_terminal_state(self):
+        self._make_backup_with_order()
+        connection = sqlite3.connect(self.backup_path)
+        try:
+            row = connection.execute(
+                "SELECT event_id, state_json FROM order_events "
+                "WHERE client_order_id = ? ORDER BY event_id DESC LIMIT 1",
+                ("restore-order-001",),
+            ).fetchone()
+            state = json.loads(row[1])
+            state["status"] = "filled"
+            state["filled_size"] = state["size"]
+            state["last_reason_code"] = "venue_order_status_observed"
+            connection.execute(
+                "INSERT INTO order_events(client_order_id, event_type, state_json) "
+                "VALUES (?, ?, ?)",
+                ("restore-order-001", "order_observation_filled", json.dumps(state)),
+            )
+            # A duplicate terminal snapshot is a no-op in OrderJournal and
+            # therefore must never appear as a subsequent audit transition.
+            connection.execute(
+                "INSERT INTO order_events(client_order_id, event_type, state_json) "
+                "VALUES (?, ?, ?)",
+                ("restore-order-001", "order_observation_open", json.dumps(state)),
+            )
+            connection.execute(
+                "UPDATE order_intents SET state_json = ? WHERE client_order_id = ?",
+                (json.dumps(state), "restore-order-001"),
+            )
+            connection.commit()
+        finally:
+            connection.close()
+        destination = self.root / "terminal-observation-restored.sqlite3"
+
+        with self.assertRaisesRegex(ValueError, "illegal state transition"):
+            restore_order_journal(self.backup_path, destination)
+
+        self.assertFalse(destination.exists())
+
+    def test_restore_allows_terminal_identity_mismatch_to_enter_manual_review(self):
+        self._make_backup_with_order()
+        self.journal.record_order_observation(
+            "restore-order-001",
+            outcome="filled",
+            matched_client_order_id="restore-order-001",
+            exchange_order_id="venue-restore-001",
+            cumulative_filled_size=10,
+        )
+        reviewed = self.journal.record_order_observation(
+            "restore-order-001",
+            outcome="open",
+            matched_client_order_id="different-local-order",
+            exchange_order_id="venue-restore-001",
+            cumulative_filled_size=10,
+        )
+        self.assertEqual(reviewed["status"], "manual_review")
+        self.assertEqual(reviewed["last_reason_code"], "client_order_id_mismatch")
+        self.journal.backup_to(self.backup_path)
+        destination = self.root / "terminal-manual-review-restored.sqlite3"
+
+        restore_order_journal(self.backup_path, destination)
+
+        restored = OrderJournal(destination)
+        restored_state = restored.get_intent("restore-order-001")
+        self.assertEqual(restored_state["status"], "manual_review")
+        self.assertEqual(
+            restored_state["last_reason_code"], "client_order_id_mismatch"
+        )
+
     def test_restore_rejects_event_type_that_disagrees_with_its_target_state(self):
         self._make_backup_with_order()
         connection = sqlite3.connect(self.backup_path)

@@ -10,6 +10,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import sqlite3
 import tempfile
 from pathlib import Path
@@ -295,6 +296,31 @@ def _validate_database(connection: sqlite3.Connection) -> dict[str, int]:
         )
 
 
+    # Validate all historical risk snapshots, not only the currently
+    # referenced one. A valid JSON document is not evidence that the USD
+    # balances, reservations, exposure arithmetic, or asset maps are sound.
+    risk_cursor = connection.execute(
+        "SELECT captured_at_utc, snapshot_json FROM account_risk_snapshots ORDER BY snapshot_seq"
+    )
+    while True:
+        risk_batch = risk_cursor.fetchmany(256)
+        if not risk_batch:
+            break
+        for row in risk_batch:
+            try:
+                risk_document = json.loads(
+                    row["snapshot_json"],
+                    parse_constant=lambda _value: (_ for _ in ()).throw(
+                        ValueError("non-finite JSON constant")
+                    ),
+                )
+            except (TypeError, ValueError, json.JSONDecodeError):
+                raise ValueError("backup contains malformed account-risk JSON") from None
+            _validate_account_risk_snapshot_document(
+                risk_document,
+                row["captured_at_utc"],
+            )
+
     # The venue-ID lookup index is part of order recovery, not a disposable
     # cache. Verify it agrees with the immutable order state in both directions.
     for row in connection.execute(
@@ -424,18 +450,28 @@ def _validate_database(connection: sqlite3.Connection) -> dict[str, int]:
             raise ValueError("backup venue-order index points to a conflicting intent")
 
     sync_row = connection.execute(
-        "SELECT status, snapshot_id, error_code FROM account_risk_sync_state WHERE singleton_id = 1"
+        "SELECT status, attempted_at_utc, snapshot_id, error_code "
+        "FROM account_risk_sync_state WHERE singleton_id = 1"
     ).fetchone()
     if sync_row is not None:
         if sync_row["status"] == "success":
             if not sync_row["snapshot_id"] or sync_row["error_code"] is not None:
                 raise ValueError("backup successful account sync state is malformed")
+            try:
+                sync_attempted_at = datetime.fromisoformat(sync_row["attempted_at_utc"])
+            except (TypeError, ValueError):
+                raise ValueError("backup account sync timestamp is malformed") from None
+            if sync_attempted_at.tzinfo is None or sync_attempted_at.utcoffset() is None:
+                raise ValueError("backup account sync timestamp must be timezone-aware")
             snapshot_row = connection.execute(
                 "SELECT captured_at_utc FROM account_risk_snapshots WHERE snapshot_id = ?",
                 (sync_row["snapshot_id"],),
             ).fetchone()
             if snapshot_row is None:
                 raise ValueError("backup account sync state references an unknown snapshot")
+            snapshot_captured_at = datetime.fromisoformat(snapshot_row["captured_at_utc"])
+            if sync_attempted_at.astimezone(timezone.utc) != snapshot_captured_at.astimezone(timezone.utc):
+                raise ValueError("backup successful account sync timestamp differs from its snapshot")
             latest_snapshot = connection.execute(
                 "SELECT snapshot_id FROM account_risk_snapshots "
                 "ORDER BY captured_at_utc DESC, snapshot_seq DESC LIMIT 1"
@@ -443,8 +479,20 @@ def _validate_database(connection: sqlite3.Connection) -> dict[str, int]:
             if latest_snapshot is None or latest_snapshot["snapshot_id"] != sync_row["snapshot_id"]:
                 raise ValueError("backup successful account sync state is not bound to the latest snapshot")
         elif sync_row["status"] == "failed":
-            if sync_row["snapshot_id"] is not None or not sync_row["error_code"]:
+            if (
+                sync_row["snapshot_id"] is not None
+                or not isinstance(sync_row["error_code"], str)
+                or not re.fullmatch(r"[A-Za-z0-9_.-]{1,80}", sync_row["error_code"])
+            ):
                 raise ValueError("backup failed account sync state is malformed")
+            try:
+                sync_attempted_at = datetime.fromisoformat(sync_row["attempted_at_utc"])
+            except (TypeError, ValueError):
+                raise ValueError("backup failed account sync timestamp is malformed") from None
+            if sync_attempted_at.tzinfo is None or sync_attempted_at.utcoffset() is None:
+                raise ValueError("backup failed account sync timestamp must be timezone-aware")
+            if (sync_attempted_at.astimezone(timezone.utc) - datetime.now(timezone.utc)).total_seconds() > 60:
+                raise ValueError("backup failed account sync timestamp is in the future")
         else:
             raise ValueError("backup account sync state has an unknown status")
 

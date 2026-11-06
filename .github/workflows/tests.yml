@@ -1,7 +1,7 @@
 name: Tests
 on:
   push:
-    branches: [main, research/order-submission-idempotency-state-machine]
+    branches: [main, research/order-submission-idempotency-state-machine, research/news-driven-paper-engine]
   pull_request:
     branches: [main, research/order-submission-idempotency-state-machine]
   workflow_dispatch:

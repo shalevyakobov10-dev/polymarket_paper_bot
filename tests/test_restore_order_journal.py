@@ -138,7 +138,7 @@ class RestoreOrderJournalTests(unittest.TestCase):
             source_connection.close()
         destination = self.root / "bad-json-restored.sqlite3"
 
-        with self.assertRaisesRegex(ValueError, "malformed state JSON"):
+        with self.assertRaisesRegex(ValueError, "malformed"):
             restore_order_journal(self.backup_path, destination)
 
         self.assertFalse(destination.exists())

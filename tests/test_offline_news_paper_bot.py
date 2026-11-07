@@ -210,6 +210,42 @@ class OfflineNewsPaperBotTests(unittest.TestCase):
                 finally:
                     bot.close()
 
+    def test_independent_risk_gate_can_block_entry_after_primary_sizing(self):
+        from types import SimpleNamespace
+
+        now = datetime(2026, 11, 7, 12, 0, tzinfo=timezone.utc)
+        row = {
+            "market_id": "independent-risk-market", "question": "Will the example energy bill pass?",
+            "yes_token_id": "yes-token", "no_token_id": "no-token",
+            "observed_at": now.isoformat(), "yes_price": 0.41, "no_price": 0.59,
+            "yes_bid": 0.40, "yes_ask": 0.42, "no_bid": 0.58, "no_ask": 0.60,
+            "yes_book": {
+                "asks_top5": [{"price": 0.42, "size": 100}],
+                "bids_top5": [{"price": 0.40, "size": 100}],
+            },
+        }
+        signal = {
+            "direction": "YES", "score": 0.9, "threshold": 0.75,
+            "publisher_count": 2, "sentiment_confidence": 0.9,
+        }
+        with tempfile.TemporaryDirectory() as folder:
+            with self._make_config(folder), patch.dict(os.environ, {"PAPER_MAX_ENTRY_IMPACT_BPS": "500"}):
+                bot = OfflineNewsPaperBot(PaperConfig(), news_collector=FakeNewsCollector(),
+                                          snapshot_provider=StaticProvider(row))
+                try:
+                    with patch("offline_news_paper_bot.evaluate_paper_entry",
+                               return_value=SimpleNamespace(
+                                   approved=False, reason="daily_loss_limit_reached",
+                                   as_dict=lambda: {"approved": False, "reason": "daily_loss_limit_reached"},
+                               )) as risk_gate:
+                        opened, reason = bot._open_trade(row, signal, now)
+                    self.assertIsNone(opened)
+                    self.assertEqual(reason, "independent_risk_gate:daily_loss_limit_reached")
+                    self.assertEqual(bot.summary()["open_positions"], 0)
+                    risk_gate.assert_called_once()
+                finally:
+                    bot.close()
+
     def test_close_requires_full_visible_bid_depth_and_uses_weighted_exit_price(self):
         now = datetime(2026, 11, 7, 12, 0, tzinfo=timezone.utc)
         row = {

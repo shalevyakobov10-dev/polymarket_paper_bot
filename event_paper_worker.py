@@ -155,6 +155,159 @@ def _safe_performance_summary(raw: Any) -> dict[str, Any] | None:
     return result
 
 
+def _safe_tuning_result(raw: Any) -> dict[str, Any] | None:
+    if not isinstance(raw, dict):
+        return None
+    import math
+
+    result: dict[str, Any] = {
+        "status": str(raw.get("status") or "unknown")[:80],
+        "applied": raw.get("applied") is True,
+        "research_only": True,
+        "live_execution_eligible": False,
+        "real_money_execution": "not_implemented",
+        "execution": "none",
+    }
+    text_fields = (
+        "reason", "input_dataset_sha256", "evaluation_run_sha256",
+        "input_fingerprint_scope", "train_time_start", "train_time_end",
+        "holdout_time_start", "holdout_time_end",
+    )
+    for field in text_fields:
+        value = raw.get(field)
+        if value is not None:
+            result[field] = str(value)[:240]
+    numeric_fields = (
+        "current_threshold", "new_threshold", "candidate_threshold",
+        "baseline_holdout_mean_roi", "candidate_holdout_mean_roi",
+        "baseline_holdout_net_pnl", "candidate_holdout_net_pnl",
+        "holdout_net_pnl_improvement", "holdout_mean_roi_improvement",
+    )
+    for field in numeric_fields:
+        value = raw.get(field)
+        if isinstance(value, bool):
+            continue
+        try:
+            parsed = float(value)
+        except (TypeError, ValueError, OverflowError):
+            continue
+        if math.isfinite(parsed):
+            result[field] = parsed
+    integer_fields = (
+        "closed_trade_count", "source_closed_trade_count", "eligible_unique_markets",
+        "excluded_closed_trade_rows", "missing_trade_id_rows_excluded",
+        "missing_market_id_rows_excluded", "invalid_timestamp_count",
+        "invalid_metric_count", "duplicate_trade_ids_excluded",
+        "duplicate_trade_rows_excluded", "duplicate_market_ids_excluded",
+        "duplicate_market_rows_excluded", "train_trade_count", "holdout_trade_count",
+        "holdout_folds_requested", "folds_scored",
+    )
+    for field in integer_fields:
+        value = raw.get(field)
+        if isinstance(value, bool):
+            continue
+        try:
+            parsed = int(value)
+        except (TypeError, ValueError, OverflowError):
+            continue
+        if parsed >= 0:
+            result[field] = parsed
+
+    candidate_scores = raw.get("training_candidate_scores")
+    if isinstance(candidate_scores, list):
+        safe_scores = []
+        for row in candidate_scores[:8]:
+            if not isinstance(row, dict):
+                continue
+            safe_row: dict[str, Any] = {}
+            for field in ("threshold", "training_mean_net_roi", "training_net_pnl"):
+                value = row.get(field)
+                if isinstance(value, bool):
+                    continue
+                try:
+                    parsed = float(value)
+                except (TypeError, ValueError, OverflowError):
+                    continue
+                if math.isfinite(parsed):
+                    safe_row[field] = parsed
+            count = row.get("training_trade_count")
+            if isinstance(count, int) and not isinstance(count, bool) and count >= 0:
+                safe_row["training_trade_count"] = count
+            if safe_row:
+                safe_scores.append(safe_row)
+        result["training_candidate_scores"] = safe_scores
+
+    fold_reports = raw.get("fold_reports")
+    if isinstance(fold_reports, list):
+        safe_folds = []
+        for row in fold_reports[:5]:
+            if not isinstance(row, dict):
+                continue
+            safe_row = {
+                "fold": row.get("fold") if isinstance(row.get("fold"), int) else None,
+                "status": str(row.get("status") or "unknown")[:40],
+                "reason": str(row.get("reason") or "")[:120] or None,
+                "test_start": str(row.get("test_start") or "")[:80] or None,
+                "test_end": str(row.get("test_end") or "")[:80] or None,
+            }
+            for field in (
+                "test_trade_count", "baseline_trade_count", "candidate_trade_count",
+            ):
+                value = row.get(field)
+                if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
+                    safe_row[field] = value
+            for field in (
+                "baseline_mean_net_roi", "candidate_mean_net_roi",
+                "baseline_net_pnl", "candidate_net_pnl",
+                "net_pnl_improvement", "net_roi_improvement",
+            ):
+                value = row.get(field)
+                if isinstance(value, bool):
+                    continue
+                try:
+                    parsed = float(value)
+                except (TypeError, ValueError, OverflowError):
+                    continue
+                if math.isfinite(parsed):
+                    safe_row[field] = parsed
+            safe_folds.append(safe_row)
+        result["fold_reports"] = safe_folds
+    return result
+
+
+def _safe_tuning_summary(raw: Any) -> dict[str, Any] | None:
+    if not isinstance(raw, dict):
+        return None
+    ran_at = _parse_utc(raw.get("ran_at"))
+    if "result" in raw:
+        safe_result = _safe_tuning_result(raw.get("result"))
+        if safe_result is None:
+            return {
+                "ran_at": ran_at.isoformat() if ran_at else None,
+                "status": "unreadable_audit_record",
+                "applied": False,
+                "live_execution_eligible": False,
+                "real_money_execution": "not_implemented",
+                "execution": "none",
+            }
+        return {
+            "ran_at": ran_at.isoformat() if ran_at else None,
+            "result": safe_result,
+            "research_only": True,
+            "live_execution_eligible": False,
+            "real_money_execution": "not_implemented",
+            "execution": "none",
+        }
+    return {
+        "ran_at": ran_at.isoformat() if ran_at else None,
+        "status": "unreadable_audit_record",
+        "applied": False,
+        "live_execution_eligible": False,
+        "real_money_execution": "not_implemented",
+        "execution": "none",
+    }
+
+
 def _safe_portfolio_summary(raw: Any) -> dict[str, Any] | None:
     if not isinstance(raw, dict):
         return None
@@ -186,6 +339,7 @@ def _safe_portfolio_summary(raw: Any) -> dict[str, Any] | None:
         if parsed >= 0:
             result[field] = parsed
     result["performance"] = _safe_performance_summary(raw.get("performance"))
+    result["last_tuning"] = _safe_tuning_summary(raw.get("last_tuning"))
     return result
 
 

@@ -20,6 +20,11 @@ def valid_args():
         "max_book_age_seconds": 10,
         "max_price_impact_bps": 100,
         "max_order_notional_usd": 20,
+        "available_collateral_usd": 100,
+        "estimated_fees_usd": 0.10,
+        "current_open_positions": 0,
+        "max_open_positions": 5,
+        "opposing_market_outcome_open": False,
         "current_open_exposure_usd": 0,
         "max_open_exposure_usd": 100,
         "daily_realized_pnl_usd": 0,
@@ -44,6 +49,33 @@ class LiveOrderPreflightTests(unittest.TestCase):
         self.assertEqual(result["execution"], "none")
         self.assertEqual(result["order_notional_usd"], 5.0)
         self.assertFalse(LIVE_ORDER_SUBMISSION_IMPLEMENTED)
+
+
+    def test_insufficient_collateral_after_fees_blocks_entry(self):
+        args = valid_args()
+        args["available_collateral_usd"] = 5.05
+        args["estimated_fees_usd"] = 0.10
+        result = evaluate_live_order_preflight(**args)
+        self.assertIn("insufficient_available_collateral_after_fees", result["blockers"])
+
+    def test_open_position_cap_and_opposing_outcome_are_independent_blocks(self):
+        args = valid_args()
+        args["current_open_positions"] = 5
+        args["max_open_positions"] = 5
+        args["opposing_market_outcome_open"] = True
+        result = evaluate_live_order_preflight(**args)
+        self.assertIn("max_open_positions_reached", result["blockers"])
+        self.assertIn("opposing_market_outcome_already_open", result["blockers"])
+
+    def test_invalid_collateral_fee_and_position_inputs_fail_closed(self):
+        args = valid_args()
+        args["available_collateral_usd"] = -1
+        args["estimated_fees_usd"] = -0.01
+        args["current_open_positions"] = True
+        result = evaluate_live_order_preflight(**args)
+        self.assertIn("invalid_available_collateral", result["blockers"])
+        self.assertIn("invalid_estimated_fees", result["blockers"])
+        self.assertIn("invalid_open_position_count", result["blockers"])
 
     def test_missing_release_gate_fails_closed(self):
         args = valid_args()

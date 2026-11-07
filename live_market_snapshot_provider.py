@@ -135,7 +135,7 @@ class LiveClobMarketSnapshotProvider:
             for row in candidates
             for token in (row["yes_token_id"], row["no_token_id"])
         ]
-        books = fetch_order_books(token_rows)
+        books = fetch_order_books(token_rows) if token_rows else {}
         snapshots: list[dict[str, Any]] = []
         for market in candidates:
             yes_book = books.get(market["yes_token_id"])

@@ -34,6 +34,8 @@ class PaperParameterTunerTests(unittest.TestCase):
             minimum_train_trades=30, minimum_holdout_trades=15,
         )
         self.assertTrue(result["applied"])
+        self.assertFalse(result["live_execution_eligible"])
+        self.assertEqual(result["real_money_execution"], "not_implemented")
         self.assertGreater(result["new_threshold"], 0.30)
         self.assertEqual(result["status"], "validated_for_paper_only")
         self.assertEqual(result["folds_scored"], 3)

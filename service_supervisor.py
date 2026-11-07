@@ -67,7 +67,7 @@ def build_supervisor_config(
     if enabled_raw not in {"true", "false"}:
         raise ValueError("ENABLE_USER_ORDER_MONITOR must be exactly true or false")
     monitor_enabled = enabled_raw == "true"
-    paper_enabled_raw = str(source.get("ENABLE_EVENT_PAPER_WORKER", "true")).strip().lower()
+    paper_enabled_raw = str(source.get("ENABLE_EVENT_PAPER_WORKER", "false")).strip().lower()
     if paper_enabled_raw not in {"true", "false"}:
         raise ValueError("ENABLE_EVENT_PAPER_WORKER must be exactly true or false")
     paper_worker_enabled = paper_enabled_raw == "true"
@@ -95,8 +95,14 @@ def build_supervisor_config(
         "POLYMARKET_API_SECRET",
         "POLYMARKET_API_PASSPHRASE",
         "POLYMARKET_SECRET",
+        "POLYMARKET_DEPOSIT_WALLET",
+        "LIVE_EXPECTED_WALLET",
+        "LIVE_TRADING_CONFIRMATION",
     ):
         app_env.pop(secret_name, None)
+    for environment_name in tuple(app_env):
+        if environment_name.startswith("LIVE_"):
+            app_env.pop(environment_name, None)
 
     # The research worker receives only the public worker environment, never
     # account-monitor or future execution credentials.
@@ -106,6 +112,8 @@ def build_supervisor_config(
     paper_worker_env.setdefault("MARKET_HISTORY_DATABASE_PATH", str(data_dir / "market_history.sqlite3"))
     paper_worker_env.setdefault("NEWS_LOG_PATH", str(data_dir / "offline_news_events.jsonl"))
     paper_worker_env.setdefault("MARKET_SNAPSHOT_FILE", str(data_dir / "market_snapshots.json"))
+    paper_worker_env["DRY_RUN"] = "true"
+    paper_worker_env["LIVE_EXECUTION_ENABLED"] = "false"
     paper_worker_env["EVENT_PAPER_WORKER_STATUS_FILE"] = str(
         source.get("EVENT_PAPER_WORKER_STATUS_FILE", str(data_dir / "event_paper_worker_status.json"))
     )
@@ -389,6 +397,11 @@ def run_supervisor(
 
 
 def main() -> int:
+    try:
+        from dotenv import load_dotenv
+        load_dotenv()
+    except ImportError:
+        pass
     logging.basicConfig(
         level=os.environ.get("LOG_LEVEL", "INFO").upper(),
         format="%(asctime)s %(levelname)s %(name)s %(message)s",

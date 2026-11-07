@@ -461,3 +461,19 @@ The continuous event paper worker runs this backup automatically after the first
 ## External deployment uptime monitoring
 
 The optional `.github/workflows/paper-uptime-monitor.yml` checks the deployed service every 15 minutes once the repository variable `PAPER_SERVICE_URL` is configured to the public HTTPS base URL. It checks `/health` and `/event-paper`, requires a fresh event-worker heartbeat and at least one usable market in the last cycle, verifies the last paper backup covered both SQLite databases and is no older than eight hours, and confirms live order execution remains disabled. It does not need wallet or account credentials. Until the URL variable is set, the workflow explicitly skips cloud checks rather than reporting a false failure. This monitor is not a substitute for Railway process supervision or a dedicated alerting/incident-response system.
+
+## Chronological event-paper market replay
+
+```bash
+python historical_replay.py \
+  --paper-db data/offline_news_paper.sqlite3 \
+  --market-history-db data/market_history.sqlite3 \
+  --notional-usd 5 \
+  --holding-hours 6 \
+  --fee-rate 0.01 \
+  --output data/historical-replay.json
+```
+
+The replay reads both SQLite databases in read-only mode and considers only decisions recorded as `ENTERED`. It selects the latest market snapshot whose local capture time **and** provider observation time are no later than the decision timestamp. It then uses the first fully eligible snapshot at or after the fixed holding horizon for the simulated exit. BUY and SELL fills consume the archived top-five visible levels; incomplete entries are excluded and incomplete exits remain unresolved. Entry and exit fees are applied separately using the configured proportional fee assumption.
+
+This is a point-in-time execution-cost diagnostic, not a regenerated historical news strategy or a portfolio-level backtest. It uses fixed notional rather than the historical dynamic sizing/portfolio state, does not reconstruct stop-loss/take-profit paths, and does not model queue position, hidden depth, latency, or intraperiod book changes. The default `--fee-rate 0.01` is an explicit research assumption, not a claim about the venue's fee schedule; set it to the appropriate rate for the market being analyzed. The report always sets `out_of_sample_validated=false` and `live_execution_eligible=false`.

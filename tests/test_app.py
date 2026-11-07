@@ -258,6 +258,42 @@ class ParserTests(unittest.TestCase):
             ["news", "resolutions", "gdelt", "market_stream"],
         )
 
+    def test_health_reports_event_paper_worker_freshness_and_degradation(self):
+        now = datetime(2026, 11, 7, 12, 0, tzinfo=timezone.utc)
+        core = {
+            "worker_running": True,
+            "last_success_at": (now - timedelta(seconds=30)).isoformat(),
+            "last_error": None,
+        }
+        paper = {
+            "worker_state": "running",
+            "last_success_at": (now - timedelta(seconds=60)).isoformat(),
+            "cycles": 8,
+            "consecutive_failures": 0,
+            "total_failures": 1,
+            "heartbeat_fresh": True,
+        }
+        healthy, payload = app.health_payload(core, now, paper_worker_snapshot=paper)
+        self.assertTrue(healthy)
+        self.assertEqual(payload["components"]["event_paper_worker"]["status"], "healthy")
+        self.assertNotIn("event_paper_worker", payload["degraded_components"])
+
+        degraded = {**paper, "worker_state": "degraded", "consecutive_failures": 2}
+        healthy, payload = app.health_payload(core, now, paper_worker_snapshot=degraded)
+        self.assertTrue(healthy)
+        self.assertEqual(payload["status"], "degraded")
+        self.assertEqual(payload["components"]["event_paper_worker"]["status"], "degraded")
+        self.assertIn("event_paper_worker", payload["degraded_components"])
+
+        stale = {
+            **paper,
+            "last_success_at": (now - timedelta(hours=1)).isoformat(),
+            "heartbeat_fresh": False,
+        }
+        healthy, payload = app.health_payload(core, now, paper_worker_snapshot=stale)
+        self.assertTrue(healthy)
+        self.assertEqual(payload["components"]["event_paper_worker"]["status"], "stale")
+
     def test_health_reports_model_learning_worker_freshness(self):
         now = datetime(2026, 11, 3, 12, tzinfo=timezone.utc)
         core = {
@@ -312,6 +348,40 @@ class ParserTests(unittest.TestCase):
         self.assertFalse(healthy)
 
 
+
+    def test_event_paper_endpoint_reports_disabled_state_without_enabling_execution(self):
+        server = app.ThreadingHTTPServer(("127.0.0.1", 0), app.Handler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        old_supervisor = app.SUPERVISOR_STATUS_FILE
+        old_worker = app.EVENT_PAPER_WORKER_STATUS_FILE
+        with tempfile.TemporaryDirectory() as directory:
+            try:
+                app.SUPERVISOR_STATUS_FILE = Path(directory) / "supervisor.json"
+                app.EVENT_PAPER_WORKER_STATUS_FILE = Path(directory) / "worker.json"
+                write_supervisor_status(
+                    app.SUPERVISOR_STATUS_FILE,
+                    build_supervisor_status(
+                        service_state="running",
+                        monitor_enabled=False,
+                        monitor_state="disabled",
+                        event_paper_worker_enabled=False,
+                        event_paper_worker_state="disabled",
+                    ),
+                )
+                thread.start()
+                address = f"http://127.0.0.1:{server.server_port}/event-paper"
+                with http_urlopen(address, timeout=3) as response:
+                    payload = json.loads(response.read().decode("utf-8"))
+                self.assertEqual(payload["worker_state"], "disabled")
+                self.assertTrue(payload["research_only"])
+                self.assertFalse(payload["live_execution_enabled"])
+                self.assertEqual(payload["execution"], "none")
+            finally:
+                server.shutdown()
+                server.server_close()
+                thread.join(timeout=2)
+                app.SUPERVISOR_STATUS_FILE = old_supervisor
+                app.EVENT_PAPER_WORKER_STATUS_FILE = old_worker
 
     def test_service_supervisor_endpoint_reports_sanitized_process_status(self):
         server = app.ThreadingHTTPServer(("127.0.0.1", 0), app.Handler)

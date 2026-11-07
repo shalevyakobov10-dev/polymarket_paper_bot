@@ -154,6 +154,15 @@ class PaperParameterTunerTests(unittest.TestCase):
         self.assertEqual(len(forward["evaluation_run_sha256"]), 64)
         self.assertEqual(forward["evaluation_run_sha256"], reversed_result["evaluation_run_sha256"])
 
+    def test_dataset_fingerprint_is_order_independent_with_conflicting_duplicate_ids(self):
+        rows = [trade(i, 0.5, 0.01, 0.1) for i in range(60)]
+        conflicting = dict(rows[10])
+        conflicting["pnl"] = 0.25
+        rows.append(conflicting)
+        forward = tune_sentiment_threshold(rows, current_threshold=0.3)
+        reverse = tune_sentiment_threshold(list(reversed(rows)), current_threshold=0.3)
+        self.assertEqual(forward["input_dataset_sha256"], reverse["input_dataset_sha256"])
+
     def test_dataset_fingerprint_normalizes_equivalent_timezone_offsets(self):
         rows = [trade(i, 0.5, 0.01, 0.1) for i in range(60)]
         utc_result = tune_sentiment_threshold(rows, current_threshold=0.3)

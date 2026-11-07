@@ -247,7 +247,15 @@ def tune_sentiment_threshold(
             continue
         mean_roi = _mean(subset)
         if mean_roi is not None:
+            mean_pnl = _sum_pnl(subset)
             eligible.append((mean_roi, threshold, len(subset)))
+            candidate_scores.append({
+                "threshold": threshold,
+                "training_trade_count": len(subset),
+                "training_mean_net_roi": round(mean_roi, 8),
+                "training_net_pnl": round(mean_pnl, 8),
+            })
+    result["training_candidate_scores"] = candidate_scores
     if not eligible:
         result["status"] = "no_candidate"
         result["reason"] = "no_stricter_threshold_has_enough_training_trades"

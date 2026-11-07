@@ -22,7 +22,8 @@ def _sha256(path: Path) -> str:
 
 
 def _verify_sqlite(path: Path) -> None:
-    connection = sqlite3.connect(f"file:{quote(str(path.resolve()), safe=\"/:\")}?mode=ro", uri=True, timeout=20)
+    uri = "file:" + quote(str(path.resolve()), safe="/:") + "?mode=ro"
+    connection = sqlite3.connect(uri, uri=True, timeout=20)
     try:
         result = [str(row[0]) for row in connection.execute("PRAGMA integrity_check")]
         if result != ["ok"]:

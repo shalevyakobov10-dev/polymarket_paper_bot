@@ -297,6 +297,42 @@ class OfflineNewsPaperBotTests(unittest.TestCase):
                 finally:
                     bot.close()
 
+    def test_summary_includes_minimum_sample_gated_closed_trade_performance(self):
+        now = datetime(2026, 11, 7, 12, 0, tzinfo=timezone.utc).isoformat()
+        opened = datetime(2026, 11, 7, 11, 0, tzinfo=timezone.utc).isoformat()
+        with tempfile.TemporaryDirectory() as folder:
+            with self._make_config(folder):
+                bot = OfflineNewsPaperBot(
+                    PaperConfig(), news_collector=FakeNewsCollector(),
+                    snapshot_provider=StaticProvider({}),
+                )
+                try:
+                    with bot.db:
+                        for index in range(60):
+                            pnl = 1.0 if index < 40 else -0.5
+                            bot.db.execute(
+                                "INSERT INTO trades (market_id,question,direction,token_id,opened_at,"
+                                "entry_price,shares,notional,entry_fee,stop_loss_price,take_profit_price,"
+                                "signal_score,signal_strength,sentiment_confidence,publisher_count,"
+                                "entry_threshold,last_mark_price,status,closed_at,exit_price,exit_fee,"
+                                "pnl,net_roi,exit_reason) "
+                                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'CLOSED',?,?,?,?,?,?)",
+                                (
+                                    f"market-{index}", "Example question", "YES", f"token-{index}",
+                                    opened, 0.4, 2.5, 1.0, 0.05, 0.3, 0.6, 0.9, 0.9, 0.9, 2,
+                                    0.75, 0.4, now, 0.5, 0.05, pnl, pnl / 1.05, "time_limit",
+                                ),
+                            )
+                    performance = bot.summary()["performance"]
+                    self.assertEqual(performance["closed_trades"], 60)
+                    self.assertEqual(performance["wins"], 40)
+                    self.assertEqual(performance["losses"], 20)
+                    self.assertEqual(performance["evaluation_status"], "positive_in_sample_unvalidated")
+                    self.assertFalse(performance["out_of_sample_validated"])
+                    self.assertFalse(performance["live_execution_eligible"])
+                finally:
+                    bot.close()
+
     def test_one_offline_cycle_stays_simulated_only(self):
         now = datetime(2026, 11, 6, 12, 0, tzinfo=timezone.utc)
         row = {

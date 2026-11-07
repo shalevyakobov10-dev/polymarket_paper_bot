@@ -1,9 +1,9 @@
 name: Tests
 on:
   push:
-    branches: [main, research/order-submission-idempotency-state-machine, research/news-driven-paper-engine, research/live-execution-gateway, research/event-aware-news-signals]
+    branches: [main, research/order-submission-idempotency-state-machine, research/news-driven-paper-engine, research/live-execution-gateway, research/event-aware-news-signals, research/live-public-clob-snapshots]
   pull_request:
-    branches: [main, research/order-submission-idempotency-state-machine, research/news-driven-paper-engine, research/live-execution-gateway]
+    branches: [main, research/order-submission-idempotency-state-machine, research/news-driven-paper-engine, research/live-execution-gateway, research/event-aware-news-signals]
   workflow_dispatch:
 permissions:
   contents: read

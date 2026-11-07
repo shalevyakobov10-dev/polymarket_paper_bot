@@ -53,11 +53,13 @@ def _dataset_fingerprint(rows: list[dict[str, Any]]) -> str:
     """Hash normalized closed-trade evidence in a deterministic, order-free form."""
     canonical = []
     for row in rows:
+        parsed_closed_at = _closed_timestamp(row.get("closed_at"))
+        raw_closed_at = str(row.get("closed_at") or "").strip() or None
         canonical.append({
             "trade_id": str(row.get("trade_id") or "").strip() or None,
             "market_id": str(row.get("market_id") or "").strip() or None,
             "status": str(row.get("status") or "").strip().upper(),
-            "closed_at": str(row.get("closed_at") or "").strip() or None,
+            "closed_at": parsed_closed_at[1] if parsed_closed_at else raw_closed_at,
             "signal_strength": _finite(row.get("signal_strength")),
             "net_roi": _finite(row.get("net_roi")),
             "pnl": _finite(row.get("pnl")),
@@ -112,6 +114,7 @@ def tune_sentiment_threshold(
     ]
     input_fingerprint = _dataset_fingerprint(source_rows)
     run_configuration = {
+        "tuner_algorithm": "multi_window_holdout_paper_v2",
         "current_threshold": current,
         "minimum_closed_trades": minimum_closed_trades,
         "minimum_train_trades": minimum_train_trades,
@@ -202,7 +205,7 @@ def tune_sentiment_threshold(
         "input_dataset_sha256": input_fingerprint,
         "evaluation_run_sha256": evaluation_run_fingerprint,
         "evaluation_configuration": run_configuration,
-        "input_fingerprint_scope": "normalized_closed_trade_ids_markets_timestamps_signal_strength_net_roi_pnl_and_exit_reason",
+        "input_fingerprint_scope": "normalized_closed_trade_ids_markets_utc_timestamps_signal_strength_net_roi_pnl_and_exit_reason",
         "missing_trade_id_rows_excluded": missing_trade_id_count,
         "missing_market_id_rows_excluded": missing_market_id_count,
         "invalid_timestamp_count": invalid_timestamp_count,

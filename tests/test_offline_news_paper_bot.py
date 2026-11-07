@@ -94,7 +94,7 @@ class OfflineNewsPaperBotTests(unittest.TestCase):
                     self.assertEqual(signal["direction"], "NO")
                     self.assertLess(signal["score"], 0)
                     self.assertEqual(signal["publisher_count"], 2)
-                    self.assertEqual(signal["method"], "explicit_event_cue_publisher_consensus_v1")
+                    self.assertEqual(signal["method"], "explicit_event_cue_publisher_consensus_v2_conflicts_in_denominator")
                     self.assertEqual(signal["sentiment_interpretation"],
                                      "diagnostic_only_not_used_for_yes_no_direction")
                 finally:

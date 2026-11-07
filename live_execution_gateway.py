@@ -360,8 +360,11 @@ class LiveExecutionGateway:
         submission_started = False
         try:
             client = self.client_factory(private_key, deposit_wallet)
-            if client.get_closed_only_mode() is True:
-                return self._blocked("account_is_closed_only")
+            # Only an explicit False is a verified tradable account state.
+            # None, malformed values, and unexpected SDK responses must block.
+            closed_only_mode = client.get_closed_only_mode()
+            if closed_only_mode is not False:
+                return self._blocked("account_closed_only_status_unverified")
             balance_allowance = client.get_balance_allowance(asset_type=self._collateral_asset_type())
             # The official SDK returns collateral balance and allowances in
             # base units (USDC uses six decimals), not whole-dollar values.
@@ -444,7 +447,10 @@ class LiveExecutionGateway:
             submission_started = True
             response = client.post_order(signed_order)
             order_id = _response_order_id(response)
-            if order_id and _field(response, "ok") is not False:
+            # The SDK's explicit ok=True is required. An order ID alone is
+            # not proof that the venue accepted the request; incomplete or
+            # unfamiliar acknowledgements are ambiguous and require reconciliation.
+            if order_id and _field(response, "ok") is True:
                 receipt = _accepted_venue_receipt(response, order_id)
                 self.journal.record_submission_response(
                     client_order_id,

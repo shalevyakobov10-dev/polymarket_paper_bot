@@ -10,8 +10,45 @@ import math
 import re
 from typing import Any
 
-_TOKEN = re.compile(r"won't|wouldn't|couldn't|shouldn't|didn't|doesn't|isn't|aren't|can't|cannot|[a-z]+")
+_TOKEN = re.compile(r"won't|wouldn't|couldn't|shouldn't|didn't|doesn't|isn't|aren't|can't|cannot|[a-z]+(?:[0-9]+)?(?:-[a-z0-9]+)*|[0-9]+")
 _NEGATORS = {"not", "never", "no", "without", "neither", "nor", "cannot", "can't", "won't", "wouldn't", "couldn't", "shouldn't", "didn't", "doesn't", "isn't", "aren't"}
+_SUBJECT_STOPWORDS = {
+    # Question grammar, time references, and generic market/event vocabulary.
+    "a", "an", "the", "will", "would", "can", "could", "do", "does", "did",
+    "is", "are", "was", "were", "be", "been", "being", "has", "have", "had",
+    "should", "shall", "must", "may", "might", "this", "that", "these", "those",
+    "who", "what", "when", "where", "why", "how", "which", "whether", "in", "on",
+    "at", "by", "before", "after", "during", "from", "to", "for", "of", "and",
+    "or", "with", "without", "into", "over", "under", "above", "below", "between",
+    "january", "february", "march", "april", "may", "june", "july", "august",
+    "september", "october", "november", "december", "monday", "tuesday", "wednesday",
+    "thursday", "friday", "saturday", "sunday",
+    "rate", "rates", "interest", "central", "bank", "cut", "cuts", "cutting",
+    "lower", "lowers", "lowered", "reduce", "reduces", "reduced", "reduction",
+    "ease", "eases", "eased", "raise", "raises", "raised", "hike", "hikes", "hiked",
+    "increase", "increases", "increased", "tighten", "tightens", "tightened",
+    "hold", "holds", "held", "maintain", "maintains", "maintained", "steady",
+    "unchanged", "pause", "pauses", "paused", "pass", "passes", "passed", "approve",
+    "approves", "approved", "adopt", "adopts", "adopted", "reject", "rejects",
+    "rejected", "veto", "vetoes", "vetoed", "fail", "fails", "failed", "block",
+    "blocks", "blocked", "defeat", "defeats", "defeated", "bill", "law",
+    "legislation", "measure", "senate", "parliament", "congress", "parliamentary",
+    "win", "wins", "won", "elect", "elects", "elected", "reelect", "reelected",
+    "lose", "loses", "lost", "concede", "concedes", "conceded", "election",
+    "elections", "president", "presidential", "candidate", "candidates", "vote",
+    "votes", "ballot", "primary", "launch", "launches", "launched", "release",
+    "releases", "released", "introduce", "introduces", "introduced", "unveil",
+    "unveils", "unveiled", "delay", "delays", "delayed", "postpone", "postpones",
+    "postponed", "cancel", "cancels", "cancelled", "canceled", "scrap", "scraps",
+    "scrapped", "product", "company", "device", "phone", "smartphone", "rocket",
+    "mission", "service", "platform", "app", "model", "sign", "signs", "signed",
+    "agree", "agrees", "agreed", "reach", "reaches", "reached", "conclude",
+    "concludes", "concluded", "deal", "agreement", "treaty", "ceasefire", "accord",
+    "contract", "pact", "withdraw", "withdraws", "withdrew", "withdrawn", "abandon",
+    "abandons", "abandoned", "collapse", "collapses", "collapsed", "us", "usa",
+    "uk", "eu", "uae", "un",
+}
+
 _UNCERTAINTY = {
     "may", "might", "could", "possibly", "possible", "potential", "expected",
     "expects", "expect", "forecast", "forecasts", "projected", "projects",
@@ -51,6 +88,33 @@ _RULES: dict[str, dict[str, set[str]]] = {
 
 def _tokens(value: Any) -> list[str]:
     return [token.lower() for token in _TOKEN.findall(str(value or "").casefold())]
+
+
+def _subject_anchor_tokens(question: str) -> list[str]:
+    """Extract explicit capitalized proposition anchors from a market question.
+
+    Generic questions remain supported, but when a question names a person,
+    organization, place, or product, every extracted anchor must also occur in
+    the headline before it can provide directional evidence.
+    """
+    raw_tokens = re.findall(
+        r"[A-Za-z][A-Za-z0-9]*(?:[-'][A-Za-z0-9]+)*|[0-9]{1,3}",
+        str(question or ""),
+    )
+    anchors: list[str] = []
+    for index, raw in enumerate(raw_tokens):
+        if not any(character.isupper() for character in raw):
+            continue
+        normalized = raw.casefold().replace("’", "'")
+        if len(normalized) < 2 or normalized in _SUBJECT_STOPWORDS:
+            continue
+        anchors.append(normalized)
+        # Keep short model/version numbers attached to a named product (iPhone 17).
+        if index + 1 < len(raw_tokens):
+            next_token = raw_tokens[index + 1]
+            if next_token.isdigit() and len(next_token) <= 3:
+                anchors.append(next_token)
+    return list(dict.fromkeys(anchors))
 
 
 def _has_negation(tokens: list[str], index: int) -> bool:
@@ -94,6 +158,16 @@ def classify_event_outcome(question: str, headline: str) -> dict[str, Any]:
     if title_set & _UNCERTAINTY:
         return {"direction": None, "status": "ambiguous", "reason": "speculative_headline", "family": family}
 
+    subject_anchors = _subject_anchor_tokens(question)
+    if subject_anchors and not set(subject_anchors).issubset(title_set):
+        return {
+            "direction": None,
+            "status": "ambiguous",
+            "reason": "headline_subject_mismatch",
+            "family": family,
+            "subject_anchors": subject_anchors,
+        }
+
     cues: list[tuple[str, str, bool]] = []
     if family.startswith("rate_"):
         context = {"rate", "rates", "interest", "fed", "federal", "reserve", "central", "bank"}
@@ -135,6 +209,7 @@ def classify_event_outcome(question: str, headline: str) -> dict[str, Any]:
         "reason": "explicit_headline_outcome_cue",
         "family": family,
         "matched_cues": sorted(set(matched_cues)),
+        "subject_anchors": subject_anchors,
         "interpretation": "directional_headline_evidence_not_probability_or_event_verification",
         "research_only": True,
         "execution": "none",

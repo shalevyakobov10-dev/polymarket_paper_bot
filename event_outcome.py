@@ -230,6 +230,12 @@ def aggregate_event_outcome_evidence(
     but they remain in the consensus denominator. This prevents a small agreeing
     subset from appearing unanimous while other tracked publishers conflict.
     """
+    if (
+        isinstance(now_epoch, bool)
+        or isinstance(max_age_hours, bool)
+        or isinstance(minimum_consensus_ratio, bool)
+    ):
+        raise ValueError("numeric aggregation settings must not be booleans")
     try:
         current_epoch = float(now_epoch)
         maximum_age_hours = float(max_age_hours)

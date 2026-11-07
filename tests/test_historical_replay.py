@@ -179,12 +179,15 @@ class HistoricalReplayTests(unittest.TestCase):
 
     def test_timezone_naive_decisions_are_excluded(self):
         with sqlite3.connect(self.paper_db) as db:
+            # Keep this test focused on the malformed decision; the valid row is
+            # intentionally changed to SKIPPED so it does not add a missing-book exclusion.
+            db.execute("UPDATE decisions SET decision='SKIPPED' WHERE decision_id=1")
             db.execute(
                 "INSERT INTO decisions VALUES(3, ?, 'market-1', 'YES', 'ENTERED')",
                 ("2026-11-07T10:00:00",),
             )
         report = self._replay()
-        self.assertEqual(report["metrics"]["entered_decisions"], 2)
+        self.assertEqual(report["metrics"]["entered_decisions"], 1)
         self.assertEqual(report["metrics"]["excluded_replays"], 1)
         naive = next(row for row in report["trades"] if row.get("decision_id") == 3)
         self.assertEqual(naive["reason"], "invalid_or_timezone_naive_decision_timestamp")

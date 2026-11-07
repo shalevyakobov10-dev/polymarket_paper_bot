@@ -1,9 +1,9 @@
 name: Tests
 on:
   push:
-    branches: [main, research/order-submission-idempotency-state-machine, research/news-driven-paper-engine, research/live-execution-gateway, research/event-aware-news-signals, research/gamma-clob-snapshot-hardening]
+    branches: [main, research/order-submission-idempotency-state-machine, research/news-driven-paper-engine, research/live-execution-gateway, research/event-aware-news-signals, research/gamma-clob-snapshot-hardening, research/event-evidence-consensus-hardening]
   pull_request:
-    branches: [main, research/order-submission-idempotency-state-machine, research/news-driven-paper-engine, research/live-execution-gateway, research/event-aware-news-signals]
+    branches: [main, research/order-submission-idempotency-state-machine, research/news-driven-paper-engine, research/live-execution-gateway, research/event-aware-news-signals, research/gamma-clob-snapshot-hardening]
   workflow_dispatch:
 permissions:
   contents: read

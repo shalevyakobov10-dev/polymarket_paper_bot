@@ -647,7 +647,7 @@ class OfflineNewsPaperBot:
             if (now - parsed.astimezone(timezone.utc)) < timedelta(hours=self.config.auto_tune_interval_hours):
                 return None
         rows = self.db.execute(
-            "SELECT status,signal_strength,entry_threshold,pnl,net_roi,closed_at,exit_reason "
+            "SELECT trade_id,status,signal_strength,entry_threshold,pnl,net_roi,closed_at,exit_reason "
             "FROM trades WHERE status='CLOSED' ORDER BY closed_at,trade_id"
         ).fetchall()
         trades = [dict(row) for row in rows]

@@ -6,6 +6,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from offline_news_paper_bot import OfflineNewsPaperBot, PaperConfig
+from live_market_snapshot_provider import LiveClobMarketSnapshotProvider
 
 
 class FakeNewsCollector:
@@ -47,6 +48,46 @@ class OfflineNewsPaperBotTests(unittest.TestCase):
                 "PAPER_EVENT_EVIDENCE_THRESHOLD": "0.50"
             }):
                 with self.assertRaisesRegex(ValueError, "PAPER_EVENT_EVIDENCE_THRESHOLD"):
+                    PaperConfig()
+
+    def test_market_data_source_defaults_to_local_json(self):
+        with tempfile.TemporaryDirectory() as folder:
+            with self._make_config(folder):
+                config = PaperConfig()
+                self.assertEqual(config.market_data_source, "local_json")
+                self.assertEqual(config.live_market_max_markets, 10)
+                self.assertEqual(config.live_market_max_book_age_seconds, 30.0)
+
+    def test_live_public_provider_is_selected_only_when_explicitly_enabled(self):
+        with tempfile.TemporaryDirectory() as folder:
+            with self._make_config(folder), patch.dict(os.environ, {
+                "PAPER_MARKET_DATA_SOURCE": "polymarket_public"
+            }):
+                config = PaperConfig()
+                bot = OfflineNewsPaperBot(
+                    config, news_collector=FakeNewsCollector(),
+                )
+                try:
+                    self.assertIsInstance(bot.snapshot_provider, LiveClobMarketSnapshotProvider)
+                    self.assertTrue(config.market_data_source == "polymarket_public")
+                    self.assertTrue(os.environ["DRY_RUN"] == "true")
+                finally:
+                    bot.close()
+
+    def test_unknown_market_data_source_is_rejected_at_startup(self):
+        with tempfile.TemporaryDirectory() as folder:
+            with self._make_config(folder), patch.dict(os.environ, {
+                "PAPER_MARKET_DATA_SOURCE": "automatic"
+            }):
+                with self.assertRaisesRegex(ValueError, "PAPER_MARKET_DATA_SOURCE"):
+                    PaperConfig()
+
+    def test_live_public_data_limits_are_validated_even_without_network(self):
+        with tempfile.TemporaryDirectory() as folder:
+            with self._make_config(folder), patch.dict(os.environ, {
+                "PAPER_LIVE_MARKET_MAX_MARKETS": "0"
+            }):
+                with self.assertRaisesRegex(ValueError, "PAPER_LIVE_MARKET_MAX_MARKETS"):
                     PaperConfig()
 
     def test_live_execution_flag_is_rejected(self):
@@ -187,7 +228,10 @@ class OfflineNewsPaperBotTests(unittest.TestCase):
                 )
                 try:
                     result = bot.run_once(now=now, fetch_news=False)
-                    self.assertEqual(result["mode"], "OFFLINE_NEWS_PAPER_ONLY")
+                    self.assertEqual(result["mode"], "NEWS_PAPER_RESEARCH_ONLY")
+                    self.assertEqual(result["market_data_source"], "local_json")
+                    self.assertEqual(result["market_snapshots_loaded"], 1)
+                    self.assertTrue(result["market_data_diagnostics"]["research_only"])
                     self.assertTrue(result["dry_run"])
                     self.assertFalse(result["live_execution_enabled"])
                     self.assertEqual(result["portfolio"]["open_positions"], 0)

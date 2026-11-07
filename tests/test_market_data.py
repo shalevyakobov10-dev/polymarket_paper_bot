@@ -134,5 +134,24 @@ class OrderBookTests(unittest.TestCase):
         self.assertEqual(len(result), 10)
 
 
+    def test_empty_token_batch_returns_without_creating_zero_worker_pool(self):
+        self.assertEqual(market_data.fetch_order_books([]), {})
+
+    def test_explicit_batch_limit_cannot_exceed_global_environment_cap(self):
+        rows = [{"token_id": str(index)} for index in range(5)]
+        with patch.dict("os.environ", {"ORDERBOOK_TOKENS_PER_POLL": "3"}):
+            with patch.object(market_data, "fetch_order_book", side_effect=lambda token: {"token_id": token}) as fetch:
+                result = market_data.fetch_order_books(rows, max_tokens=5)
+        self.assertEqual(list(result), ["0", "1", "2"])
+        self.assertEqual(fetch.call_count, 3)
+
+    def test_explicit_batch_limit_can_reduce_global_cap(self):
+        rows = [{"token_id": str(index)} for index in range(5)]
+        with patch.dict("os.environ", {"ORDERBOOK_TOKENS_PER_POLL": "20"}):
+            with patch.object(market_data, "fetch_order_book", side_effect=lambda token: {"token_id": token}) as fetch:
+                result = market_data.fetch_order_books(rows, max_tokens=2)
+        self.assertEqual(list(result), ["0", "1"])
+        self.assertEqual(fetch.call_count, 2)
+
 if __name__ == "__main__":
     unittest.main()

@@ -309,6 +309,15 @@ class ParserTests(unittest.TestCase):
         self.assertEqual(payload["status"], "unhealthy")
         self.assertEqual(payload["components"]["event_paper_worker"]["status"], "stale")
 
+        hung = {
+            **paper,
+            "last_success_at": (now - timedelta(seconds=60)).isoformat(),
+            "heartbeat_fresh": False,
+        }
+        healthy, payload = app.health_payload(core, now, paper_worker_snapshot=hung)
+        self.assertFalse(healthy)
+        self.assertEqual(payload["components"]["event_paper_worker"]["status"], "stale")
+
     def test_health_reports_model_learning_worker_freshness(self):
         now = datetime(2026, 11, 3, 12, tzinfo=timezone.utc)
         core = {

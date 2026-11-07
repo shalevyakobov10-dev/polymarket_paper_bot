@@ -1,8 +1,8 @@
-"""Offline news-driven paper simulator.
+"""News-driven paper simulator using public read-only market data.
 
-Market prices are supplied by a local JSON snapshot/replay file. This module
-fetches third-party RSS headlines only; it contains no Polymarket API client,
-wallet integration, signer, or order-submission code.
+The default provider discovers Gamma markets and reads public CLOB order books.
+A local JSON replay provider remains available for deterministic research. This
+module has no wallet integration, signer, or order-submission code.
 """
 from __future__ import annotations
 
@@ -663,7 +663,7 @@ def main() -> None:
         load_dotenv()
     except ImportError:
         pass
-    parser = argparse.ArgumentParser(description="Offline news-driven Polymarket-style paper simulator")
+    parser = argparse.ArgumentParser(description="News-driven paper simulator using public read-only Polymarket market data")
     parser.add_argument("--once", action="store_true", help="Run one snapshot/news cycle and exit")
     args = parser.parse_args()
     bot = OfflineNewsPaperBot()

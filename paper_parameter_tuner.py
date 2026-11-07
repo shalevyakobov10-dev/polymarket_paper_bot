@@ -65,11 +65,8 @@ def _dataset_fingerprint(rows: list[dict[str, Any]]) -> str:
             "pnl": _finite(row.get("pnl")),
             "exit_reason": str(row.get("exit_reason") or "unknown"),
         })
-    canonical.sort(key=lambda row: (
-        row["closed_at"] or "",
-        row["market_id"] or "",
-        row["trade_id"] or "",
-        row["status"],
+    canonical.sort(key=lambda row: json.dumps(
+        row, sort_keys=True, separators=(",", ":"), allow_nan=False
     ))
     payload = json.dumps(canonical, sort_keys=True, separators=(",", ":"), allow_nan=False)
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()

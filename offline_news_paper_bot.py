@@ -118,6 +118,7 @@ class PaperConfig:
         self.maximum_news_age_hours = _float_env("NEWS_MAXIMUM_AGE_HOURS", 24.0, 1.0, 168.0)
         self.half_life_hours = _float_env("NEWS_SENTIMENT_HALF_LIFE_HOURS", 6.0, 0.5, 72.0)
         self.maximum_spread_bps = _float_env("PAPER_MAX_SPREAD_BPS", 500.0, 10.0, 5000.0)
+        self.maximum_entry_impact_bps = _float_env("PAPER_MAX_ENTRY_IMPACT_BPS", 100.0, 1.0, 5000.0)
         self.maximum_market_age_seconds = _float_env("MARKET_SNAPSHOT_MAX_AGE_SECONDS", 180.0, 10.0, 3600.0)
         self.fallback_volatility = _float_env("PAPER_FALLBACK_VOLATILITY", 0.02, 0.001, 0.20)
         self.stop_volatility_multiplier = _float_env("PAPER_STOP_VOLATILITY_MULTIPLIER", 2.0, 0.5, 5.0)
@@ -467,6 +468,8 @@ class OfflineNewsPaperBot:
                 return None, "visible_ask_depth_unavailable"
             if abs(float(candidate_fill["best_price"]) - ask) > 1e-8:
                 return None, "visible_ask_depth_mismatch"
+            if float(candidate_fill["price_impact_bps"] or 0.0) > self.config.maximum_entry_impact_bps:
+                return None, "entry_impact_above_limit"
             if candidate_fill["complete"] is not True:
                 return None, "insufficient_visible_ask_depth"
 

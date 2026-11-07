@@ -1,5 +1,13 @@
 name: Paper deployment uptime monitor
 on:
+  push:
+    branches: [main, research/event-aware-news-signals]
+    paths:
+      - ".github/workflows/paper-uptime-monitor.yml"
+  pull_request:
+    branches: [main, research/live-execution-gateway, research/event-aware-news-signals]
+    paths:
+      - ".github/workflows/paper-uptime-monitor.yml"
   workflow_dispatch:
   schedule:
     - cron: "*/15 * * * *"

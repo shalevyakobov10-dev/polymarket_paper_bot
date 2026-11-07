@@ -124,6 +124,24 @@ def read_event_paper_worker_status(
         }
 
 
+def _wait_with_heartbeat(
+    stopping: Any,
+    seconds: float,
+    *,
+    path: Path,
+    status: dict[str, Any],
+) -> bool:
+    remaining = max(0.0, float(seconds))
+    while remaining > 0 and not stopping.is_set():
+        chunk = min(30.0, remaining)
+        if stopping.wait(chunk):
+            return True
+        status["updated_at"] = _utc_now()
+        _write_status(path, status)
+        remaining = max(0.0, remaining - chunk)
+    return bool(stopping.is_set())
+
+
 def run_worker(
     *,
     bot_factory: Callable[[], Any] = OfflineNewsPaperBot,
@@ -185,7 +203,7 @@ def run_worker(
                 })
                 _write_status(target, {**status, "updated_at": _utc_now()})
                 status["updated_at"] = _utc_now()
-                if stopping.wait(interval):
+                if _wait_with_heartbeat(stopping, interval, path=target, status=status):
                     break
             except Exception as exc:
                 failures = int(status["consecutive_failures"]) + 1
@@ -205,7 +223,7 @@ def run_worker(
                 if failures >= max_consecutive_failures:
                     exit_code = 1
                     break
-                if stopping.wait(delay):
+                if _wait_with_heartbeat(stopping, delay, path=target, status=status):
                     break
     except Exception as exc:
         exit_code = 1

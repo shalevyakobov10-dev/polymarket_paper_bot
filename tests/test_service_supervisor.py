@@ -154,7 +154,7 @@ class SupervisorTests(unittest.TestCase):
             self.assertEqual(commands[1][0], ["python-test", "event_paper_worker.py"])
             self.assertEqual(commands[2][0], ["python-test", "event_paper_worker.py"])
             self.assertNotIn("POLYMARKET_PRIVATE_KEY", commands[1][1])
-            self.assertTrue(failed_worker.terminated)
+            self.assertEqual(failed_worker.returncode, 7)
             self.assertTrue(restarted_worker.terminated)
             status = read_supervisor_status(config.status_path)
             self.assertTrue(status["event_paper_worker_enabled"])

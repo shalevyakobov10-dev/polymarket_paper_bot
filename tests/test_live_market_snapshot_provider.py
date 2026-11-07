@@ -148,6 +148,22 @@ class LiveMarketSnapshotProviderTests(unittest.TestCase):
         with self.assertRaises(RuntimeError):
             live.load(now=now)
 
+    def test_unparseable_exchange_timestamp_does_not_fall_back_to_receipt_time(self):
+        now = datetime.now(timezone.utc)
+        raw = market()
+        books = {
+            "yes-token": book("yes-token", now),
+            "no-token": book("no-token", now),
+        }
+        books["yes-token"]["exchange_timestamp"] = "not-a-timestamp"
+        live = provider.LiveClobMarketSnapshotProvider(
+            market_fetcher=lambda: [raw],
+            orderbook_fetcher=lambda rows: books,
+        )
+        with self.assertRaises(RuntimeError):
+            live.load(now=now)
+        self.assertEqual(live.last_diagnostics["markets_skipped"], 1)
+
     def test_orders_markets_by_volume_and_caps_selected_market_count(self):
         now = datetime.now(timezone.utc)
         first = market("low", volume=10, tokens='["low-no","low-yes"]')

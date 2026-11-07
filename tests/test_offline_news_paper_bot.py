@@ -35,6 +35,20 @@ class OfflineNewsPaperBotTests(unittest.TestCase):
         }
         return patch.dict(os.environ, env, clear=True)
 
+    def test_event_evidence_threshold_defaults_to_consensus_floor(self):
+        with tempfile.TemporaryDirectory() as folder:
+            with self._make_config(folder):
+                config = PaperConfig()
+                self.assertEqual(config.min_event_evidence_threshold, 0.75)
+
+    def test_event_evidence_threshold_rejects_values_below_consensus_policy(self):
+        with tempfile.TemporaryDirectory() as folder:
+            with self._make_config(folder), patch.dict(os.environ, {
+                "PAPER_EVENT_EVIDENCE_THRESHOLD": "0.50"
+            }):
+                with self.assertRaisesRegex(ValueError, "PAPER_EVENT_EVIDENCE_THRESHOLD"):
+                    PaperConfig()
+
     def test_live_execution_flag_is_rejected(self):
         with tempfile.TemporaryDirectory() as folder:
             with patch.dict(os.environ, {"DRY_RUN": "true", "LIVE_EXECUTION_ENABLED": "true"}, clear=True):

@@ -365,11 +365,11 @@ The read-only account monitor keeps one pending user-stream receive alive while 
 
 When the service runs in Docker, the supervisor writes a sanitized atomic status record to `DATA_DIR/service_supervisor_status.json`. The read-only `/service-supervisor` endpoint shows whether the HTTP worker is starting/running/stopped, whether the authenticated monitor is enabled/running/restarting, the monitor restart count, last exit code and next restart time. The supervisor refreshes a heartbeat every 15 seconds, including while waiting to restart the monitor; `/service-supervisor` includes `status_fresh` and `status_age_seconds`, marking the record stale after 45 seconds. It deliberately excludes process arguments, environment variables, API credentials and wallet data. When running `app.py` directly without the supervisor, the endpoint reports `supervised=false` and `status_error=status_file_missing`; this is distinct from a healthy supervised account monitor. The endpoint does not prove that credentials are valid or that account data is current: use the account snapshot timestamps and monitor logs for that verification.
 
-## Offline news-driven paper research engine
+## News-driven paper research engine with optional live public market data
 
 A separate local-only research runner adds fast English headline sentiment, publisher/time-decayed market matching, volatility-aware paper exits, fractional-equity risk sizing, a daily drawdown stop, and a conservative self-tuning loop. It writes entries, exits, sentiment scores, fees, and realized PnL to SQLite.
 
-**This runner does not connect to Polymarket or any CLOB.** It reads a manually supplied JSON market snapshot from disk and fetches third-party RSS headlines only. It has no wallet, private-key, signer, or order-submission code. Live execution is hard-disabled in the module; setting DRY_RUN=false or LIVE_EXECUTION_ENABLED=true causes startup to fail.
+**This engine supports two paper-only market-data modes.** `PAPER_MARKET_DATA_SOURCE=local_json` (the default) reads a manually supplied/replay JSON snapshot from disk. `PAPER_MARKET_DATA_SOURCE=polymarket_public` discovers active binary markets from the public Gamma API, resolves the exact YES/NO outcome token IDs, and requests both outcome books through the unauthenticated `polymarket-client` PublicClient. The public mode selects markets by 24-hour volume (10 by default), and only passes a market to the paper engine when both books are complete, uncrossed, correctly mapped, and within the configured freshness window. A market with a missing, malformed, or stale outcome book is skipped; if no usable markets remain, the cycle fails closed. This is live public market data, **not live trading**. The engine has no account authentication, wallet, private-key, signer, or order-submission path. `DRY_RUN` must remain true; setting it false or `LIVE_EXECUTION_ENABLED=true` causes startup to fail.
 
 Install and prepare a local snapshot:
 
@@ -380,13 +380,21 @@ mkdir -p data
 cp market_snapshots.example.json data/market_snapshots.json
 ```
 
-Edit data/market_snapshots.json with locally sourced/replay market quotes and a fresh UTC observed_at timestamp. The example file is synthetic, not a current market quote. Run one cycle:
+For local/replay mode, edit data/market_snapshots.json with locally sourced quotes and a fresh UTC `observed_at` timestamp. The example file is synthetic, not a current market quote. To use public live market data instead, set:
+
+```dotenv
+PAPER_MARKET_DATA_SOURCE=polymarket_public
+PAPER_LIVE_MARKET_MAX_MARKETS=10
+PAPER_LIVE_MARKET_MAX_BOOK_AGE_SECONDS=30
+```
+
+The public mode uses only unauthenticated Gamma/CLOB market-data endpoints and never submits orders. Then run one cycle:
 
 ```bash
 python -m dotenv run -- python offline_news_paper_bot.py --once
 ```
 
-Run repeatedly using PAPER_POLL_SECONDS:
+Run repeatedly using `PAPER_POLL_SECONDS`:
 
 ```bash
 python -m dotenv run -- python offline_news_paper_bot.py
@@ -396,9 +404,9 @@ The engine no longer uses generic positive/negative prose sentiment to choose YE
 
 Dynamic stops use rolling absolute price-change volatility with bounded minimum/maximum distances. Position size is capped by a per-trade equity-risk budget, cash, and total paper exposure. New entries stop when daily or peak-to-trough drawdown gates are breached. Exits are simulated at the supplied best bid, entries at the supplied best ask, with a configurable two-sided fee assumption.
 
-The paper-only learning loop reviews closed losing trades and can only raise the event-evidence entry-strength threshold; it cannot alter live settings. The active event-evidence strength threshold defaults to 0.75 and can be configured with `PAPER_EVENT_EVIDENCE_THRESHOLD`; the minimum publisher consensus is separately configured with `PAPER_MIN_EVENT_CONSENSUS_RATIO`. Tuning needs at least 60 closed paper trades, chooses a candidate on the first 70% of chronological data, and tests that single candidate on the final 30%. It applies the change to this offline simulator only when the holdout sample is large enough and mean net ROI improves by at least 0.1 percentage points. This is a small-sample heuristic, not proof of a predictive edge; the SQLite tuning_runs table keeps an audit record.
+The paper-only learning loop reviews closed losing trades and can only raise the event-evidence entry-strength threshold; it cannot alter live settings. The active event-evidence strength threshold defaults to 0.75 and can be configured with `PAPER_EVENT_EVIDENCE_THRESHOLD`; the minimum publisher consensus is separately configured with `PAPER_MIN_EVENT_CONSENSUS_RATIO`. Tuning needs at least 60 closed paper trades, chooses a candidate on the first 70% of chronological data, and tests that single candidate on the final 30%. It applies the change to this offline simulator only when the holdout sample is large enough and mean net ROI improves by at least 0.1 percentage points. This is a small-sample heuristic, not proof of a predictive edge; the SQLite tuning_runs table keeps an audit record. Market-source diagnostics are included in each cycle result, with `market_data_source`, counts, skipped markets, and the observed freshness ceiling.
 
-The legacy py-clob-client repository was archived on 25 May 2026 and its maintainers state that it is no longer functional; the newer official SDK is polymarket-client. This offline runner intentionally does not use either SDK. See https://github.com/Polymarket/py-clob-client and https://github.com/Polymarket/py-sdk.
+The legacy py-clob-client repository was archived on 25 May 2026 and its maintainers state that it is no longer functional; the newer official SDK is polymarket-client. The public live market-data mode uses that SDK's unauthenticated PublicClient via the existing read-only market-data module. The local replay mode makes no Polymarket API requests. See https://github.com/Polymarket/py-clob-client and https://github.com/Polymarket/py-sdk.
 ## Gated live execution adapter (not armed)
 
 The separate live gateway uses Polymarket's official unified Python SDK (`polymarket-client`) and supports only a single bounded BUY FAK order from a prepared SQLite intent. It rechecks the account snapshot/sync state, current public CLOB book, tick/lot size, account closed-only flag, collateral balance/allowance, live risk context, all required release gates, and `GET https://polymarket.com/api/geoblock` from the same host that would post the order. It signs locally, commits `submission_pending` to the journal, and only then posts the signed FAK order. The unfilled FAK remainder is not left resting. It never automatically retries; transport ambiguity becomes `submission_unknown` and requires reconciliation.

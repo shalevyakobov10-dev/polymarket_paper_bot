@@ -98,7 +98,7 @@ def _subject_anchor_tokens(question: str) -> list[str]:
     the headline before it can provide directional evidence.
     """
     raw_tokens = re.findall(
-        r"[A-Za-z][A-Za-z0-9]*(?:[-'][A-Za-z0-9]+)*|[0-9]{1,3}",
+        r"[A-Za-z][A-Za-z0-9]*(?:-[A-Za-z0-9]+)*|[0-9]{1,3}",
         str(question or ""),
     )
     anchors: list[str] = []

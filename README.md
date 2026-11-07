@@ -47,6 +47,7 @@ The service listens on port 8080 by default. Routes:
 - `/model-forecasts`: research-only current-market probability estimates from a regularized model trained only on resolved labels available before forecast time; stale rows and unresolved training labels are excluded, and no actions are issued
 - `/learning`: realized forecast feedback, rolling error metrics, and a restart-safe research champion/challenger governance ledger
 - `/execution-readiness`: read-only, fail-closed diagnostics for prerequisites to any future live-launch review; never enables or submits orders
+- `/event-paper`: sanitized status and paper portfolio metrics for the separately supervised event-aware paper engine; always research-only and non-executable
 
 Environment variables for market selection:
 - `GAMMA_DISCOVERY_LIMIT` (default `400`, bounded to 20–500 active markets fetched for ranking)

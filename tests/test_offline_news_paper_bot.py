@@ -30,6 +30,7 @@ class OfflineNewsPaperBotTests(unittest.TestCase):
             "DRY_RUN": "true",
             "LIVE_EXECUTION_ENABLED": "false",
             "PAPER_DATABASE_PATH": str(Path(folder) / "paper.sqlite3"),
+            "MARKET_HISTORY_DATABASE_PATH": str(Path(folder) / "market_history.sqlite3"),
             "NEWS_LOG_PATH": str(Path(folder) / "news.jsonl"),
             "MARKET_SNAPSHOT_FILE": str(Path(folder) / "markets.json"),
         }
@@ -192,6 +193,13 @@ class OfflineNewsPaperBotTests(unittest.TestCase):
                     self.assertFalse(result["live_execution_enabled"])
                     self.assertEqual(result["portfolio"]["open_positions"], 0)
                     self.assertEqual(result["portfolio"]["cash"], 100.0)
+                    self.assertEqual(result["market_history"]["inserted"], 1)
+                    self.assertEqual(result["market_history"]["total_snapshots"], 1)
+
+                    repeated = bot.run_once(now=now, fetch_news=False)
+                    self.assertEqual(repeated["market_history"]["inserted"], 0)
+                    self.assertEqual(repeated["market_history"]["duplicates"], 1)
+                    self.assertEqual(repeated["market_history"]["total_snapshots"], 1)
                 finally:
                     bot.close()
 

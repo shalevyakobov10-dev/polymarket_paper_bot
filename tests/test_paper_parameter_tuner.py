@@ -47,7 +47,8 @@ class PaperParameterTunerTests(unittest.TestCase):
         self.assertGreaterEqual(result["candidate_holdout_net_pnl"], result["baseline_holdout_net_pnl"])
         self.assertTrue(all(row["net_pnl_improvement"] >= 0 for row in result["fold_reports"]))
         self.assertLess(result["train_time_end"], result["holdout_time_start"])
-        self.assertEqual(len(result["training_candidate_scores"]), 5)
+        self.assertEqual(len(result["training_candidate_scores"]), 4)
+        self.assertTrue(all(row["training_trade_count"] >= 30 for row in result["training_candidate_scores"]))
         self.assertEqual(len(result["input_dataset_sha256"]), 64)
 
     def test_candidate_is_rejected_when_one_chronological_holdout_fold_is_bad(self):

@@ -94,7 +94,7 @@ python restore_order_journal.py --source /path/to/verified-backup.sqlite3 --dest
 
 ## בדיקת API ציבורי מתוך GitHub Actions
 
-ה-workflow `Public API smoke check` מבצע קריאת read-only ל-Gamma ללא חשבון או מפתחות. הריצה האחרונה שנבדקה: [Public API smoke check #6](https://github.com/shalevyakobov10-dev/polymarket_paper_bot/actions/runs/40111586766). זו בדיקת API נקודתית, לא הוכחה שה-worker בענן פועל לאורך זמן.
+ה-workflow `Public API smoke check` מבצע קריאות read-only ל-Gamma ולספרי CLOB ציבוריים, דרך ה-provider האמיתי, ללא חשבון או מפתחות. הוא דורש לפחות snapshot בינארי טרי אחד שבו ספרי YES ו-NO דו-צדדיים ושימושיים. זו בדיקת API נקודתית בלבד: היא אינה מוכיחה זמינות רציפה, עומק היסטורי, או שה-worker פועל בענן לאורך זמן.
 
 ## ריצת backtest היסטורית
 

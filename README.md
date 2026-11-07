@@ -369,7 +369,7 @@ When the service runs in Docker, the supervisor writes a sanitized atomic status
 
 A separate local-only research runner adds fast English headline sentiment, publisher/time-decayed market matching, volatility-aware paper exits, fractional-equity risk sizing, a daily drawdown stop, and a conservative self-tuning loop. It writes entries, exits, sentiment scores, fees, and realized PnL to SQLite.
 
-**This runner does not connect to Polymarket or any CLOB.** It reads a manually supplied JSON market snapshot from disk and fetches third-party RSS headlines only. It has no wallet, private-key, signer, or order-submission code. Live execution is hard-disabled in the module; setting DRY_RUN=false or LIVE_EXECUTION_ENABLED=true causes startup to fail.
+**This runner never authenticates to a Polymarket account and cannot sign or submit orders.** By default it reads a manually supplied JSON replay snapshot. Optionally, `MARKET_DATA_SOURCE=polymarket_public` enables read-only Gamma market discovery and public CLOB REST/WebSocket books. The runner has no wallet, private-key, signer, or order-submission code; `DRY_RUN=false` or `LIVE_EXECUTION_ENABLED=true` causes startup to fail.
 
 Install and prepare a local snapshot:
 
@@ -398,4 +398,10 @@ Dynamic stops use rolling absolute price-change volatility with bounded minimum/
 
 The learning loop reviews closed losing trades and can only raise the sentiment entry threshold. It needs at least 60 closed paper trades, chooses a candidate on the first 70% of chronological data, and tests that single candidate on the final 30%. It applies the change to this offline simulator only when the holdout sample is large enough and mean net ROI improves by at least 0.1 percentage points. This is a small-sample heuristic, not proof of a predictive edge; the SQLite tuning_runs table keeps an audit record.
 
-The legacy py-clob-client repository was archived on 25 May 2026 and its maintainers state that it is no longer functional; the newer official SDK is polymarket-client. This offline runner intentionally does not use either SDK. See https://github.com/Polymarket/py-clob-client and https://github.com/Polymarket/py-sdk.
+The legacy py-clob-client repository was archived on 25 May 2026 and its maintainers state that it is no longer functional; the newer official SDK is polymarket-client. In public-data mode the runner uses only the unauthenticated `PublicClient` interface for read-only books; it never creates an authenticated client or loads account credentials. See https://github.com/Polymarket/py-clob-client and https://github.com/Polymarket/py-sdk.
+
+### Optional read-only public market feed
+
+Set `MARKET_DATA_SOURCE=polymarket_public` to discover active binary markets through Gamma and read current YES/NO books through the public CLOB interfaces. YES and NO tokens are mapped by their outcome labels, never by array order. WebSocket data is used only when both sides are present, fresh, and within the quote-skew limit; otherwise the provider falls back to a paired REST snapshot. It rejects crossed, missing, stale, future-dated, and time-skewed books and reports per-cycle source/skip diagnostics.
+
+The WebSocket session is bounded per polling cycle (15 seconds by default, configurable from 5 to 120 seconds). This is not an always-on tick engine. The feed is read-only: it has no wallet, authenticated account client, signer, order submission, or cancellation path. Keep `DRY_RUN=true` and `LIVE_EXECUTION_ENABLED=false`.

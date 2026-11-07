@@ -189,7 +189,7 @@ class OfflineNewsPaperBotTests(unittest.TestCase):
             "publisher_count": 2, "sentiment_confidence": 0.9,
         }
         with tempfile.TemporaryDirectory() as folder:
-            with self._make_config(folder):
+            with self._make_config(folder), patch.dict(os.environ, {"PAPER_MAX_ENTRY_IMPACT_BPS": "500"}):
                 bot = OfflineNewsPaperBot(PaperConfig(), news_collector=FakeNewsCollector(),
                                           snapshot_provider=StaticProvider(row))
                 try:
@@ -226,7 +226,7 @@ class OfflineNewsPaperBotTests(unittest.TestCase):
             "publisher_count": 2, "sentiment_confidence": 0.9,
         }
         with tempfile.TemporaryDirectory() as folder:
-            with self._make_config(folder):
+            with self._make_config(folder), patch.dict(os.environ, {"PAPER_MAX_ENTRY_IMPACT_BPS": "500"}):
                 bot = OfflineNewsPaperBot(PaperConfig(), news_collector=FakeNewsCollector(),
                                           snapshot_provider=StaticProvider(row))
                 try:
@@ -266,6 +266,34 @@ class OfflineNewsPaperBotTests(unittest.TestCase):
                     )
                     self.assertEqual(closed2, [])
                     self.assertEqual(blocked2[0]["reason"], "insufficient_visible_bid_depth")
+                finally:
+                    bot.close()
+
+    def test_entry_blocks_excessive_visible_depth_price_impact(self):
+        now = datetime(2026, 11, 7, 12, 0, tzinfo=timezone.utc)
+        row = {
+            "market_id": "high-impact-market", "question": "Will the example energy bill pass?",
+            "yes_token_id": "yes-token", "no_token_id": "no-token",
+            "observed_at": now.isoformat(), "yes_price": 0.46, "no_price": 0.54,
+            "yes_bid": 0.41, "yes_ask": 0.42, "no_bid": 0.58, "no_ask": 0.59,
+            "yes_book": {
+                "asks_top5": [{"price": 0.42, "size": 0.1}, {"price": 0.55, "size": 20}],
+                "bids_top5": [{"price": 0.41, "size": 20}],
+            },
+        }
+        signal = {
+            "direction": "YES", "score": 0.9, "threshold": 0.75,
+            "publisher_count": 2, "sentiment_confidence": 0.9,
+        }
+        with tempfile.TemporaryDirectory() as folder:
+            with self._make_config(folder):
+                bot = OfflineNewsPaperBot(PaperConfig(), news_collector=FakeNewsCollector(),
+                                          snapshot_provider=StaticProvider(row))
+                try:
+                    opened, reason = bot._open_trade(row, signal, now)
+                    self.assertIsNone(opened)
+                    self.assertEqual(reason, "entry_impact_above_limit")
+                    self.assertEqual(bot.summary()["open_positions"], 0)
                 finally:
                     bot.close()
 

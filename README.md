@@ -430,3 +430,14 @@ This is a conservative visible-liquidity approximation. It does not model queue 
 
 
 New entries also enforce `PAPER_MAX_ENTRY_IMPACT_BPS` (default 100 bps). The limit is checked against the simulated weighted-average fill price versus the best displayed ask; an entry whose visible depth would cause larger price impact is rejected before it is recorded. Exit fills still report their realized simulated book impact rather than suppressing a required risk exit.
+
+
+## Continuous event-aware paper worker
+
+The Docker image enables `event_paper_worker.py` by default through `ENABLE_EVENT_PAPER_WORKER=true`. The PID-1 supervisor runs it as a separate process beside the HTTP API. It polls public Gamma/CLOB snapshots and the configured RSS feeds, appends market observations to the market-history SQLite archive, evaluates event-aware paper signals, and persists the simulated portfolio.
+
+The worker writes an atomic heartbeat file at `EVENT_PAPER_WORKER_STATUS_FILE` (default `DATA_DIR/event_paper_worker_status.json`). Its heartbeat is refreshed during the normal polling interval and retry waits, not only after a completed cycle. The HTTP `/service-supervisor` endpoint returns the sanitized worker state, last successful cycle, market count, blocked exits, failure count, and heartbeat freshness.
+
+Transient polling errors use bounded exponential retry. After five consecutive failed cycles, the worker exits and the supervisor restarts it with capped backoff. The authenticated account monitor remains separately disabled by default. The supervisor removes `LIVE_*` and account credential values from the event worker environment and forcibly sets `DRY_RUN=true` and `LIVE_EXECUTION_ENABLED=false`.
+
+Mount a persistent, single-writer volume at `/app/data` for Docker deployments; otherwise the paper portfolio and historical archive may be lost when the container is replaced. Do not mount the same SQLite database into multiple replicas. CI explicitly disables the event worker to keep the container smoke test isolated from external polling.

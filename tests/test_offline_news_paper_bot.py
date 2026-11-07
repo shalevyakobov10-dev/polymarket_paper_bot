@@ -112,11 +112,11 @@ class OfflineNewsPaperBotTests(unittest.TestCase):
         }
         items = [
             {"id": "1", "source": "Reuters", "publisher_id": "reuters.com",
-             "title": "Fed warns about interest rates amid economic crisis",
+             "title": "Fed warns investors about December interest rates amid economic crisis",
              "summary": "Officials discussed risks around interest rates.",
              "published_at": now.isoformat()},
             {"id": "2", "source": "AP", "publisher_id": "apnews.com",
-             "title": "Fed warns about interest rates amid economic crisis",
+             "title": "Fed warns investors about December interest rates amid economic crisis",
              "summary": "Officials discussed risks around interest rates.",
              "published_at": now.isoformat()},
         ]

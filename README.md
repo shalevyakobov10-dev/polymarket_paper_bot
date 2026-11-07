@@ -477,3 +477,21 @@ python historical_replay.py \
 The replay reads both SQLite databases in read-only mode and considers only decisions recorded as `ENTERED`. It selects the latest market snapshot whose local capture time **and** provider observation time are no later than the decision timestamp. It then uses the first fully eligible snapshot at or after the fixed holding horizon for the simulated exit. BUY and SELL fills consume the archived top-five visible levels; incomplete entries are excluded and incomplete exits remain unresolved. Entry and exit fees are applied separately using the configured proportional fee assumption.
 
 This is a point-in-time execution-cost diagnostic, not a regenerated historical news strategy or a portfolio-level backtest. It uses fixed notional rather than the historical dynamic sizing/portfolio state, does not reconstruct stop-loss/take-profit paths, and does not model queue position, hidden depth, latency, or intraperiod book changes. The default `--fee-rate 0.01` is an explicit research assumption, not a claim about the venue's fee schedule; set it to the appropriate rate for the market being analyzed. The report always sets `out_of_sample_validated=false` and `live_execution_eligible=false`.
+
+## Resolution-aligned event-paper evaluation
+
+```bash
+python resolved_event_evaluation.py \
+  --paper-db data/offline_news_paper.sqlite3 \
+  --market-history-db data/market_history.sqlite3 \
+  --resolution-log data/resolved_markets.jsonl \
+  --resolution-backups 3 \
+  --settlement-fee-rate 0.0 \
+  --output data/resolved-event-evaluation.json
+```
+
+This read-only evaluator links each recorded `ENTERED` event-paper decision to its matching paper trade, the last fresh archived YES/NO book captured and observed no later than the decision, and a definitive exact-binary market outcome from the existing Gamma resolution archive. It replays the top-five ask-side VWAP and verifies that the replayed fill matches the saved paper trade ledger before scoring. It models a binary settlement payout of one dollar per winning share and subtracts the recorded entry fee; `--settlement-fee-rate` is an explicit assumption (default zero), not a verified venue/withdrawal fee. Conflicting resolution records, disputed/unknown statuses, post-decision books, stale books, and ledger mismatches are withheld.
+
+**Do not confuse this with actual realized Paper PnL.** The resolution score is a counterfactual hold-to-resolution result using the recorded entry. The Paper engine may already have exited at a stop, target, or time limit; the report includes that actual close/PnL separately for comparison. One earliest eligible entry is retained per market so repeated signals on the same eventual binary outcome do not inflate the sample.
+
+The expanding-window walk-forward selects only among stricter filters of entries already taken by the historical policy. It purges any training market whose resolution was not available before the next test fold begins. It reports each fold's training candidate scores and later test metrics; it never changes the running strategy threshold. A consistency-gate pass is exploratory only: the report always sets `out_of_sample_validated=false` and `live_execution_eligible=false`. Small samples, selection effects, related markets, shared news events, incomplete rotated resolution history, and the fixed one-dollar settlement assumption can all bias results. No result from this command alone authorizes real-money execution.

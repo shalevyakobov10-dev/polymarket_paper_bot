@@ -101,6 +101,16 @@ def tune_sentiment_threshold(
     current = float(current_threshold)
     if not math.isfinite(current) or not 0 < current <= 1:
         raise ValueError("current_threshold must be in (0, 1]")
+    integer_parameters = {
+        "minimum_closed_trades": minimum_closed_trades,
+        "minimum_train_trades": minimum_train_trades,
+        "minimum_holdout_trades": minimum_holdout_trades,
+        "holdout_folds": holdout_folds,
+        "minimum_fold_trades": minimum_fold_trades,
+    }
+    for name, value in integer_parameters.items():
+        if isinstance(value, bool) or not isinstance(value, int):
+            raise ValueError(f"{name} must be an integer")
     if minimum_closed_trades < 1 or minimum_train_trades < 2 or minimum_holdout_trades < 1:
         raise ValueError("minimum sample sizes must be positive and training must require at least two trades")
     if not 2 <= holdout_folds <= 5:

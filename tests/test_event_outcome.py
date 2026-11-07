@@ -138,5 +138,70 @@ class EventOutcomeTests(unittest.TestCase):
             aggregate_event_outcome_evidence([], now_epoch=1_800_000_000, minimum_consensus_ratio=0.5)
 
 
+    def test_conflicting_publishers_reduce_consensus_denominator(self):
+        now = 1_800_000_000.0
+        rows = [
+            {"event_evidence_status": "decisive", "event_direction": "YES", "publisher_id": "yes-a", "published_at_epoch": now - 60},
+            {"event_evidence_status": "decisive", "event_direction": "YES", "publisher_id": "yes-b", "published_at_epoch": now - 60},
+            {"event_evidence_status": "decisive", "event_direction": "YES", "publisher_id": "conflict", "published_at_epoch": now - 60},
+            {"event_evidence_status": "decisive", "event_direction": "NO", "publisher_id": "conflict", "published_at_epoch": now - 120},
+        ]
+        result = aggregate_event_outcome_evidence(rows, now_epoch=now)
+        self.assertFalse(result["qualified"])
+        self.assertIsNone(result["direction"])
+        self.assertEqual(result["publisher_count"], 2)
+        self.assertEqual(result["observed_publisher_count"], 3)
+        self.assertEqual(result["consensus_denominator_count"], 3)
+        self.assertEqual(result["conflict_publisher_count"], 1)
+        self.assertEqual(result["consensus_ratio"], round(2 / 3, 6))
+
+    def test_invalid_aggregation_configuration_is_rejected(self):
+        valid_now = 1_800_000_000.0
+        invalid_calls = (
+            {"now_epoch": None, "max_age_hours": 24.0, "minimum_publishers": 2, "minimum_consensus_ratio": 0.75},
+            {"now_epoch": float("nan")},
+            {"now_epoch": float("inf")},
+            {"now_epoch": True},
+            {"max_age_hours": float("nan")},
+            {"max_age_hours": float("inf")},
+            {"max_age_hours": 0},
+            {"max_age_hours": True},
+            {"minimum_publishers": True},
+            {"minimum_publishers": 2.0},
+            {"minimum_publishers": 0},
+            {"minimum_consensus_ratio": float("nan")},
+            {"minimum_consensus_ratio": float("inf")},
+            {"minimum_consensus_ratio": True},
+        )
+        for overrides in invalid_calls:
+            with self.subTest(overrides=overrides):
+                params = {
+                    "now_epoch": valid_now,
+                    "max_age_hours": 24.0,
+                    "minimum_publishers": 2,
+                    "minimum_consensus_ratio": 0.75,
+                }
+                params.update(overrides)
+                with self.assertRaises(ValueError):
+                    aggregate_event_outcome_evidence([], **params)
+
+    def test_conflict_adjusted_consensus_can_pass_only_at_configured_ratio(self):
+        now = 1_800_000_000.0
+        rows = [
+            {"event_evidence_status": "decisive", "event_direction": "YES", "publisher_id": name, "published_at_epoch": now - 60}
+            for name in ("a", "b", "c")
+        ] + [
+            {"event_evidence_status": "decisive", "event_direction": direction, "publisher_id": "d", "published_at_epoch": now - 60}
+            for direction in ("YES", "NO")
+        ]
+        result = aggregate_event_outcome_evidence(
+            rows, now_epoch=now, minimum_consensus_ratio=0.8
+        )
+        self.assertFalse(result["qualified"])
+        self.assertEqual(result["consensus_ratio"], 0.75)
+        self.assertEqual(result["observed_publisher_count"], 4)
+        self.assertEqual(result["conflict_publisher_count"], 1)
+
+
 if __name__ == "__main__":
     unittest.main()

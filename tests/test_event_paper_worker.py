@@ -175,6 +175,27 @@ class EventPaperWorkerTests(unittest.TestCase):
             self.assertEqual(status["backup_consecutive_failures"], 1)
             self.assertGreaterEqual(status["backup_retry_delay_seconds"], 60)
 
+    def test_zero_usable_market_snapshots_marks_worker_degraded(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "worker.json"
+            bot = FakeBot([{
+                "markets_loaded": 0, "opened": [], "closed": [], "close_blocked": [],
+                "portfolio": {"cash": 100, "equity": 100, "realized_pnl": 0,
+                              "open_positions": 0, "closed_positions": 0},
+            }])
+            result = run_worker(
+                bot_factory=lambda: bot,
+                stop_event=StopAfterWaits(1),
+                status_path=path,
+                poll_seconds=30,
+                backup_function=None,
+            )
+            self.assertEqual(result, 0)
+            status = read_event_paper_worker_status(path)
+            self.assertEqual(status["last_cycle_warning"], "no_usable_market_snapshots")
+            self.assertEqual(status["markets_loaded_last_cycle"], 0)
+            self.assertFalse(status["heartbeat_fresh"] is False)
+
     def test_transient_error_retries_and_recovers(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "worker.json"

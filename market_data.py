@@ -152,6 +152,8 @@ def fetch_order_books(
             tokens.append(token)
         if len(tokens) >= limit:
             break
+    if not tokens:
+        return {}
 
     def fetch_one(token: str) -> tuple[str, dict[str, Any]]:
         try:

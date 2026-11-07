@@ -24,6 +24,7 @@ from adaptive_paper_risk import (
     size_position_by_risk,
 )
 from market_snapshot_provider import JsonMarketSnapshotProvider
+from event_outcome import aggregate_event_outcome_evidence, classify_event_outcome
 from news_monitor import DEFAULT_FEEDS, NewsCollector, match_news_to_markets
 from news_sentiment import aggregate_market_news_sentiment, analyze_news_sentiment
 from paper_parameter_tuner import tune_sentiment_threshold
@@ -110,6 +111,7 @@ class PaperConfig:
         self.fee_rate = _float_env("PAPER_FEE_RATE", 0.01, 0.0, 0.20)
         self.min_sentiment_threshold = _float_env("NEWS_SENTIMENT_THRESHOLD", 0.35, 0.05, 1.0)
         self.minimum_publishers = _int_env("NEWS_MINIMUM_PUBLISHERS", 2, 1, 20)
+        self.minimum_event_consensus_ratio = _float_env("PAPER_MIN_EVENT_CONSENSUS_RATIO", 0.75, 0.51, 1.0)
         self.maximum_news_age_hours = _float_env("NEWS_MAXIMUM_AGE_HOURS", 24.0, 1.0, 168.0)
         self.half_life_hours = _float_env("NEWS_SENTIMENT_HALF_LIFE_HOURS", 6.0, 0.5, 72.0)
         self.maximum_spread_bps = _float_env("PAPER_MAX_SPREAD_BPS", 500.0, 10.0, 5000.0)
@@ -354,7 +356,9 @@ class OfflineNewsPaperBot:
             (snapshot["market_id"],),
         ).fetchone():
             return None, "market_already_has_open_position"
-        direction = "YES" if float(signal["score"]) > 0 else "NO"
+        direction = str(signal.get("direction") or "").upper()
+        if direction not in {"YES", "NO"}:
+            return None, "event_direction_unverified"
         token_id, bid, ask, mid = self._book_values(snapshot, direction)
         spread_bps = (ask - bid) / mid * 10_000.0 if mid > 0 else float("inf")
         if spread_bps > self.config.maximum_spread_bps:
@@ -399,7 +403,7 @@ class OfflineNewsPaperBot:
                 snapshot["market_id"], snapshot["question"], direction, token_id, _iso(now),
                 ask, shares, notional, entry_fee, levels.stop_loss_price,
                 levels.take_profit_price, float(signal["score"]), abs(float(signal["score"])),
-                float(signal["confidence"]), int(signal["publisher_count"]),
+                float(signal.get("sentiment_confidence") or 0.0), int(signal["publisher_count"]),
                 float(signal["threshold"]), bid,
             ),
         )
@@ -442,20 +446,34 @@ class OfflineNewsPaperBot:
         snapshots: list[dict[str, Any]],
         now: datetime,
     ) -> dict[str, dict[str, Any]]:
+        """Build event-proposition signals; VADER is diagnostic only, never directional."""
         markets = [
             {"market_id": row["market_id"], "question": row["question"], "volume_24h": row.get("volume_24h")}
             for row in snapshots
         ]
         by_market: dict[str, list[dict[str, Any]]] = {}
         for news in news_items:
+            title = str(news.get("title") or "")
             candidates = match_news_to_markets(news, markets, max_matches=3)
             sentiment = analyze_news_sentiment(
-                str(news.get("title") or "") + ". " + str(news.get("summary") or "")
+                title + ". " + str(news.get("summary") or "")
             )
             published_epoch = _parse_published_epoch(news.get("published_at"))
             for candidate in candidates:
+                relevance = candidate.get("relevance_score")
+                if not isinstance(relevance, (int, float)) or not math.isfinite(float(relevance)) or float(relevance) < 0.40:
+                    continue
+                event = classify_event_outcome(
+                    str(candidate.get("question") or ""),
+                    title,
+                )
                 by_market.setdefault(str(candidate["market_id"]), []).append({
                     **candidate,
+                    "event_direction": event.get("direction"),
+                    "event_evidence_status": event.get("status"),
+                    "event_evidence_reason": event.get("reason"),
+                    "event_family": event.get("family"),
+                    "event_matched_cues": event.get("matched_cues", []),
                     "sentiment_score": sentiment.get("score"),
                     "sentiment_supported": sentiment.get("supported") is True,
                     "publisher_id": str(news.get("publisher_id") or news.get("source") or ""),
@@ -466,15 +484,34 @@ class OfflineNewsPaperBot:
         results: dict[str, dict[str, Any]] = {}
         now_epoch = now.timestamp()
         for market_id, matches in by_market.items():
-            aggregate = aggregate_market_news_sentiment(
+            event_signal = aggregate_event_outcome_evidence(
+                matches,
+                now_epoch=now_epoch,
+                max_age_hours=self.config.maximum_news_age_hours,
+                minimum_publishers=self.config.minimum_publishers,
+                minimum_consensus_ratio=self.config.minimum_event_consensus_ratio,
+            )
+            sentiment = aggregate_market_news_sentiment(
                 matches,
                 now_epoch=now_epoch,
                 max_age_hours=self.config.maximum_news_age_hours,
                 half_life_hours=self.config.half_life_hours,
                 minimum_publishers=self.config.minimum_publishers,
             )
-            aggregate["matches"] = len(matches)
-            results[market_id] = aggregate
+            event_signal.update({
+                "matches": len(matches),
+                "event_families": sorted({
+                    str(row.get("event_family"))
+                    for row in matches
+                    if row.get("event_family")
+                }),
+                "sentiment_score": sentiment.get("score"),
+                "sentiment_confidence": sentiment.get("confidence", 0.0),
+                "sentiment_publisher_count": sentiment.get("publisher_count", 0),
+                "sentiment_article_count": sentiment.get("article_count", 0),
+                "sentiment_interpretation": "diagnostic_only_not_used_for_yes_no_direction",
+            })
+            results[market_id] = event_signal
         return results
 
     def maybe_tune(self, now: datetime) -> dict[str, Any] | None:
@@ -529,11 +566,16 @@ class OfflineNewsPaperBot:
             threshold = float(account["active_sentiment_threshold"])
             for snapshot in snapshots:
                 signal = signals.get(snapshot["market_id"])
-                if not signal or not signal.get("qualified") or signal.get("score") is None:
+                if (
+                    not signal
+                    or signal.get("qualified") is not True
+                    or signal.get("direction") not in {"YES", "NO"}
+                    or signal.get("score") is None
+                ):
                     continue
                 score = float(signal["score"])
                 threshold_now = float(self._account()["active_sentiment_threshold"])
-                direction = "YES" if score > 0 else "NO"
+                direction = str(signal["direction"])
                 eligible = abs(score) >= threshold_now
                 reason = "signal_threshold_not_met"
                 if eligible:
@@ -558,7 +600,8 @@ class OfflineNewsPaperBot:
                     "publisher_count,article_count,selected_direction,decision,reason) "
                     "VALUES(?,?,?,?,?,?,?,?,?)",
                     (
-                        _iso(current), snapshot["market_id"], score, float(signal["confidence"]),
+                        _iso(current), snapshot["market_id"], signal.get("sentiment_score"),
+                        float(signal.get("sentiment_confidence") or 0.0),
                         int(signal["publisher_count"]), int(signal["article_count"]),
                         direction, "ENTERED" if reason == "paper_position_opened" else "SKIPPED",
                         reason,
@@ -576,7 +619,10 @@ class OfflineNewsPaperBot:
             "news_feeds_configured": int(news_result.get("feeds_configured") or 0),
             "news_feeds_succeeded": int(news_result.get("feeds_succeeded") or 0),
             "news_feeds_failed": int(news_result.get("feeds_failed") or 0),
-            "market_signals": len(signals), "opened": opened, "closed": closed,
+            "market_signals": len(signals),
+            "qualified_event_signals": sum(1 for signal in signals.values() if signal.get("qualified") is True),
+            "event_signal_method": "explicit_event_cue_publisher_consensus_v1",
+            "opened": opened, "closed": closed,
             "tuning": tuning, "risk_gates": final_gates, "portfolio": summary,
             "research_only": True, "execution": "none",
         }

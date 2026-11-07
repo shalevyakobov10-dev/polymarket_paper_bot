@@ -9,6 +9,8 @@ It never changes a live configuration.
 """
 from __future__ import annotations
 
+import hashlib
+import json
 import math
 from collections import Counter
 from datetime import datetime, timezone
@@ -45,6 +47,30 @@ def _mean(rows: list[dict[str, Any]]) -> float | None:
 
 def _sum_pnl(rows: list[dict[str, Any]]) -> float:
     return sum(_finite(row.get("pnl")) or 0.0 for row in rows)
+
+
+def _dataset_fingerprint(rows: list[dict[str, Any]]) -> str:
+    """Hash normalized closed-trade evidence in a deterministic, order-free form."""
+    canonical = []
+    for row in rows:
+        canonical.append({
+            "trade_id": str(row.get("trade_id") or "").strip() or None,
+            "market_id": str(row.get("market_id") or "").strip() or None,
+            "status": str(row.get("status") or "").strip().upper(),
+            "closed_at": str(row.get("closed_at") or "").strip() or None,
+            "signal_strength": _finite(row.get("signal_strength")),
+            "net_roi": _finite(row.get("net_roi")),
+            "pnl": _finite(row.get("pnl")),
+            "exit_reason": str(row.get("exit_reason") or "unknown"),
+        })
+    canonical.sort(key=lambda row: (
+        row["closed_at"] or "",
+        row["market_id"] or "",
+        row["trade_id"] or "",
+        row["status"],
+    ))
+    payload = json.dumps(canonical, sort_keys=True, separators=(",", ":"), allow_nan=False)
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
 def postmortem_losers(trades: list[dict[str, Any]], *, limit: int = 5) -> dict[str, Any]:
@@ -84,6 +110,15 @@ def tune_sentiment_threshold(
         row for row in trades
         if isinstance(row, dict) and str(row.get("status") or "").upper() == "CLOSED"
     ]
+    input_fingerprint = _dataset_fingerprint(source_rows)
+    missing_trade_id_count = sum(
+        1 for row in source_rows
+        if row.get("trade_id") is None or not str(row.get("trade_id")).strip()
+    )
+    missing_market_id_count = sum(
+        1 for row in source_rows
+        if row.get("market_id") is None or not str(row.get("market_id")).strip()
+    )
     trade_id_counts = Counter(
         str(row.get("trade_id")).strip()
         for row in source_rows
@@ -107,7 +142,11 @@ def tune_sentiment_threshold(
     for row in source_rows:
         trade_id = str(row.get("trade_id")).strip() if row.get("trade_id") is not None else ""
         market_id = str(row.get("market_id")).strip() if row.get("market_id") is not None else ""
-        if (trade_id and trade_id in duplicate_trade_ids) or (market_id and market_id in duplicate_market_ids):
+        if (
+            not trade_id or not market_id
+            or trade_id in duplicate_trade_ids
+            or market_id in duplicate_market_ids
+        ):
             continue
         strength = _finite(row.get("signal_strength"))
         roi = _finite(row.get("net_roi"))
@@ -136,6 +175,11 @@ def tune_sentiment_threshold(
         "current_threshold": current,
         "new_threshold": current,
         "closed_trade_count": len(cleaned),
+        "source_closed_trade_count": len(source_rows),
+        "input_dataset_sha256": input_fingerprint,
+        "input_fingerprint_scope": "normalized_closed_trade_ids_markets_timestamps_signal_strength_net_roi_pnl_and_exit_reason",
+        "missing_trade_id_rows_excluded": missing_trade_id_count,
+        "missing_market_id_rows_excluded": missing_market_id_count,
         "invalid_timestamp_count": invalid_timestamp_count,
         "invalid_metric_count": invalid_metric_count,
         "duplicate_trade_ids_excluded": len(duplicate_trade_ids),
@@ -143,6 +187,11 @@ def tune_sentiment_threshold(
         "train_trade_count": 0,
         "holdout_trade_count": 0,
         "holdout_folds_requested": holdout_folds,
+        "train_time_start": None,
+        "train_time_end": None,
+        "holdout_time_start": None,
+        "holdout_time_end": None,
+        "training_candidate_scores": [],
         "folds_scored": 0,
         "fold_reports": [],
         "baseline_holdout_mean_roi": None,
@@ -164,6 +213,12 @@ def tune_sentiment_threshold(
 
     split = int(len(cleaned) * 0.70)
     train, holdout = cleaned[:split], cleaned[split:]
+    result.update({
+        "train_time_start": train[0]["closed_at"] if train else None,
+        "train_time_end": train[-1]["closed_at"] if train else None,
+        "holdout_time_start": holdout[0]["closed_at"] if holdout else None,
+        "holdout_time_end": holdout[-1]["closed_at"] if holdout else None,
+    })
     baseline_holdout = [row for row in holdout if row["signal_strength"] >= current]
     baseline_mean = _mean(baseline_holdout)
     baseline_holdout_net_pnl = _sum_pnl(baseline_holdout)
@@ -185,6 +240,7 @@ def tune_sentiment_threshold(
     candidates = [round(min(1.0, current * factor), 6) for factor in (1.0, 1.10, 1.20, 1.35, 1.50)]
     candidates = sorted(set(value for value in candidates if value > current + 1e-9))
     eligible = []
+    candidate_scores = []
     for threshold in candidates:
         subset = [row for row in train if row["signal_strength"] >= threshold]
         if len(subset) < minimum_train_trades:

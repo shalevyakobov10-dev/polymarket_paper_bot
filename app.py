@@ -28,6 +28,7 @@ from model_governance import ModelGovernanceLedger
 from execution_readiness import execution_readiness_payload
 from resilience import exponential_backoff_seconds, parse_retry_after
 from supervisor_status import read_supervisor_status
+from event_paper_worker import read_event_paper_worker_status
 
 GAMMA_URL = "https://gamma-api.polymarket.com/markets"
 POLL_SECONDS = max(15, int(os.getenv("POLL_SECONDS", "60")))
@@ -49,6 +50,7 @@ except (ValueError, TypeError):
     MODEL_EVALUATION_SECONDS = 21600
 DATA_DIR = Path(os.getenv("DATA_DIR", "data"))
 SUPERVISOR_STATUS_FILE = Path(os.getenv("SERVICE_SUPERVISOR_STATUS_FILE", str(DATA_DIR / "service_supervisor_status.json")))
+EVENT_PAPER_WORKER_STATUS_FILE = Path(os.getenv("EVENT_PAPER_WORKER_STATUS_FILE", str(DATA_DIR / "event_paper_worker_status.json")))
 SNAPSHOTS = DATA_DIR / "market_snapshots.jsonl"
 SIGNALS = DATA_DIR / "candidate_signals.jsonl"
 ORDERBOOK_SNAPSHOTS = DATA_DIR / "orderbook_snapshots.jsonl"
@@ -1326,6 +1328,7 @@ class Handler(BaseHTTPRequestHandler):
                 self._send(200, execution_readiness_payload())
             elif self.path == "/service-supervisor":
                 payload = read_supervisor_status(SUPERVISOR_STATUS_FILE)
+                payload["event_paper_worker"] = read_event_paper_worker_status(EVENT_PAPER_WORKER_STATUS_FILE)
                 payload.update({
                     "read_only": True,
                     "order_submission_allowed": False,

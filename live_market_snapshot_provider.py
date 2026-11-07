@@ -250,24 +250,19 @@ class LiveClobMarketSnapshotProvider:
                 _timestamp(no_book.get("exchange_timestamp")),
             ]
             if any(stamp is not None for stamp in exchange_stamps):
+                # If the SDK exposes exchange time for either outcome, require it
+                # for both and validate both against the same age ceiling.
                 if any(stamp is None for stamp in exchange_stamps):
                     skipped += 1
                     continue
-                for stamp in exchange_stamps:
-                    exchange_age = (current - stamp).total_seconds() if stamp else float("inf")
-                    if exchange_age < -10 or exchange_age > self.max_book_age_seconds:
-                        skipped += 1
-                        break
-                else:
-                    pass
-                if skipped and snapshots and snapshots[-1].get("market_id") == market["market_id"]:
-                    continue
-                if any(
-                    stamp is not None
-                    and ((current - stamp).total_seconds() < -10
-                         or (current - stamp).total_seconds() > self.max_book_age_seconds)
+                exchange_is_stale = any(
+                    (current - stamp).total_seconds() < -10
+                    or (current - stamp).total_seconds() > self.max_book_age_seconds
                     for stamp in exchange_stamps
-                ):
+                    if stamp is not None
+                )
+                if exchange_is_stale:
+                    skipped += 1
                     continue
 
             fields = (

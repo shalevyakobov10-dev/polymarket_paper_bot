@@ -201,10 +201,14 @@ class LiveClobMarketSnapshotProvider:
         raw_markets = self._fetch_markets()
         if not isinstance(raw_markets, list):
             raise ValueError("Gamma market fetch must return a list")
-        parsed = [
-            item for item in (_binary_yes_no_market(row) for row in raw_markets if isinstance(row, dict))
-            if item is not None
-        ]
+        parsed_by_id: dict[str, dict[str, Any]] = {}
+        for raw_market in raw_markets:
+            if not isinstance(raw_market, dict):
+                continue
+            item = _binary_yes_no_market(raw_market)
+            if item is not None:
+                parsed_by_id.setdefault(item["market_id"], item)
+        parsed = list(parsed_by_id.values())
         parsed.sort(
             key=lambda row: row["volume_24h"] if row["volume_24h"] is not None else -1.0,
             reverse=True,

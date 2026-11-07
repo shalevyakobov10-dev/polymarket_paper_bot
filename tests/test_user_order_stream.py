@@ -5,6 +5,7 @@ from unittest.mock import patch
 from types import SimpleNamespace
 
 from order_journal import OrderJournal
+from order_lifecycle import create_order_intent
 from polymarket.models import ClobTrade
 from polymarket.streams import UserOrderEvent, UserSpec, UserTradeEvent
 
@@ -252,6 +253,32 @@ class UserOrderStreamTests(unittest.TestCase):
     def tearDown(self):
         self.temp.cleanup()
 
+    def _create_fak_intent(self):
+        intent = create_order_intent(
+            client_order_id="local-fak-124",
+            token_id="token-456",
+            side="BUY",
+            limit_price=0.37,
+            size=12,
+        )
+        self.journal.create_intent(intent)
+        self.journal.begin_submission("local-fak-124")
+        self.journal.record_submission_response(
+            "local-fak-124",
+            outcome="accepted",
+            exchange_order_id="venue-fak-124",
+            venue_response={
+                "kind": "accepted",
+                "order_id": "venue-fak-124",
+                "status": "matched",
+                "making_amount": None,
+                "taking_amount": None,
+                "trade_ids": ["trade-fak-001"],
+                "transactions_hashes": [],
+                "order_type": "FAK",
+            },
+        )
+
     def test_partial_cumulative_update_is_persisted_and_duplicate_is_noop(self):
         first = self.processor.process(order_event(size_matched="3"))
         self.assertEqual(first["result"], "updated")
@@ -485,6 +512,64 @@ class UserOrderStreamTests(unittest.TestCase):
             result["unresolved_missing_orders"][0]["trade_history_result"],
             "partial_fill_confirmed_terminal_unknown",
         )
+
+    def test_missing_fak_partial_fill_cancels_only_the_unfilled_remainder(self):
+        self._create_fak_intent()
+        trade = clob_trade(
+            trade_id="trade-fak-001",
+            taker_order_id="venue-fak-124",
+            size="3",
+            status="CONFIRMED",
+        )
+        page = SimpleNamespace(items=(trade,), limit_reached=False, has_more=False)
+        result = __import__("asyncio").run(
+            reconcile_open_orders_snapshot(
+                FakeClient(
+                    FakeHandle(),
+                    [SimpleNamespace(items=(), limit_reached=False, has_more=False)],
+                    {"token-456": [page]},
+                ),
+                self.journal,
+            )
+        )
+        state = self.journal.get_intent("local-fak-124")
+        self.assertEqual(state["status"], "cancelled")
+        self.assertEqual(state["filled_size"], "3")
+        self.assertEqual(
+            state["last_reason_code"],
+            "fak_remainder_cancelled_from_trade_history",
+        )
+        self.assertEqual(result["trade_history_fak_partial_cancelled_orders"], 1)
+        self.assertFalse(
+            any(item["client_order_id"] == "local-fak-124"
+                for item in result["unresolved_missing_orders"])
+        )
+
+    def test_incomplete_trade_history_never_terminally_cancels_fak_remainder(self):
+        self._create_fak_intent()
+        partial = clob_trade(
+            trade_id="trade-fak-001",
+            taker_order_id="venue-fak-124",
+            size="3",
+            status="CONFIRMED",
+        )
+        incomplete_page = SimpleNamespace(
+            items=(partial,), limit_reached=True, has_more=True
+        )
+        with self.assertRaises(OrderSnapshotIncompleteError):
+            __import__("asyncio").run(
+                reconcile_open_orders_snapshot(
+                    FakeClient(
+                        FakeHandle(),
+                        [SimpleNamespace(items=(), limit_reached=False, has_more=False)],
+                        {"token-456": [incomplete_page]},
+                    ),
+                    self.journal,
+                )
+            )
+        state = self.journal.get_intent("local-fak-124")
+        self.assertEqual(state["status"], "open")
+        self.assertEqual(state["filled_size"], "0")
 
     def test_failed_trade_is_not_counted_as_a_fill(self):
         trade = clob_trade(

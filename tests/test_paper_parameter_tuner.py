@@ -154,6 +154,18 @@ class PaperParameterTunerTests(unittest.TestCase):
         self.assertEqual(len(forward["evaluation_run_sha256"]), 64)
         self.assertEqual(forward["evaluation_run_sha256"], reversed_result["evaluation_run_sha256"])
 
+    def test_dataset_fingerprint_normalizes_equivalent_timezone_offsets(self):
+        rows = [trade(i, 0.5, 0.01, 0.1) for i in range(60)]
+        utc_result = tune_sentiment_threshold(rows, current_threshold=0.3)
+        offset_rows = [dict(row) for row in rows]
+        utc_stamp = datetime.fromisoformat(offset_rows[10]["closed_at"])
+        offset_rows[10]["closed_at"] = utc_stamp.astimezone(
+            timezone(timedelta(hours=2))
+        ).isoformat()
+        offset_result = tune_sentiment_threshold(offset_rows, current_threshold=0.3)
+        self.assertEqual(utc_result["input_dataset_sha256"], offset_result["input_dataset_sha256"])
+        self.assertEqual(utc_result["evaluation_run_sha256"], offset_result["evaluation_run_sha256"])
+
     def test_postmortem_groups_losing_trades_by_exit_reason(self):
         rows = [trade(1, 0.4, -0.1, -1, "dynamic_stop_loss"),
                 trade(2, 0.5, -0.2, -2, "time_limit"),

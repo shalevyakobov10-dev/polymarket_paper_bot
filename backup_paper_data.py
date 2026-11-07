@@ -10,6 +10,7 @@ import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable
+from urllib.parse import quote
 
 
 def _sha256(path: Path) -> str:
@@ -21,7 +22,7 @@ def _sha256(path: Path) -> str:
 
 
 def _verify_sqlite(path: Path) -> None:
-    connection = sqlite3.connect(f"file:{path.as_posix()}?mode=ro", uri=True, timeout=20)
+    connection = sqlite3.connect(f"file:{quote(str(path.resolve()), safe=\"/:\")}?mode=ro", uri=True, timeout=20)
     try:
         result = [str(row[0]) for row in connection.execute("PRAGMA integrity_check")]
         if result != ["ok"]:
@@ -128,7 +129,8 @@ def create_paper_data_backups(
 
             temp_file = Path(temp_path)
             _verify_sqlite(temp_file)
-            with temp_file.open("rb") as handle:
+            with temp_file.open("rb+") as handle:
+                handle.flush()
                 os.fsync(handle.fileno())
             os.link(temp_file, destination)
             temp_file.unlink()
@@ -184,7 +186,7 @@ def main() -> int:
     parser.add_argument(
         "--retain",
         type=int,
-        default=int(os.environ.get("PAPER_BACKUP_RETAIN", "30")),
+        default=os.environ.get("PAPER_BACKUP_RETAIN", "30"),
     )
     args = parser.parse_args()
     try:

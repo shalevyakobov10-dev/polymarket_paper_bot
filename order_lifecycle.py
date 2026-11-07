@@ -103,10 +103,62 @@ def create_order_intent(
     }
 
 
+def _validate_venue_response(state: dict[str, Any]) -> None:
+    """Validate sanitized SDK response evidence retained in the immutable audit state."""
+    receipt = state.get("venue_response")
+    if receipt is None:
+        return
+    if not isinstance(receipt, dict):
+        raise ValueError("venue_response must be an object")
+    kind = receipt.get("kind")
+    if kind == "accepted":
+        allowed = {
+            "kind", "order_id", "status", "making_amount", "taking_amount",
+            "trade_ids", "transactions_hashes", "order_type",
+        }
+        if set(receipt) - allowed:
+            raise ValueError("venue_response contains unsupported accepted fields")
+        order_id = _required_text(receipt.get("order_id"), "venue_response.order_id")
+        if order_id != state.get("exchange_order_id"):
+            raise ValueError("venue_response order ID conflicts with the lifecycle state")
+        if state.get("status") not in {
+            "open", "partially_filled", "filled", "cancelled", "manual_review"
+        }:
+            raise ValueError("accepted venue_response conflicts with the lifecycle status")
+        if receipt.get("status") not in {"live", "matched", "delayed"}:
+            raise ValueError("venue_response has an unsupported accepted status")
+        if "order_type" in receipt and receipt.get("order_type") != "FAK":
+            raise ValueError("venue_response has an unsupported order type")
+        for field in ("making_amount", "taking_amount"):
+            amount = receipt.get(field)
+            if amount is not None and _decimal(amount, f"venue_response.{field}") < 0:
+                raise ValueError("venue_response amounts cannot be negative")
+        for field in ("trade_ids", "transactions_hashes"):
+            values = receipt.get(field)
+            if not isinstance(values, list) or len(values) > 100:
+                raise ValueError(f"venue_response.{field} must be a bounded list")
+            if any(
+                not isinstance(value, str) or not value.strip() or len(value) > 256
+                for value in values
+            ):
+                raise ValueError(f"venue_response.{field} contains an invalid identifier")
+    elif kind == "rejected":
+        if set(receipt) != {"kind", "code"}:
+            raise ValueError("venue_response contains unsupported rejected fields")
+        if state.get("status") != "rejected":
+            raise ValueError("rejected venue_response conflicts with the lifecycle status")
+        code = receipt.get("code")
+        if not isinstance(code, str) or not re.fullmatch(r"[a-z0-9_]{1,64}", code):
+            raise ValueError("venue_response rejection code is invalid")
+    else:
+        raise ValueError("venue_response kind is unsupported")
+
+
 def _validated_copy(intent: dict[str, Any]) -> dict[str, Any]:
     if not isinstance(intent, dict):
         raise ValueError("order intent must be a dictionary")
     state = deepcopy(intent)
+    _validate_venue_response(state)
     schema_version = state.get("schema_version")
     if isinstance(schema_version, bool) or schema_version != SCHEMA_VERSION:
         raise ValueError("unsupported order intent schema_version")
@@ -174,6 +226,7 @@ def _validated_copy(intent: dict[str, Any]) -> dict[str, Any]:
         raise ValueError("automatic retries must remain disabled")
     if state.get("execution") != "none":
         raise ValueError("this module must remain non-executing")
+    _validate_venue_response(state)
     return state
 
 

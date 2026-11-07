@@ -9,7 +9,7 @@ from __future__ import annotations
 from typing import Any
 
 
-LIVE_ORDER_SUBMISSION_IMPLEMENTED = False
+LIVE_ORDER_SUBMISSION_IMPLEMENTED = True
 
 # Polymarket Terms of Use effective 2026-08-11 state the Site and Features
 # are intended only for users aged 18 or older. This is a documented readiness
@@ -23,16 +23,20 @@ def execution_readiness_payload() -> dict[str, Any]:
     """Return an explicit, fail-closed report for the current execution mode."""
     blockers = [
         {
-            "code": "live_order_adapter_not_implemented",
-            "detail": "A separate authenticated account monitor can read open orders and user events, but there is no reviewed order-placement adapter or order-signing workflow.",
+            "code": "live_execution_disabled_by_default",
+            "detail": "A BUY-only FAK adapter using the official polymarket-client SDK exists, but LIVE_TRADING_ENABLED and LIVE_TRADING_ARMED default to false; DRY_RUN defaults to true. A separate operator-controlled release is required.",
         },
         {
-            "code": "venue_order_watchdog_not_verified",
-            "detail": "No venue-side order heartbeat/dead-man-switch policy or tested disconnect behavior is implemented; any future resting-order adapter must explicitly validate watchdog semantics and cancellation/recovery behavior before launch.",
+            "code": "live_release_gates_not_verified",
+            "detail": "The six independent live release gates must all be evidenced by the live risk context for every submission; the repository does not set them to true by default.",
+        },
+        {
+            "code": "resting_order_execution_not_supported",
+            "detail": "The adapter exposes only immediate FAK orders and deliberately does not support GTC/resting orders, batch submission, or automated cancel workflows. Ambiguous post outcomes remain blocked for reconciliation and are never retried.",
         },
         {
             "code": "account_eligibility_not_verified",
-            "detail": "Polymarket Terms of Use effective 2026-08-11 state that the Site and Features are intended only for users aged 18 or older; the operator's age and current platform eligibility have not been independently verified.",
+            "detail": "Polymarket Terms of Use effective 2026-08-11 state that users must be 18 or older. The operator has self-reported age 41, but account-level identity and eligibility still require verification.",
         },
         {
             "code": "jurisdiction_and_legal_review_not_verified",
@@ -68,7 +72,7 @@ def execution_readiness_payload() -> dict[str, Any]:
             "Validate a strategy on sufficiently large, chronological out-of-sample data after realistic fees, spread, slippage, and partial fills.",
             "Complete independent security review of wallet custody, key isolation, authentication, and secrets handling.",
             "Define hard position, exposure, daily-loss, drawdown, stale-data, and emergency-stop limits.",
-            "For any resting-order workflow, verify venue heartbeat/dead-man-switch semantics, heartbeat failure behavior, and reconciliation after disconnect before launch.",
+            "Keep the first live iteration restricted to bounded FAK orders; do not add resting GTC orders until watchdog/cancel/reconciliation semantics are independently validated.",
             "Verify cloud uptime, persistent state, alerting, backups, and incident recovery.",
             "Require a separate, explicit release decision after all gates are evidenced.",
         ],

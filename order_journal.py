@@ -873,16 +873,24 @@ class OrderJournal:
         outcome: str,
         exchange_order_id: str | None = None,
         reason_code: str | None = None,
+        venue_response: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        return self._transition(
-            client_order_id,
-            f"submission_response_{outcome}",
-            lambda state: transition_record_submission_response(
+        """Persist the lifecycle transition and sanitized venue receipt atomically."""
+        def apply(state: dict[str, Any]) -> dict[str, Any]:
+            updated = transition_record_submission_response(
                 state,
                 outcome=outcome,
                 exchange_order_id=exchange_order_id,
                 reason_code=reason_code,
-            ),
+            )
+            if venue_response is not None:
+                updated["venue_response"] = deepcopy(venue_response)
+            return updated
+
+        return self._transition(
+            client_order_id,
+            f"submission_response_{outcome}",
+            apply,
         )
 
     def reconcile_submission(

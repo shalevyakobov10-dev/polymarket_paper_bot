@@ -343,6 +343,29 @@ async def reconcile_open_orders_snapshot(
                 "status": updated["status"],
                 "filled_size": updated["filled_size"],
             }
+        elif (
+            matched_total > 0
+            and matched_total >= current_fill
+            and (intent.get("venue_response") or {}).get("order_type") == "FAK"
+        ):
+            # A complete open-order snapshot plus complete account trade history
+            # proves the immediate FAK order is no longer resting. Its matched
+            # quantity is retained and the unfilled remainder is terminally
+            # cancelled by FAK time-in-force semantics.
+            updated = journal.record_order_observation(
+                local_id,
+                outcome="cancelled",
+                matched_client_order_id=local_id,
+                exchange_order_id=exchange_id,
+                cumulative_filled_size=str(matched_total),
+                reason_code="fak_remainder_cancelled_from_trade_history",
+            )
+            history_results[local_id] = {
+                "result": "partial_fill_and_fak_remainder_cancelled",
+                "reason": "fak_unfilled_remainder_cancelled",
+                "status": updated["status"],
+                "filled_size": updated["filled_size"],
+            }
         elif matched_total > current_fill:
             updated = journal.record_order_observation(
                 local_id,
@@ -387,6 +410,10 @@ async def reconcile_open_orders_snapshot(
     trade_history_partial_orders = sum(
         1 for item in history_results.values()
         if item.get("result") == "partial_fill_confirmed_terminal_unknown"
+    )
+    trade_history_fak_partial_cancelled_orders = sum(
+        1 for item in history_results.values()
+        if item.get("result") == "partial_fill_and_fak_remainder_cancelled"
     )
     trade_history_manual_reviews = sum(
         1 for item in history_results.values() if item.get("result") == "manual_review"
@@ -439,6 +466,7 @@ async def reconcile_open_orders_snapshot(
         "trade_records_inspected": trade_records_inspected,
         "trade_history_filled_orders": trade_history_filled_orders,
         "trade_history_partial_orders": trade_history_partial_orders,
+        "trade_history_fak_partial_cancelled_orders": trade_history_fak_partial_cancelled_orders,
         "trade_history_manual_reviews": trade_history_manual_reviews,
         "trade_history_unresolved_orders": trade_history_unresolved_orders,
         "unresolved_missing_orders": unresolved,

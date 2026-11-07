@@ -10,7 +10,7 @@ class ExecutionReadinessTests(unittest.TestCase):
         report = execution_readiness_payload()
         self.assertEqual(report["mode"], "paper_only")
         self.assertEqual(report["status"], "blocked")
-        self.assertFalse(report["live_order_submission_implemented"])
+        self.assertTrue(report["live_order_submission_implemented"])
         self.assertFalse(report["live_execution_enabled"])
         self.assertFalse(report["order_submission_allowed"])
         self.assertFalse(report["order_signing_enabled"])
@@ -50,19 +50,19 @@ class ExecutionReadinessTests(unittest.TestCase):
 
     def test_blockers_include_nontechnical_requirements(self):
         codes = {item["code"] for item in execution_readiness_payload()["blockers"]}
-        self.assertIn("live_order_adapter_not_implemented", codes)
-        self.assertIn("venue_order_watchdog_not_verified", codes)
-        watchdog_blocker = next(
+        self.assertIn("live_execution_disabled_by_default", codes)
+        self.assertIn("live_release_gates_not_verified", codes)
+        self.assertIn("resting_order_execution_not_supported", codes)
+        execution_blocker = next(
             item for item in execution_readiness_payload()["blockers"]
-            if item["code"] == "venue_order_watchdog_not_verified"
+            if item["code"] == "live_execution_disabled_by_default"
         )
-        self.assertIn("heartbeat/dead-man-switch", watchdog_blocker["detail"])
-        adapter_blocker = next(
+        self.assertIn("LIVE_TRADING_ENABLED", execution_blocker["detail"])
+        resting_blocker = next(
             item for item in execution_readiness_payload()["blockers"]
-            if item["code"] == "live_order_adapter_not_implemented"
+            if item["code"] == "resting_order_execution_not_supported"
         )
-        self.assertIn("read open orders and user events", adapter_blocker["detail"])
-        self.assertIn("no reviewed order-placement adapter", adapter_blocker["detail"])
+        self.assertIn("FAK", resting_blocker["detail"])
         self.assertIn("account_eligibility_not_verified", codes)
         self.assertIn("jurisdiction_and_legal_review_not_verified", codes)
         self.assertIn("strategy_edge_not_established", codes)

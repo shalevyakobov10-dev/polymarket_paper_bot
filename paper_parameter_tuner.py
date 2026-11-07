@@ -3,7 +3,8 @@
 The tuner selects stricter thresholds using only an earlier training segment.
 It evaluates that single selected threshold on three later, contiguous
 chronological holdout windows. A paper threshold is changed only when every
-window shows positive net ROI and a minimum improvement over the active policy.
+window shows positive net ROI, improves over the active policy, and does not
+reduce total net PnL.
 It never changes a live configuration.
 """
 from __future__ import annotations
@@ -146,8 +147,13 @@ def tune_sentiment_threshold(
         "fold_reports": [],
         "baseline_holdout_mean_roi": None,
         "candidate_holdout_mean_roi": None,
+        "baseline_holdout_net_pnl": None,
+        "candidate_holdout_net_pnl": None,
+        "holdout_net_pnl_improvement": None,
         "candidate_threshold": None,
         "holdout_mean_roi_improvement": None,
+        "live_execution_eligible": False,
+        "real_money_execution": "not_implemented",
         "reason": "minimum_closed_trade_sample_not_reached",
         **postmortem_losers(cleaned),
         "research_only": True,

@@ -59,6 +59,20 @@ class EventPaperWorkerTests(unittest.TestCase):
                                              "live_execution_eligible": True,
                                              "warnings": ["sample too small"],
                                              "api_key": "must-not-persist"},
+                              "last_tuning": {
+                                  "ran_at": "2026-11-07T12:00:00+00:00",
+                                  "result": {
+                                      "status": "rejected", "applied": False,
+                                      "input_dataset_sha256": "a" * 64,
+                                      "evaluation_run_sha256": "b" * 64,
+                                      "live_execution_eligible": True,
+                                      "real_money_execution": "enabled",
+                                      "fold_reports": [{"fold": 1, "status": "rejected",
+                                                        "net_pnl_improvement": -1.0,
+                                                        "api_key": "must-not-persist"}],
+                                      "private_key": "must-not-persist",
+                                  },
+                              },
                               "POLYMARKET_PRIVATE_KEY": "must-not-persist"},
             }])
             stop = StopAfterWaits(1)
@@ -80,6 +94,13 @@ class EventPaperWorkerTests(unittest.TestCase):
             self.assertFalse(status["portfolio"]["performance"]["out_of_sample_validated"])
             self.assertFalse(status["portfolio"]["performance"]["live_execution_eligible"])
             self.assertNotIn("api_key", status["portfolio"]["performance"])
+            tuning = status["portfolio"]["last_tuning"]
+            self.assertEqual(tuning["result"]["input_dataset_sha256"], "a" * 64)
+            self.assertEqual(tuning["result"]["evaluation_run_sha256"], "b" * 64)
+            self.assertFalse(tuning["result"]["live_execution_eligible"])
+            self.assertEqual(tuning["result"]["real_money_execution"], "not_implemented")
+            self.assertNotIn("private_key", tuning["result"])
+            self.assertNotIn("api_key", tuning["result"]["fold_reports"][0])
             self.assertEqual(status["execution"], "none")
             self.assertTrue(status["research_only"])
             self.assertNotIn("environment", status)

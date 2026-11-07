@@ -172,6 +172,103 @@ class OfflineNewsPaperBotTests(unittest.TestCase):
                 finally:
                     bot.close()
 
+    def test_open_trade_uses_depth_weighted_ask_price_and_blocks_without_depth(self):
+        now = datetime(2026, 11, 7, 12, 0, tzinfo=timezone.utc)
+        row = {
+            "market_id": "depth-market", "question": "Will the example energy bill pass?",
+            "yes_token_id": "yes-token", "no_token_id": "no-token",
+            "observed_at": now.isoformat(), "yes_price": 0.41, "no_price": 0.59,
+            "yes_bid": 0.40, "yes_ask": 0.42, "no_bid": 0.58, "no_ask": 0.60,
+            "yes_book": {
+                "asks_top5": [{"price": 0.42, "size": 2}, {"price": 0.44, "size": 20}],
+                "bids_top5": [{"price": 0.40, "size": 20}],
+            },
+        }
+        signal = {
+            "direction": "YES", "score": 0.9, "threshold": 0.75,
+            "publisher_count": 2, "sentiment_confidence": 0.9,
+        }
+        with tempfile.TemporaryDirectory() as folder:
+            with self._make_config(folder):
+                bot = OfflineNewsPaperBot(PaperConfig(), news_collector=FakeNewsCollector(),
+                                          snapshot_provider=StaticProvider(row))
+                try:
+                    opened, reason = bot._open_trade(row, signal, now)
+                    self.assertEqual(reason, "")
+                    self.assertIsNotNone(opened)
+                    self.assertGreater(opened["entry_price"], row["yes_ask"])
+                    self.assertEqual(opened["levels_used"], 2)
+                    self.assertGreater(opened["price_impact_bps"], 0)
+
+                    no_depth = {**row, "market_id": "no-depth", "yes_book": {"asks_top5": [], "bids_top5": []}}
+                    blocked, block_reason = bot._open_trade(
+                        no_depth, {**signal, "direction": "YES"}, now
+                    )
+                    self.assertIsNone(blocked)
+                    self.assertEqual(block_reason, "visible_ask_depth_unavailable")
+                finally:
+                    bot.close()
+
+    def test_close_requires_full_visible_bid_depth_and_uses_weighted_exit_price(self):
+        now = datetime(2026, 11, 7, 12, 0, tzinfo=timezone.utc)
+        row = {
+            "market_id": "exit-depth-market", "question": "Will the example energy bill pass?",
+            "yes_token_id": "yes-token", "no_token_id": "no-token",
+            "observed_at": now.isoformat(), "yes_price": 0.41, "no_price": 0.59,
+            "yes_bid": 0.40, "yes_ask": 0.42, "no_bid": 0.58, "no_ask": 0.60,
+            "yes_book": {
+                "asks_top5": [{"price": 0.42, "size": 2}, {"price": 0.44, "size": 20}],
+                "bids_top5": [{"price": 0.40, "size": 20}],
+            },
+        }
+        signal = {
+            "direction": "YES", "score": 0.9, "threshold": 0.75,
+            "publisher_count": 2, "sentiment_confidence": 0.9,
+        }
+        with tempfile.TemporaryDirectory() as folder:
+            with self._make_config(folder):
+                bot = OfflineNewsPaperBot(PaperConfig(), news_collector=FakeNewsCollector(),
+                                          snapshot_provider=StaticProvider(row))
+                try:
+                    opened, reason = bot._open_trade(row, signal, now)
+                    self.assertEqual(reason, "")
+                    shares = opened["shares"]
+                    exit_row = {
+                        **row, "yes_price": 0.38, "yes_bid": 0.38, "yes_ask": 0.40,
+                        "yes_book": {
+                            "bids_top5": [{"price": 0.38, "size": 2}, {"price": 0.36, "size": 20}],
+                            "asks_top5": [{"price": 0.40, "size": 20}],
+                        },
+                    }
+                    closed, blocked = bot._close_due_trades(
+                        {"exit-depth-market": exit_row},
+                        now.replace(minute=5),
+                    )
+                    self.assertEqual(blocked, [])
+                    self.assertEqual(len(closed), 1)
+                    self.assertLess(closed[0]["exit_price"], 0.38)
+                    self.assertEqual(closed[0]["levels_used"], 2)
+
+                    # A fresh position must remain open when the visible bid ladder
+                    # cannot absorb the entire simulated exit size.
+                    other = {**row, "market_id": "thin-exit-market"}
+                    opened2, reason2 = bot._open_trade(other, signal, now)
+                    self.assertEqual(reason2, "")
+                    thin = {
+                        **exit_row, "market_id": "thin-exit-market",
+                        "yes_book": {
+                            "bids_top5": [{"price": 0.38, "size": max(0.001, opened2["shares"] / 10)}],
+                            "asks_top5": [{"price": 0.40, "size": 20}],
+                        },
+                    }
+                    closed2, blocked2 = bot._close_due_trades(
+                        {"thin-exit-market": thin}, now.replace(minute=5)
+                    )
+                    self.assertEqual(closed2, [])
+                    self.assertEqual(blocked2[0]["reason"], "insufficient_visible_bid_depth")
+                finally:
+                    bot.close()
+
     def test_one_offline_cycle_stays_simulated_only(self):
         now = datetime(2026, 11, 6, 12, 0, tzinfo=timezone.utc)
         row = {

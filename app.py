@@ -33,6 +33,10 @@ from event_paper_worker import read_event_paper_worker_status
 GAMMA_URL = "https://gamma-api.polymarket.com/markets"
 POLL_SECONDS = max(15, int(os.getenv("POLL_SECONDS", "60")))
 try:
+    EVENT_PAPER_POLL_SECONDS = min(86_400, max(30, int(os.getenv("PAPER_POLL_SECONDS", "300"))))
+except (ValueError, TypeError):
+    EVENT_PAPER_POLL_SECONDS = 300
+try:
     NEWS_POLL_SECONDS = min(3600, max(60, int(os.getenv("NEWS_POLL_SECONDS", "300"))))
 except (ValueError, TypeError):
     NEWS_POLL_SECONDS = 300
@@ -1064,7 +1068,7 @@ def health_payload(
             name="event_paper_worker",
             worker_running=paper_state in {"starting", "running", "degraded"},
             last_success_at=paper_worker_snapshot.get("last_success_at"),
-            stale_after_seconds=max(900, PAPER_POLL_SECONDS * 3),
+            stale_after_seconds=max(900, EVENT_PAPER_POLL_SECONDS * 3),
             now=current,
             last_error=paper_worker_snapshot.get("last_error_type"),
         )

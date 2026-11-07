@@ -59,6 +59,39 @@ def _write_status(path: Path, payload: dict[str, Any]) -> None:
                 pass
 
 
+def _safe_portfolio_summary(raw: Any) -> dict[str, Any] | None:
+    if not isinstance(raw, dict):
+        return None
+    import math
+    numeric_fields = (
+        "cash", "equity", "realized_pnl", "win_rate_pct",
+        "active_event_evidence_threshold", "active_sentiment_threshold",
+    )
+    integer_fields = ("open_positions", "closed_positions")
+    result: dict[str, Any] = {}
+    for field in numeric_fields:
+        value = raw.get(field)
+        if isinstance(value, bool):
+            continue
+        try:
+            parsed = float(value)
+        except (TypeError, ValueError, OverflowError):
+            continue
+        if math.isfinite(parsed):
+            result[field] = parsed
+    for field in integer_fields:
+        value = raw.get(field)
+        if isinstance(value, bool):
+            continue
+        try:
+            parsed = int(value)
+        except (TypeError, ValueError, OverflowError):
+            continue
+        if parsed >= 0:
+            result[field] = parsed
+    return result
+
+
 def read_event_paper_worker_status(
     path: str | Path,
     *,
@@ -97,6 +130,7 @@ def read_event_paper_worker_status(
             "closed_last_cycle": max(0, int(raw.get("closed_last_cycle", 0))),
             "close_blocked_last_cycle": max(0, int(raw.get("close_blocked_last_cycle", 0))),
             "last_error_type": str(raw.get("last_error_type") or "")[:80] or None,
+            "portfolio": _safe_portfolio_summary(raw.get("portfolio")),
             "mode": "OFFLINE_NEWS_PAPER_ONLY",
             "research_only": True,
             "execution": "none",
@@ -175,6 +209,7 @@ def run_worker(
         "closed_last_cycle": 0,
         "close_blocked_last_cycle": 0,
         "last_error_type": None,
+        "portfolio": None,
         "mode": "OFFLINE_NEWS_PAPER_ONLY",
         "research_only": True,
         "execution": "none",
@@ -200,6 +235,7 @@ def run_worker(
                     "closed_last_cycle": len(result.get("closed") or []),
                     "close_blocked_last_cycle": len(result.get("close_blocked") or []),
                     "last_error_type": None,
+                    "portfolio": _safe_portfolio_summary(result.get("portfolio")),
                 })
                 _write_status(target, {**status, "updated_at": _utc_now()})
                 status["updated_at"] = _utc_now()

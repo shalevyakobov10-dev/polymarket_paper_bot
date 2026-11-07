@@ -1,5 +1,9 @@
+import sqlite3
 import tempfile
 import unittest
+from datetime import datetime, timezone
+from pathlib import Path
+from types import SimpleNamespace
 from pathlib import Path
 
 from event_paper_worker import read_event_paper_worker_status, run_worker
@@ -80,6 +84,96 @@ class EventPaperWorkerTests(unittest.TestCase):
             self.assertTrue(status["research_only"])
             self.assertNotIn("environment", status)
             self.assertNotIn("command", status)
+
+    def test_successful_paper_cycle_runs_scheduled_two_database_backup(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            paper = root / "paper.sqlite3"
+            history = root / "history.sqlite3"
+            for path in (paper, history):
+                connection = sqlite3.connect(path)
+                connection.execute("CREATE TABLE sample (value TEXT)")
+                connection.commit()
+                connection.close()
+            bot = FakeBot([{
+                "markets_loaded": 1, "opened": [], "closed": [], "close_blocked": [],
+                "portfolio": {"cash": 100, "equity": 100, "realized_pnl": 0,
+                              "open_positions": 0, "closed_positions": 0},
+            }])
+            bot.config = SimpleNamespace(
+                database_path=paper,
+                market_history_database_path=history,
+            )
+            calls = []
+
+            def backup_function(paths, directory, *, retain):
+                calls.append((list(paths), Path(directory), retain))
+                return {
+                    "created_at": datetime.now(timezone.utc).isoformat(),
+                    "manifest_name": "manifest.json",
+                    "files": [{"backup_name": "paper.sqlite3"}, {"backup_name": "history.sqlite3"}],
+                    "skipped_missing_sources": [],
+                }
+
+            status_path = root / "worker.json"
+            stop = StopAfterWaits(1)
+            result = run_worker(
+                bot_factory=lambda: bot,
+                stop_event=stop,
+                status_path=status_path,
+                poll_seconds=30,
+                backup_function=backup_function,
+                backup_interval_hours=6,
+                backup_directory=root / "backups",
+                backup_retain=7,
+            )
+            self.assertEqual(result, 0)
+            self.assertEqual(len(calls), 1)
+            self.assertEqual(calls[0][0], [paper, history])
+            self.assertEqual(calls[0][1], root / "backups")
+            self.assertEqual(calls[0][2], 7)
+            status = read_event_paper_worker_status(status_path)
+            self.assertEqual(status["last_backup_at"] is not None, True)
+            self.assertEqual(status["backup_manifest_name"], "manifest.json")
+            self.assertEqual(status["backup_files_last_run"], 2)
+            self.assertIsNone(status["backup_error_type"])
+
+    def test_backup_failure_marks_worker_degraded_without_faking_backup_success(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            paper = root / "paper.sqlite3"
+            history = root / "history.sqlite3"
+            for path in (paper, history):
+                connection = sqlite3.connect(path)
+                connection.execute("CREATE TABLE sample (value TEXT)")
+                connection.commit()
+                connection.close()
+            bot = FakeBot([{
+                "markets_loaded": 1, "opened": [], "closed": [], "close_blocked": [],
+            }])
+            bot.config = SimpleNamespace(
+                database_path=paper,
+                market_history_database_path=history,
+            )
+
+            def fail_backup(*_args, **_kwargs):
+                raise OSError("private path details must not be recorded")
+
+            status_path = root / "worker.json"
+            result = run_worker(
+                bot_factory=lambda: bot,
+                stop_event=StopAfterWaits(1),
+                status_path=status_path,
+                poll_seconds=30,
+                backup_function=fail_backup,
+            )
+            self.assertEqual(result, 0)
+            status = read_event_paper_worker_status(status_path)
+            self.assertEqual(status["worker_state"], "stopped")
+            self.assertIsNone(status["last_backup_at"])
+            self.assertEqual(status["backup_error_type"], "OSError")
+            self.assertEqual(status["backup_consecutive_failures"], 1)
+            self.assertGreaterEqual(status["backup_retry_delay_seconds"], 60)
 
     def test_transient_error_retries_and_recovers(self):
         with tempfile.TemporaryDirectory() as directory:

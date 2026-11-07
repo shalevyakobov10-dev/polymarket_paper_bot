@@ -26,6 +26,7 @@ from adaptive_paper_risk import (
 from market_snapshot_provider import JsonMarketSnapshotProvider
 from live_market_snapshot_provider import LiveClobMarketSnapshotProvider
 from market_history_store import MarketHistoryStore
+from paper_orderbook_execution import simulate_buy, simulate_sell
 from event_outcome import aggregate_event_outcome_evidence, classify_event_outcome
 from news_monitor import DEFAULT_FEEDS, NewsCollector, match_news_to_markets
 from news_sentiment import aggregate_market_news_sentiment, analyze_news_sentiment
@@ -315,13 +316,20 @@ class OfflineNewsPaperBot:
                     (token_id, snapshot["market_id"], snapshot["observed_at"], mid, bid, ask),
                 )
 
-    def _close_due_trades(self, snapshots: dict[str, dict[str, Any]], now: datetime) -> list[dict[str, Any]]:
+    def _close_due_trades(
+        self,
+        snapshots: dict[str, dict[str, Any]],
+        now: datetime,
+    ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
         closed: list[dict[str, Any]] = []
+        blocked: list[dict[str, Any]] = []
         for trade in self._open_trades():
             snapshot = snapshots.get(str(trade["market_id"]))
             if snapshot is None:
                 continue
-            _token, bid, _ask, _mid = self._book_values(snapshot, str(trade["direction"]))
+            direction = str(trade["direction"])
+            suffix = "yes" if direction == "YES" else "no"
+            _token, bid, _ask, _mid = self._book_values(snapshot, direction)
             self.db.execute(
                 "UPDATE trades SET last_mark_price=? WHERE trade_id=?",
                 (bid, trade["trade_id"]),
@@ -337,29 +345,62 @@ class OfflineNewsPaperBot:
                 reason = "time_limit"
             if reason is None:
                 continue
-            shares = float(trade["shares"])
-            exit_fee = shares * bid * self.config.fee_rate
-            net_proceeds = shares * bid - exit_fee
+
+            book = snapshot.get(f"{suffix}_book")
+            bids = book.get("bids_top5") if isinstance(book, dict) else None
+            try:
+                fill = simulate_sell(bids, shares=float(trade["shares"]))
+            except ValueError:
+                fill = None
+            if fill is None:
+                blocked.append({
+                    "trade_id": trade["trade_id"], "market_id": trade["market_id"],
+                    "direction": direction, "reason": "visible_bid_depth_unavailable",
+                    "execution": "none",
+                })
+                continue
+            if abs(float(fill["best_price"]) - bid) > 1e-8:
+                blocked.append({
+                    "trade_id": trade["trade_id"], "market_id": trade["market_id"],
+                    "direction": direction, "reason": "visible_bid_depth_mismatch",
+                    "execution": "none",
+                })
+                continue
+            if fill["complete"] is not True:
+                blocked.append({
+                    "trade_id": trade["trade_id"], "market_id": trade["market_id"],
+                    "direction": direction, "reason": "insufficient_visible_bid_depth",
+                    "unfilled_shares": fill["unfilled_shares"],
+                    "execution": "none",
+                })
+                continue
+
+            exit_price = float(fill["average_price"])
+            gross_proceeds = float(fill["quote_proceeds"])
+            exit_fee = gross_proceeds * self.config.fee_rate
+            net_proceeds = gross_proceeds - exit_fee
             pnl = net_proceeds - float(trade["notional"]) - float(trade["entry_fee"])
             cost = float(trade["notional"]) + float(trade["entry_fee"])
             net_roi = pnl / cost if cost > 0 else 0.0
             self.db.execute(
                 "UPDATE trades SET status='CLOSED',closed_at=?,exit_price=?,exit_fee=?,pnl=?,"
                 "net_roi=?,exit_reason=?,last_mark_price=? WHERE trade_id=?",
-                (_iso(now), bid, exit_fee, pnl, net_roi, reason, bid, trade["trade_id"]),
+                (_iso(now), exit_price, exit_fee, pnl, net_roi, reason, bid, trade["trade_id"]),
             )
-            account = self._account()
             self.db.execute(
                 "UPDATE account_state SET cash=cash+? WHERE singleton_id=1",
                 (net_proceeds,),
             )
             closed.append({
                 "trade_id": trade["trade_id"], "market_id": trade["market_id"],
-                "direction": trade["direction"], "pnl": round(pnl, 8),
+                "direction": direction, "pnl": round(pnl, 8),
                 "net_roi": round(net_roi, 8), "exit_reason": reason,
+                "exit_price": exit_price, "best_bid": bid,
+                "price_impact_bps": fill["price_impact_bps"],
+                "levels_used": fill["levels_used"],
                 "execution": "simulated_only",
             })
-        return closed
+        return closed, blocked
 
     def _open_trade(
         self,
@@ -377,12 +418,23 @@ class OfflineNewsPaperBot:
         direction = str(signal.get("direction") or "").upper()
         if direction not in {"YES", "NO"}:
             return None, "event_direction_unverified"
-        token_id, bid, ask, mid = self._book_values(snapshot, direction)
-        spread_bps = (ask - bid) / mid * 10_000.0 if mid > 0 else float("inf")
+        token_id, bid, ask, _mid = self._book_values(snapshot, direction)
+        spread_bps = (ask - bid) / ((ask + bid) / 2.0) * 10_000.0
         if spread_bps > self.config.maximum_spread_bps:
             return None, "spread_above_limit"
+
+        suffix = "yes" if direction == "YES" else "no"
+        book = snapshot.get(f"{suffix}_book")
+        asks = book.get("asks_top5") if isinstance(book, dict) else None
+        if not isinstance(asks, list) or not asks:
+            return None, "visible_ask_depth_unavailable"
         history = self._history(token_id)
-        levels = dynamic_exit_levels(
+        account = self._account()
+        equity = self._equity()
+        exposure = sum(float(row["notional"]) for row in self._open_trades())
+        remaining_capacity = max(0.0, self.config.max_open_exposure_usd - exposure)
+
+        initial_levels = dynamic_exit_levels(
             entry_price=ask,
             price_history=history,
             volatility_multiplier=self.config.stop_volatility_multiplier,
@@ -391,23 +443,69 @@ class OfflineNewsPaperBot:
             minimum_stop_distance=self.config.minimum_stop_distance,
             maximum_stop_distance=self.config.maximum_stop_distance,
         )
-        account = self._account()
-        equity = self._equity()
-        exposure = sum(float(row["notional"]) for row in self._open_trades())
-        remaining_capacity = max(0.0, self.config.max_open_exposure_usd - exposure)
-        sizing = size_position_by_risk(
+        initial_sizing = size_position_by_risk(
             equity=equity,
             available_cash=float(account["cash"]),
             remaining_exposure_capacity=remaining_capacity,
             entry_price=ask,
-            stop_distance=levels.stop_distance,
+            stop_distance=initial_levels.stop_distance,
             risk_per_trade_pct=self.config.risk_per_trade_pct,
             max_position_usd=self.config.max_position_usd,
         )
-        if not sizing["approved"]:
+        if not initial_sizing["approved"]:
             return None, "risk_sizing_rejected"
-        notional = float(sizing["notional_usd"])
-        shares = float(sizing["shares"])
+
+        candidate_notional = float(initial_sizing["notional_usd"])
+        fill = None
+        levels = None
+        sizing = None
+        entry_price = ask
+        for _attempt in range(4):
+            try:
+                candidate_fill = simulate_buy(asks, quote_budget=candidate_notional)
+            except ValueError:
+                return None, "visible_ask_depth_unavailable"
+            if abs(float(candidate_fill["best_price"]) - ask) > 1e-8:
+                return None, "visible_ask_depth_mismatch"
+            if candidate_fill["complete"] is not True:
+                return None, "insufficient_visible_ask_depth"
+
+            candidate_entry = float(candidate_fill["average_price"])
+            candidate_levels = dynamic_exit_levels(
+                entry_price=candidate_entry,
+                price_history=history,
+                volatility_multiplier=self.config.stop_volatility_multiplier,
+                reward_to_risk=self.config.take_profit_r_multiple,
+                fallback_volatility=self.config.fallback_volatility,
+                minimum_stop_distance=self.config.minimum_stop_distance,
+                maximum_stop_distance=self.config.maximum_stop_distance,
+            )
+            candidate_sizing = size_position_by_risk(
+                equity=equity,
+                available_cash=float(account["cash"]),
+                remaining_exposure_capacity=remaining_capacity,
+                entry_price=candidate_entry,
+                stop_distance=candidate_levels.stop_distance,
+                risk_per_trade_pct=self.config.risk_per_trade_pct,
+                max_position_usd=self.config.max_position_usd,
+            )
+            if not candidate_sizing["approved"]:
+                return None, "depth_adjusted_risk_sizing_rejected"
+            allowed_notional = min(
+                candidate_notional, float(candidate_sizing["notional_usd"])
+            )
+            if allowed_notional >= candidate_notional - 1e-7:
+                fill = candidate_fill
+                levels = candidate_levels
+                sizing = candidate_sizing
+                entry_price = candidate_entry
+                break
+            candidate_notional = allowed_notional
+
+        if fill is None or levels is None or sizing is None:
+            return None, "depth_adjusted_risk_sizing_unstable"
+        notional = float(fill["quote_filled"])
+        shares = float(fill["shares_filled"])
         entry_fee = notional * self.config.fee_rate
         if notional + entry_fee > float(account["cash"]) + 1e-9:
             return None, "insufficient_paper_cash_after_fees"
@@ -419,7 +517,7 @@ class OfflineNewsPaperBot:
             "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'OPEN')",
             (
                 snapshot["market_id"], snapshot["question"], direction, token_id, _iso(now),
-                ask, shares, notional, entry_fee, levels.stop_loss_price,
+                entry_price, shares, notional, entry_fee, levels.stop_loss_price,
                 levels.take_profit_price, float(signal["score"]), abs(float(signal["score"])),
                 float(signal.get("sentiment_confidence") or 0.0), int(signal["publisher_count"]),
                 float(signal["threshold"]), bid,
@@ -431,7 +529,10 @@ class OfflineNewsPaperBot:
         )
         return {
             "market_id": snapshot["market_id"], "direction": direction,
-            "entry_price": ask, "notional": notional, "shares": shares,
+            "entry_price": entry_price, "best_ask": ask,
+            "price_impact_bps": fill["price_impact_bps"],
+            "levels_used": fill["levels_used"],
+            "notional": notional, "shares": shares,
             "stop_loss_price": levels.stop_loss_price,
             "take_profit_price": levels.take_profit_price,
             "estimated_loss_at_stop_usd": sizing["estimated_loss_at_stop_usd"],
@@ -579,7 +680,7 @@ class OfflineNewsPaperBot:
         by_market = {row["market_id"]: row for row in snapshots}
 
         with self.db:
-            closed = self._close_due_trades(by_market, current)
+            closed, close_blocked = self._close_due_trades(by_market, current)
             gates = self._update_equity_and_gates(current)
             opened = []
             decisions = []
@@ -645,7 +746,7 @@ class OfflineNewsPaperBot:
             "market_signals": len(signals),
             "qualified_event_signals": sum(1 for signal in signals.values() if signal.get("qualified") is True),
             "event_signal_method": "explicit_event_cue_publisher_consensus_v1",
-            "opened": opened, "closed": closed,
+            "opened": opened, "closed": closed, "close_blocked": close_blocked,
             "tuning": tuning, "risk_gates": final_gates, "portfolio": summary,
             "research_only": True, "execution": "none",
         }

@@ -408,3 +408,8 @@ The separate live gateway uses Polymarket's official unified Python SDK (`polyma
 The gateway intentionally does not implement SELL, GTC/resting, batch, cancel-all, or autonomous retries in this iteration. Do not arm it until legal/account eligibility, robust out-of-sample strategy evidence, independent security review, incident recovery and production monitoring are complete.
 
 The built-in authenticated client factory is intentionally EOA-only for now. The official SDK's high-level `SecureClient.create()` can automatically deploy a not-yet-deployed Deposit Wallet during client initialization; this gateway blocks signer/wallet address mismatches rather than allowing an implicit on-chain deployment. Proxy/Deposit Wallet support requires a separately reviewed, explicit deployment-state check and is not silently enabled.
+
+
+### Live public market data for paper research
+
+The offline news paper engine now defaults to `PAPER_MARKET_DATA_SOURCE=live_clob`. It discovers a bounded set of active binary markets from the public Gamma API, maps explicit YES/NO outcomes to CLOB token IDs, and fetches both public order books through the official unauthenticated SDK. A market is withheld unless both books are two-sided, non-crossed, and fresh (maximum 30 seconds by default). The simulator marks entries at the current book midpoint, not stale Gamma outcome prices. This is read-only market data only: no account credentials, signing, order submission, or live execution are used. Set `PAPER_MARKET_DATA_SOURCE=local_json` to replay manually prepared snapshots. Live public data availability is dependent on Polymarket API reachability and rate limits; an empty/failed discovery cycle yields no eligible snapshots rather than a fallback to stale prices.

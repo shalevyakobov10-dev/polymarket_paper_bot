@@ -1073,6 +1073,7 @@ def health_payload(
             last_error=paper_worker_snapshot.get("last_error_type"),
         )
         paper_component["worker_state"] = paper_state
+        paper_component["last_cycle_warning"] = paper_worker_snapshot.get("last_cycle_warning")
         paper_component["cycles"] = int(paper_worker_snapshot.get("cycles") or 0)
         paper_component["consecutive_failures"] = int(
             paper_worker_snapshot.get("consecutive_failures") or 0

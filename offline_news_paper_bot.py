@@ -770,6 +770,25 @@ class OfflineNewsPaperBot:
             [dict(row) for row in closed_rows],
             starting_cash=float(account["starting_cash"]),
         )
+        tuning_row = self.db.execute(
+            "SELECT ran_at,result_json FROM tuning_runs ORDER BY tuning_id DESC LIMIT 1"
+        ).fetchone()
+        last_tuning = None
+        if tuning_row is not None:
+            try:
+                tuning_result = json.loads(str(tuning_row["result_json"]))
+                if not isinstance(tuning_result, dict):
+                    raise ValueError("tuning result must be an object")
+                last_tuning = {
+                    "ran_at": str(tuning_row["ran_at"]),
+                    "result": tuning_result,
+                }
+            except (TypeError, ValueError, json.JSONDecodeError):
+                last_tuning = {
+                    "ran_at": str(tuning_row["ran_at"]),
+                    "status": "unreadable_audit_record",
+                    "applied": False,
+                }
         return {
             "cash": round(float(account["cash"]), 8), "equity": round(equity, 8),
             "realized_pnl": round(float(realized or 0.0), 8),
@@ -778,6 +797,7 @@ class OfflineNewsPaperBot:
             "active_event_evidence_threshold": float(account["active_sentiment_threshold"]),
             "active_sentiment_threshold": float(account["active_sentiment_threshold"]),  # backward-compatible API alias
             "performance": performance,
+            "last_tuning": last_tuning,
             "mode": ENGINE_MODE, "execution": "none",
         }
 

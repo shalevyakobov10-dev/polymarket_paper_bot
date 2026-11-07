@@ -41,6 +41,48 @@ class EventOutcomeTests(unittest.TestCase):
         self.assertIsNone(result["direction"])
         self.assertEqual(result["reason"], "conflicting_headline_cues")
 
+    def test_named_election_candidate_mismatch_abstains(self):
+        result = classify_event_outcome(
+            "Will Donald Trump win the 2024 US Presidential Election?",
+            "Joe Biden wins the US presidential election",
+        )
+        self.assertIsNone(result["direction"])
+        self.assertEqual(result["reason"], "headline_subject_mismatch")
+        self.assertEqual(result["subject_anchors"], ["donald", "trump"])
+
+    def test_named_election_candidate_match_remains_decisive(self):
+        result = classify_event_outcome(
+            "Will Donald Trump win the 2024 US Presidential Election?",
+            "Donald Trump wins the presidential election",
+        )
+        self.assertEqual(result["direction"], "YES")
+        self.assertEqual(result["subject_anchors"], ["donald", "trump"])
+
+    def test_named_product_and_model_mismatch_abstains(self):
+        result = classify_event_outcome(
+            "Will Apple launch iPhone 17 in November?",
+            "Samsung launches iPhone 16 in November",
+        )
+        self.assertIsNone(result["direction"])
+        self.assertEqual(result["reason"], "headline_subject_mismatch")
+        self.assertEqual(result["subject_anchors"], ["apple", "iphone", "17"])
+
+    def test_rate_question_does_not_use_another_central_bank_headline(self):
+        result = classify_event_outcome(
+            "Will the Fed cut interest rates in December?",
+            "European Central Bank cuts interest rates",
+        )
+        self.assertIsNone(result["direction"])
+        self.assertEqual(result["reason"], "headline_subject_mismatch")
+
+    def test_named_agreement_requires_the_named_parties(self):
+        result = classify_event_outcome(
+            "Will Israel and Hamas reach a ceasefire agreement?",
+            "Egypt and Qatar reach a ceasefire agreement",
+        )
+        self.assertIsNone(result["direction"])
+        self.assertEqual(result["reason"], "headline_subject_mismatch")
+
     def test_aggregator_counts_one_vote_per_publisher(self):
         now = 1_800_000_000.0
         rows = [

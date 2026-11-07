@@ -982,6 +982,7 @@ def health_payload(
     resolution_snapshot: dict | None = None,
     gdelt_snapshot: dict | None = None,
     learning_snapshot: dict | None = None,
+    paper_worker_snapshot: dict | None = None,
 ) -> tuple[bool, dict]:
     """Report core market readiness and separately expose optional collector degradation."""
     current = now or datetime.now(timezone.utc)
@@ -1056,6 +1057,33 @@ def health_payload(
             learning_snapshot.get("feedback_forecasts_scored_total") or 0
         )
         components["model_learning"] = learning_component
+
+    if paper_worker_snapshot is not None:
+        paper_state = str(paper_worker_snapshot.get("worker_state") or "unknown")
+        paper_component = _health_component(
+            name="event_paper_worker",
+            worker_running=paper_state in {"starting", "running", "degraded"},
+            last_success_at=paper_worker_snapshot.get("last_success_at"),
+            stale_after_seconds=max(900, PAPER_POLL_SECONDS * 3),
+            now=current,
+            last_error=paper_worker_snapshot.get("last_error_type"),
+        )
+        paper_component["worker_state"] = paper_state
+        paper_component["cycles"] = int(paper_worker_snapshot.get("cycles") or 0)
+        paper_component["consecutive_failures"] = int(
+            paper_worker_snapshot.get("consecutive_failures") or 0
+        )
+        paper_component["total_failures"] = int(
+            paper_worker_snapshot.get("total_failures") or 0
+        )
+        paper_component["heartbeat_fresh"] = bool(
+            paper_worker_snapshot.get("heartbeat_fresh")
+        )
+        if paper_state == "degraded" and paper_component["status"] == "healthy":
+            paper_component["status"] = "degraded"
+        if paper_state == "failed":
+            paper_component["status"] = "failed"
+        components["event_paper_worker"] = paper_component
 
     if stream_snapshot is not None:
         stream_worker_running = bool(stream_snapshot.get("worker_running"))
@@ -1246,7 +1274,7 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def do_GET(self):
-        if self.path in ("/", "/status", "/health", "/paper", "/news", "/matches", "/market-stream", "/resolutions", "/forecast-evaluation", "/research-features", "/independent-model-evaluation", "/model-forecasts", "/learning", "/execution-readiness", "/service-supervisor"):
+        if self.path in ("/", "/status", "/health", "/paper", "/news", "/matches", "/market-stream", "/resolutions", "/forecast-evaluation", "/research-features", "/independent-model-evaluation", "/model-forecasts", "/learning", "/execution-readiness", "/service-supervisor", "/event-paper"):
             with _lock:
                 snapshot = dict(_state)
             if self.path == "/health":
@@ -1258,6 +1286,12 @@ class Handler(BaseHTTPRequestHandler):
                     resolution_snapshot = dict(_resolution_state)
                 with _learning_lock:
                     learning_snapshot = dict(_learning_state)
+                supervisor_snapshot = read_supervisor_status(SUPERVISOR_STATUS_FILE)
+                paper_worker_snapshot = (
+                    read_event_paper_worker_status(EVENT_PAPER_WORKER_STATUS_FILE)
+                    if supervisor_snapshot.get("event_paper_worker_enabled") is True
+                    else None
+                )
                 healthy, payload = health_payload(
                     snapshot,
                     news_snapshot=news_snapshot,
@@ -1265,6 +1299,7 @@ class Handler(BaseHTTPRequestHandler):
                     resolution_snapshot=resolution_snapshot,
                     gdelt_snapshot=gdelt_snapshot,
                     learning_snapshot=learning_snapshot,
+                    paper_worker_snapshot=paper_worker_snapshot,
                 )
                 self._send(200 if healthy else 503, payload)
             elif self.path == "/paper":
@@ -1326,6 +1361,23 @@ class Handler(BaseHTTPRequestHandler):
                     })
             elif self.path == "/execution-readiness":
                 self._send(200, execution_readiness_payload())
+            elif self.path == "/event-paper":
+                supervisor_snapshot = read_supervisor_status(SUPERVISOR_STATUS_FILE)
+                if supervisor_snapshot.get("event_paper_worker_enabled") is True:
+                    worker_snapshot = read_event_paper_worker_status(EVENT_PAPER_WORKER_STATUS_FILE)
+                else:
+                    worker_snapshot = {
+                        "worker_state": "disabled",
+                        "heartbeat_fresh": False,
+                        "execution": "none",
+                    }
+                worker_snapshot.update({
+                    "mode": "OFFLINE_NEWS_PAPER_ONLY",
+                    "research_only": True,
+                    "live_execution_enabled": False,
+                    "execution": "none",
+                })
+                self._send(200, worker_snapshot)
             elif self.path == "/service-supervisor":
                 payload = read_supervisor_status(SUPERVISOR_STATUS_FILE)
                 payload["event_paper_worker"] = read_event_paper_worker_status(EVENT_PAPER_WORKER_STATUS_FILE)

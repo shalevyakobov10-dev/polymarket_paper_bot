@@ -109,7 +109,7 @@ class PaperConfig:
         self.max_daily_drawdown_pct = _float_env("PAPER_MAX_DAILY_DRAWDOWN_PCT", 0.05, 0.005, 0.25)
         self.max_portfolio_drawdown_pct = _float_env("PAPER_MAX_PORTFOLIO_DRAWDOWN_PCT", 0.20, 0.01, 0.75)
         self.fee_rate = _float_env("PAPER_FEE_RATE", 0.01, 0.0, 0.20)
-        self.min_sentiment_threshold = _float_env("NEWS_SENTIMENT_THRESHOLD", 0.35, 0.05, 1.0)
+        self.min_event_evidence_threshold = _float_env("PAPER_EVENT_EVIDENCE_THRESHOLD", 0.75, 0.51, 1.0)
         self.minimum_publishers = _int_env("NEWS_MINIMUM_PUBLISHERS", 2, 1, 20)
         self.minimum_event_consensus_ratio = _float_env("PAPER_MIN_EVENT_CONSENSUS_RATIO", 0.75, 0.51, 1.0)
         self.maximum_news_age_hours = _float_env("NEWS_MAXIMUM_AGE_HOURS", 24.0, 1.0, 168.0)
@@ -243,7 +243,7 @@ class OfflineNewsPaperBot:
             (
                 self.config.starting_cash, self.config.starting_cash,
                 self.config.starting_cash, current.date().isoformat(),
-                self.config.starting_cash, self.config.min_sentiment_threshold,
+                self.config.starting_cash, self.config.min_event_evidence_threshold,
             ),
         )
         self.db.commit()
@@ -639,7 +639,8 @@ class OfflineNewsPaperBot:
             "realized_pnl": round(float(realized or 0.0), 8),
             "open_positions": int(open_count), "closed_positions": int(closed_count),
             "win_rate_pct": round(100.0 * int(win_count) / int(closed_count), 4) if closed_count else None,
-            "active_sentiment_threshold": float(account["active_sentiment_threshold"]),
+            "active_event_evidence_threshold": float(account["active_sentiment_threshold"]),
+            "active_sentiment_threshold": float(account["active_sentiment_threshold"]),  # backward-compatible API alias
             "mode": ENGINE_MODE, "execution": "none",
         }
 

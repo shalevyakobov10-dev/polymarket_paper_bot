@@ -36,12 +36,13 @@ def market():
     }
 
 
-def book(token, bid, ask, observed):
+def book(token, bid, ask, observed, exchange=None):
     return {
         "token_id": token,
         "best_bid": bid,
         "best_ask": ask,
         "observed_at": observed,
+        "exchange_timestamp": exchange,
         "book_usable": True,
         "crossed_book": False,
         "source": "official_polymarket_python_sdk",
@@ -88,6 +89,47 @@ class LiveMarketSnapshotProviderTests(unittest.TestCase):
             with patch.object(live, "fetch_order_books", return_value=books):
                 rows = live.LiveClobMarketSnapshotProvider(market_limit=1).load(now=now)
         self.assertEqual(rows, [])
+
+    def test_withholds_freshly_received_book_with_stale_exchange_timestamp(self):
+        now = datetime(2026, 11, 7, 10, 0, tzinfo=timezone.utc)
+        fresh = now.isoformat()
+        stale_exchange = "2026-11-07T09:59:00+00:00"
+        books = {
+            "yes-token": book("yes-token", 0.50, 0.52, fresh, stale_exchange),
+            "no-token": book("no-token", 0.48, 0.50, fresh, fresh),
+        }
+        with patch.object(live, "urlopen", return_value=FakeResponse([market()])):
+            with patch.object(live, "fetch_order_books", return_value=books):
+                rows = live.LiveClobMarketSnapshotProvider(market_limit=1).load(now=now)
+        self.assertEqual(rows, [])
+
+    def test_withholds_future_or_malformed_exchange_timestamp(self):
+        now = datetime(2026, 11, 7, 10, 0, tzinfo=timezone.utc)
+        fresh = now.isoformat()
+        for invalid in ("2026-11-07T10:00:10+00:00", "2026-11-07T10:00:00", "not-a-timestamp"):
+            with self.subTest(exchange_timestamp=invalid):
+                books = {
+                    "yes-token": book("yes-token", 0.50, 0.52, fresh, invalid),
+                    "no-token": book("no-token", 0.48, 0.50, fresh, fresh),
+                }
+                with patch.object(live, "urlopen", return_value=FakeResponse([market()])):
+                    with patch.object(live, "fetch_order_books", return_value=books):
+                        rows = live.LiveClobMarketSnapshotProvider(market_limit=1).load(now=now)
+                self.assertEqual(rows, [])
+
+    def test_accepts_fresh_exchange_timestamps_and_preserves_book_evidence(self):
+        now = datetime(2026, 11, 7, 10, 0, tzinfo=timezone.utc)
+        fresh = now.isoformat()
+        exchange = "2026-11-07T09:59:50+00:00"
+        books = {
+            "yes-token": book("yes-token", 0.50, 0.52, fresh, exchange),
+            "no-token": book("no-token", 0.48, 0.50, fresh, fresh),
+        }
+        with patch.object(live, "urlopen", return_value=FakeResponse([market()])):
+            with patch.object(live, "fetch_order_books", return_value=books):
+                rows = live.LiveClobMarketSnapshotProvider(market_limit=1).load(now=now)
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["yes_book"]["exchange_timestamp"], exchange)
 
     def test_withholds_market_when_one_side_is_not_usable(self):
         now = datetime(2026, 11, 7, 10, 0, tzinfo=timezone.utc)

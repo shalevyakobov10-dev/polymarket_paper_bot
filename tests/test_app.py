@@ -284,18 +284,20 @@ class ParserTests(unittest.TestCase):
         healthy, payload = app.health_payload(
             core, now, paper_worker_snapshot=backup_degraded
         )
-        self.assertTrue(healthy)
+        self.assertFalse(healthy)
+        self.assertEqual(payload["status"], "unhealthy")
         self.assertEqual(payload["components"]["event_paper_worker"]["status"], "degraded")
+        self.assertIn("event_paper_worker", payload["required_component_failures"])
         self.assertEqual(
             payload["components"]["event_paper_worker"]["backup_error_type"], "OSError"
         )
 
         degraded = {**paper, "worker_state": "degraded", "consecutive_failures": 2}
         healthy, payload = app.health_payload(core, now, paper_worker_snapshot=degraded)
-        self.assertTrue(healthy)
-        self.assertEqual(payload["status"], "degraded")
+        self.assertFalse(healthy)
+        self.assertEqual(payload["status"], "unhealthy")
         self.assertEqual(payload["components"]["event_paper_worker"]["status"], "degraded")
-        self.assertIn("event_paper_worker", payload["degraded_components"])
+        self.assertIn("event_paper_worker", payload["required_component_failures"])
 
         stale = {
             **paper,
@@ -303,7 +305,8 @@ class ParserTests(unittest.TestCase):
             "heartbeat_fresh": False,
         }
         healthy, payload = app.health_payload(core, now, paper_worker_snapshot=stale)
-        self.assertTrue(healthy)
+        self.assertFalse(healthy)
+        self.assertEqual(payload["status"], "unhealthy")
         self.assertEqual(payload["components"]["event_paper_worker"]["status"], "stale")
 
     def test_health_reports_model_learning_worker_freshness(self):

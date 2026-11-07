@@ -111,7 +111,6 @@ class MarketHistoryStoreTests(unittest.TestCase):
         self.assertEqual(version, 1)
         self.store.db.execute("PRAGMA user_version=999")
         self.store.db.commit()
-        self.store.close()
         with self.assertRaisesRegex(RuntimeError, "newer than supported"):
             MarketHistoryStore(self.path)
 

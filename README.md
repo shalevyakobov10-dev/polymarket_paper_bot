@@ -413,3 +413,10 @@ The built-in authenticated client factory is intentionally EOA-only for now. The
 ### Live public market data for paper research
 
 The offline news paper engine now defaults to `PAPER_MARKET_DATA_SOURCE=live_clob`. It discovers a bounded set of active binary markets from the public Gamma API, maps explicit YES/NO outcomes to CLOB token IDs, and fetches both public order books through the official unauthenticated SDK. A market is withheld unless both books are two-sided, non-crossed, and fresh (maximum 30 seconds by default). The simulator marks entries at the current book midpoint, not stale Gamma outcome prices. This is read-only market data only: no account credentials, signing, order submission, or live execution are used. Set `PAPER_MARKET_DATA_SOURCE=local_json` to replay manually prepared snapshots. Live public data availability is dependent on Polymarket API reachability and rate limits; an empty/failed discovery cycle yields no eligible snapshots rather than a fallback to stale prices.
+
+
+## Event-aware paper engine market-history archive
+
+The event-aware paper engine also writes each acquired market snapshot to the versioned, append-only SQLite database at `MARKET_HISTORY_DATABASE_PATH` (default `./data/market_history.sqlite3`). It records the observed UTC timestamp, local capture timestamp, YES/NO best bid and ask, calculated midpoints, 24-hour volume when available, source labels, and the visible top-five bid/ask levels for both outcomes. The archive uses SQLite WAL, full synchronous commits, market/time indexes, a schema version, and idempotent inserts for duplicate market observations. A changed quote at the same timestamp is retained as a separate observation.
+
+The archive is written before news signals or paper decisions are evaluated. If its write fails, that polling cycle stops rather than continuing without the market-data audit record. It is a local research archive; it does not turn midpoint marks into executable fills, reconstruct full historical order books, or enable real-money trading. Keep the SQLite file on a persistent single-writer volume and back it up with the rest of the research data.

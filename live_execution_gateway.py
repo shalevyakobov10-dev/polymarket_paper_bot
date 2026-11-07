@@ -363,6 +363,8 @@ class LiveExecutionGateway:
             # Only an explicit False is a verified tradable account state.
             # None, malformed values, and unexpected SDK responses must block.
             closed_only_mode = client.get_closed_only_mode()
+            if closed_only_mode is True:
+                return self._blocked("account_is_closed_only")
             if closed_only_mode is not False:
                 return self._blocked("account_closed_only_status_unverified")
             balance_allowance = client.get_balance_allowance(asset_type=self._collateral_asset_type())

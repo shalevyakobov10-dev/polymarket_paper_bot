@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from offline_news_paper_bot import OfflineNewsPaperBot
+from backup_paper_data import create_paper_data_backups
 
 STATUS_SCHEMA_VERSION = 1
 
@@ -34,6 +35,40 @@ def _poll_seconds(value: Any = None) -> int:
     if not 30 <= parsed <= 86_400:
         raise ValueError("PAPER_POLL_SECONDS must be between 30 and 86400")
     return parsed
+
+
+def _backup_interval_seconds(value: Any = None) -> float:
+    raw = value if value is not None else os.getenv("PAPER_BACKUP_INTERVAL_HOURS", "6")
+    try:
+        parsed = float(raw)
+    except (TypeError, ValueError, OverflowError):
+        raise ValueError("PAPER_BACKUP_INTERVAL_HOURS must be a number") from None
+    if not 1.0 <= parsed <= 168.0:
+        raise ValueError("PAPER_BACKUP_INTERVAL_HOURS must be between 1 and 168")
+    return parsed * 3600.0
+
+
+def _backup_retain(value: Any = None) -> int:
+    raw = value if value is not None else os.getenv("PAPER_BACKUP_RETAIN", "30")
+    try:
+        parsed = int(raw)
+    except (TypeError, ValueError, OverflowError):
+        raise ValueError("PAPER_BACKUP_RETAIN must be an integer") from None
+    if not 1 <= parsed <= 365:
+        raise ValueError("PAPER_BACKUP_RETAIN must be between 1 and 365")
+    return parsed
+
+
+def _parse_utc(value: Any) -> datetime | None:
+    if not isinstance(value, str) or not value.strip():
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except (TypeError, ValueError, OverflowError):
+        return None
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        return None
+    return parsed.astimezone(timezone.utc)
 
 
 def _write_status(path: Path, payload: dict[str, Any]) -> None:
@@ -193,6 +228,13 @@ def read_event_paper_worker_status(
             "close_blocked_last_cycle": max(0, int(raw.get("close_blocked_last_cycle", 0))),
             "last_error_type": str(raw.get("last_error_type") or "")[:80] or None,
             "portfolio": _safe_portfolio_summary(raw.get("portfolio")),
+            "last_backup_at": raw.get("last_backup_at"),
+            "last_backup_attempt_at": raw.get("last_backup_attempt_at"),
+            "backup_manifest_name": str(raw.get("backup_manifest_name") or "")[:200] or None,
+            "backup_files_last_run": max(0, int(raw.get("backup_files_last_run", 0))),
+            "backup_error_type": str(raw.get("backup_error_type") or "")[:80] or None,
+            "backup_consecutive_failures": max(0, int(raw.get("backup_consecutive_failures", 0))),
+            "backup_retry_delay_seconds": max(0.0, float(raw.get("backup_retry_delay_seconds", 0.0))),
             "mode": "OFFLINE_NEWS_PAPER_ONLY",
             "research_only": True,
             "execution": "none",
@@ -245,16 +287,33 @@ def run_worker(
     status_path: str | Path | None = None,
     poll_seconds: int | None = None,
     max_consecutive_failures: int = 5,
+    backup_function: Callable[..., dict[str, Any]] | None = create_paper_data_backups,
+    backup_interval_hours: float | None = None,
+    backup_directory: str | Path | None = None,
+    backup_retain: int | None = None,
 ) -> int:
     """Run cycles continuously; retry transient faults and exit after bounded failures."""
     if isinstance(max_consecutive_failures, bool) or not isinstance(max_consecutive_failures, int) or max_consecutive_failures < 1:
         raise ValueError("max_consecutive_failures must be a positive integer")
     interval = _poll_seconds(poll_seconds)
+    backup_interval = _backup_interval_seconds(backup_interval_hours)
+    retain_backups = _backup_retain(backup_retain)
     stopping = stop_event or threading.Event()
     target = Path(status_path or os.getenv(
         "EVENT_PAPER_WORKER_STATUS_FILE", "./data/event_paper_worker_status.json"
     )).expanduser()
     started = _utc_now()
+    previous: dict[str, Any] = {}
+    try:
+        loaded = json.loads(target.read_text(encoding="utf-8"))
+        if isinstance(loaded, dict) and loaded.get("schema_version") == STATUS_SCHEMA_VERSION:
+            previous = loaded
+    except (OSError, UnicodeError, TypeError, ValueError, json.JSONDecodeError):
+        previous = {}
+    last_backup_at = _parse_utc(previous.get("last_backup_at"))
+    last_backup_attempt_at = _parse_utc(previous.get("last_backup_attempt_at"))
+    backup_failures = max(0, int(previous.get("backup_consecutive_failures", 0) or 0))
+    backup_retry_delay = max(0.0, float(previous.get("backup_retry_delay_seconds", 0.0) or 0.0))
     status: dict[str, Any] = {
         "schema_version": STATUS_SCHEMA_VERSION,
         "worker_state": "starting",
@@ -272,6 +331,13 @@ def run_worker(
         "close_blocked_last_cycle": 0,
         "last_error_type": None,
         "portfolio": None,
+        "last_backup_at": last_backup_at.isoformat() if last_backup_at else None,
+        "last_backup_attempt_at": last_backup_attempt_at.isoformat() if last_backup_attempt_at else None,
+        "backup_manifest_name": previous.get("backup_manifest_name"),
+        "backup_files_last_run": max(0, int(previous.get("backup_files_last_run", 0) or 0)),
+        "backup_error_type": previous.get("backup_error_type"),
+        "backup_consecutive_failures": backup_failures,
+        "backup_retry_delay_seconds": backup_retry_delay,
         "mode": "OFFLINE_NEWS_PAPER_ONLY",
         "research_only": True,
         "execution": "none",
@@ -286,7 +352,7 @@ def run_worker(
             try:
                 result = bot.run_once()
                 status.update({
-                    "worker_state": "running",
+                    "worker_state": "degraded" if status.get("backup_error_type") else "running",
                     "last_cycle_at": cycle_started,
                     "last_success_at": _utc_now(),
                     "cycles": status["cycles"] + 1,
@@ -299,6 +365,67 @@ def run_worker(
                     "last_error_type": None,
                     "portfolio": _safe_portfolio_summary(result.get("portfolio")),
                 })
+
+                bot_config = getattr(bot, "config", None)
+                paper_database = getattr(bot_config, "database_path", None)
+                history_database = getattr(bot_config, "market_history_database_path", None)
+                backup_ready = (
+                    backup_function is not None
+                    and paper_database is not None
+                    and history_database is not None
+                    and Path(paper_database).is_file()
+                    and Path(history_database).is_file()
+                )
+                current_backup_check = datetime.now(timezone.utc)
+                backup_due = (
+                    last_backup_at is None
+                    or (current_backup_check - last_backup_at).total_seconds() >= backup_interval
+                )
+                retry_ready = (
+                    last_backup_attempt_at is None
+                    or (current_backup_check - last_backup_attempt_at).total_seconds() >= backup_retry_delay
+                )
+                if backup_ready and backup_due and retry_ready:
+                    last_backup_attempt_at = current_backup_check
+                    status["last_backup_attempt_at"] = last_backup_attempt_at.isoformat()
+                    try:
+                        chosen_directory = Path(
+                            backup_directory
+                            or os.getenv(
+                                "PAPER_BACKUP_DIRECTORY",
+                                str(Path(paper_database).expanduser().parent / "backups"),
+                            )
+                        ).expanduser()
+                        backup_result = backup_function(
+                            [paper_database, history_database],
+                            chosen_directory,
+                            retain=retain_backups,
+                        )
+                        if backup_result.get("skipped_missing_sources") or len(backup_result.get("files") or []) != 2:
+                            raise RuntimeError("both paper databases must be present in each backup")
+                        last_backup_at = _parse_utc(str(backup_result.get("created_at") or ""))
+                        if last_backup_at is None:
+                            raise RuntimeError("backup result did not contain a valid timestamp")
+                        backup_failures = 0
+                        backup_retry_delay = 0.0
+                        status.update({
+                            "last_backup_at": last_backup_at.isoformat(),
+                            "backup_manifest_name": str(backup_result.get("manifest_name") or "")[:200],
+                            "backup_files_last_run": len(backup_result.get("files") or []),
+                            "backup_error_type": None,
+                            "backup_consecutive_failures": 0,
+                            "backup_retry_delay_seconds": 0.0,
+                            "worker_state": "running",
+                        })
+                    except Exception as backup_exc:
+                        backup_failures += 1
+                        backup_retry_delay = min(3600.0, 60.0 * (2 ** min(backup_failures - 1, 6)))
+                        status.update({
+                            "worker_state": "degraded",
+                            "backup_error_type": type(backup_exc).__name__[:80],
+                            "backup_consecutive_failures": backup_failures,
+                            "backup_retry_delay_seconds": backup_retry_delay,
+                        })
                 _write_status(target, {**status, "updated_at": _utc_now()})
                 status["updated_at"] = _utc_now()
                 if _wait_with_heartbeat(stopping, interval, path=target, status=status):

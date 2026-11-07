@@ -190,8 +190,10 @@ class LiveClobMarketSnapshotProvider:
         return fetch_active_gamma_markets(page_size=self.page_size, max_pages=self.max_pages)
 
     def _fetch_books(self, tokens: list[str]) -> dict[str, dict[str, Any]]:
-        fetcher = self.orderbook_fetcher or fetch_order_books
-        return fetcher([{"token_id": token} for token in tokens])
+        rows = [{"token_id": token} for token in tokens]
+        if self.orderbook_fetcher is not None:
+            return self.orderbook_fetcher(rows)
+        return fetch_order_books(rows, max_tokens=min(100, 2 * self.max_markets))
 
     def load(self, *, now: datetime | None = None) -> list[dict[str, Any]]:
         current = now or datetime.now(timezone.utc)

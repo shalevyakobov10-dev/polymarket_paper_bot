@@ -277,7 +277,7 @@ class LiveExecutionGatewayTests(unittest.TestCase):
     def test_closed_only_account_is_blocked_before_submission(self):
         self.client.closed_only = True
         result = self._run_gateway()
-        self.assertEqual(result["reason"], "account_closed_only_status_unverified")
+        self.assertEqual(result["reason"], "account_is_closed_only")
         self.assertEqual(self.client.posts, [])
         self.assertEqual(self.journal.get_intent("paper-intent-001")["status"], "prepared")
 

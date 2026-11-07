@@ -148,6 +148,10 @@ class ResolvedEventEvaluationTests(unittest.TestCase):
         )
         result = self._evaluate()
         self.assertEqual(result["metrics"]["n"], 2)
+        self.assertEqual(result["metrics"]["actual_paper_closed_trade_count"], 2)
+        self.assertAlmostEqual(result["metrics"]["actual_paper_realized_net_pnl_usd"], 0.2)
+        # Actual realized Paper PnL is reported separately from the larger
+        # counterfactual payout that assumes holding each position to settlement.
         winner = next(row for row in result["trades"] if row["market_id"] == "market-win")
         loser = next(row for row in result["trades"] if row["market_id"] == "market-loss")
         self.assertTrue(winner["prediction_correct"])

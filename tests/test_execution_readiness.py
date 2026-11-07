@@ -32,7 +32,7 @@ class ExecutionReadinessTests(unittest.TestCase):
     def test_blockers_include_nontechnical_requirements(self):
         codes = {item["code"] for item in execution_readiness_payload()["blockers"]}
         self.assertIn("live_order_adapter_not_implemented", codes)
-        self.assertIn("account_eligibility_not_verified", codes)
+        self.assertIn("platform_account_eligibility_not_verified", codes)
         self.assertIn("jurisdiction_and_legal_review_not_verified", codes)
         self.assertIn("strategy_edge_not_established", codes)
         self.assertIn("production_operations_not_verified", codes)

@@ -1120,14 +1120,23 @@ def health_payload(
         stream_component["last_message_at"] = stream_snapshot.get("last_message_at")
         components["market_stream"] = stream_component
 
-    healthy = market_component["status"] == "healthy"
+    required_components = ["market_data"]
+    if paper_worker_snapshot is not None:
+        required_components.append("event_paper_worker")
+    healthy = all(components[name]["status"] == "healthy" for name in required_components)
     degraded = [
         name for name, component in components.items()
-        if name != "market_data" and component["status"] != "healthy"
+        if name not in required_components and component["status"] != "healthy"
+    ]
+    required_failures = [
+        name for name in required_components
+        if components[name]["status"] != "healthy"
     ]
     payload = {
         "ok": healthy,
         "status": "unhealthy" if not healthy else ("degraded" if degraded else "healthy"),
+        "required_components": required_components,
+        "required_component_failures": required_failures,
         "mode": "paper_only",
         "worker_running": bool(snapshot.get("worker_running")),
         "last_success_at": snapshot.get("last_success_at"),
@@ -1139,7 +1148,7 @@ def health_payload(
         "next_retry_at": snapshot.get("next_retry_at"),
         "components": components,
         "degraded_components": degraded,
-        "health_policy": "market_data_is_required; news_gdelt_resolution_stream_and_model_learning_are_reported_as_optional_degraded_components",
+        "health_policy": "market_data_is_required; event_paper_worker_is_required_when_enabled; news_gdelt_resolution_stream_and_model_learning_are_optional",
     }
     if not healthy and not payload["last_error"]:
         payload["last_error"] = "No recent successful market poll"

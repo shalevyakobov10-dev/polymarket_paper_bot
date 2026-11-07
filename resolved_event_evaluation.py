@@ -191,7 +191,7 @@ def _load_decision_trade_pairs(path: str | Path) -> tuple[list[dict[str, Any]], 
         ).fetchall()
         trades = connection.execute(
             """
-            SELECT trade_id, market_id, direction, opened_at, entry_price,
+            SELECT trade_id, market_id, question, direction, opened_at, entry_price,
                    shares, notional, entry_fee, signal_strength, entry_threshold,
                    status, closed_at, pnl
             FROM trades

@@ -160,11 +160,13 @@ def tune_sentiment_threshold(
     train, holdout = cleaned[:split], cleaned[split:]
     baseline_holdout = [row for row in holdout if row["signal_strength"] >= current]
     baseline_mean = _mean(baseline_holdout)
+    baseline_holdout_net_pnl = _sum_pnl(baseline_holdout)
     result.update({
         "train_trade_count": len(train),
         "holdout_trade_count": len(holdout),
         "baseline_holdout_trade_count": len(baseline_holdout),
         "baseline_holdout_mean_roi": round(baseline_mean, 8) if baseline_mean is not None else None,
+        "baseline_holdout_net_pnl": round(baseline_holdout_net_pnl, 8),
     })
     if (
         len(train) < minimum_train_trades
@@ -199,6 +201,9 @@ def tune_sentiment_threshold(
         "candidate_holdout_trade_count": len(candidate_holdout),
         "candidate_holdout_mean_roi": round(candidate_mean, 8) if candidate_mean is not None else None,
         "candidate_holdout_net_pnl": round(_sum_pnl(candidate_holdout), 8),
+        "holdout_net_pnl_improvement": round(
+            _sum_pnl(candidate_holdout) - baseline_holdout_net_pnl, 8
+        ),
     })
     if len(candidate_holdout) < minimum_holdout_trades:
         result["status"] = "rejected"
@@ -223,7 +228,9 @@ def tune_sentiment_threshold(
             "status": "insufficient_data",
             "baseline_mean_net_roi": None,
             "candidate_mean_net_roi": None,
+            "baseline_net_pnl": round(_sum_pnl(baseline_fold), 8),
             "candidate_net_pnl": round(_sum_pnl(candidate_fold), 8),
+            "net_pnl_improvement": round(_sum_pnl(candidate_fold) - _sum_pnl(baseline_fold), 8),
             "net_roi_improvement": None,
         }
         if (
@@ -246,6 +253,7 @@ def tune_sentiment_threshold(
             candidate_fold_mean is not None
             and candidate_fold_mean > 0
             and _sum_pnl(candidate_fold) > 0
+            and _sum_pnl(candidate_fold) >= _sum_pnl(baseline_fold)
             and improvement is not None
             and improvement >= 0.001
         )
@@ -254,7 +262,11 @@ def tune_sentiment_threshold(
             "baseline_mean_net_roi": round(baseline_fold_mean, 8) if baseline_fold_mean is not None else None,
             "candidate_mean_net_roi": round(candidate_fold_mean, 8) if candidate_fold_mean is not None else None,
             "net_roi_improvement": round(improvement, 8) if improvement is not None else None,
-            "reason": "positive_net_roi_and_improvement" if passed else "fold_did_not_meet_positive_net_roi_and_improvement",
+            "reason": (
+                "positive_net_roi_improvement_and_non_decreasing_total_net_pnl"
+                if passed else
+                "fold_did_not_meet_positive_net_roi_improvement_and_net_pnl"
+            ),
         })
         fold_passes.append(passed)
         fold_reports.append(fold_report)
@@ -280,6 +292,7 @@ def tune_sentiment_threshold(
         candidate_mean is not None
         and candidate_mean > 0
         and _sum_pnl(candidate_holdout) > 0
+        and _sum_pnl(candidate_holdout) >= baseline_holdout_net_pnl
         and pooled_improvement is not None
         and pooled_improvement >= 0.001
     ):
@@ -287,9 +300,9 @@ def tune_sentiment_threshold(
             "status": "validated_for_paper_only",
             "applied": True,
             "new_threshold": selected_threshold,
-            "reason": "candidate_improved_every_chronological_holdout_fold",
+            "reason": "candidate_improved_every_fold_without_reducing_total_net_pnl",
         })
     else:
         result["status"] = "rejected"
-        result["reason"] = "holdout_did_not_show_required_pooled_positive_improvement"
+        result["reason"] = "holdout_did_not_show_required_pooled_roi_and_net_pnl_improvement"
     return result

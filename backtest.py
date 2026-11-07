@@ -9,6 +9,7 @@ import argparse
 import json
 import math
 import os
+import random
 import tempfile
 import time
 from collections import defaultdict
@@ -25,6 +26,9 @@ GAMMA_BASE = "https://gamma-api.polymarket.com"
 CLOB_BASE = "https://clob.polymarket.com"
 USER_AGENT = "PolymarketPaperBacktest/1.0"
 MINIMUM_CLOSED_TRADES_FOR_DESCRIPTIVE_METRICS = 30
+MINIMUM_MARKET_CLUSTERS_FOR_BOOTSTRAP = 10
+MARKET_CLUSTER_BOOTSTRAP_REPLICATES = 2000
+MARKET_CLUSTER_BOOTSTRAP_SEED = 20261104
 
 
 def trade_sample_quality(closed_trades: int) -> dict[str, Any]:
@@ -286,11 +290,48 @@ def evaluate_forward_returns(
 
             event_count = len(events)
             token_counts_sorted = sorted(token_counts.values(), reverse=True)
-            market_means = [
+            market_means = sorted(
                 sum(values) / len(values)
                 for values in market_returns.values()
                 if values
-            ]
+            )
+            bootstrap_lower_pct = None
+            bootstrap_upper_pct = None
+            bootstrap_status = "insufficient_market_clusters"
+            bootstrap_replicates = 0
+            cluster_count = len(market_means)
+            if cluster_count >= MINIMUM_MARKET_CLUSTERS_FOR_BOOTSTRAP:
+                # Resample market-level means, not individual events. Sorting the
+                # cluster means and fixing the seed makes the report reproducible
+                # regardless of input row order.
+                rng = random.Random(MARKET_CLUSTER_BOOTSTRAP_SEED)
+                bootstrap_means = sorted(
+                    sum(
+                        market_means[rng.randrange(cluster_count)]
+                        for _ in range(cluster_count)
+                    ) / cluster_count
+                    for _ in range(MARKET_CLUSTER_BOOTSTRAP_REPLICATES)
+                )
+
+                def percentile(values: list[float], fraction: float) -> float:
+                    position = (len(values) - 1) * fraction
+                    lower_index = int(math.floor(position))
+                    upper_index = min(lower_index + 1, len(values) - 1)
+                    weight = position - lower_index
+                    return (
+                        values[lower_index] * (1.0 - weight)
+                        + values[upper_index] * weight
+                    )
+
+                bootstrap_lower_pct = round(
+                    100.0 * percentile(bootstrap_means, 0.025), 5
+                )
+                bootstrap_upper_pct = round(
+                    100.0 * percentile(bootstrap_means, 0.975), 5
+                )
+                bootstrap_status = "estimated"
+                bootstrap_replicates = MARKET_CLUSTER_BOOTSTRAP_REPLICATES
+
             return {
                 "return_observations": event_count,
                 "unique_tokens": len(token_counts),
@@ -312,9 +353,24 @@ def evaluate_forward_returns(
                     round(100.0 * sum(market_means) / len(market_means), 5)
                     if market_means else None
                 ),
+                "market_equal_weight_bootstrap_95pct_interval": {
+                    "status": bootstrap_status,
+                    "confidence_level_pct": 95.0,
+                    "market_clusters": cluster_count,
+                    "minimum_market_clusters": MINIMUM_MARKET_CLUSTERS_FOR_BOOTSTRAP,
+                    "bootstrap_replicates": bootstrap_replicates,
+                    "lower_mean_return_pct": bootstrap_lower_pct,
+                    "upper_mean_return_pct": bootstrap_upper_pct,
+                    "method": (
+                        "percentile bootstrap over market-equal-weighted mean returns; "
+                        "markets are resampled as clusters, not individual events"
+                    ),
+                },
                 "interpretation": (
-                    "Descriptive concentration only; repeated events from a token or market "
-                    "may be correlated and are not independent samples."
+                    "Descriptive research only. The bootstrap interval requires enough "
+                    "distinct market IDs and assumes market clusters are sufficiently "
+                    "independent; shared news, time, or macro factors can still correlate "
+                    "markets. It is not evidence of a tradable edge."
                 ),
             }
 

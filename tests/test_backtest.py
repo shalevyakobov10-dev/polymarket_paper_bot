@@ -132,7 +132,11 @@ class BacktestTests(unittest.TestCase):
         self.assertAlmostEqual(concentration["top_token_event_share_pct"], 66.667)
         self.assertAlmostEqual(concentration["top_three_tokens_event_share_pct"], 100.0)
         self.assertIsNotNone(concentration["market_equal_weight_mean_return_pct"])
-        self.assertIn("not independent samples", concentration["interpretation"])
+        interval = concentration["market_equal_weight_bootstrap_95pct_interval"]
+        self.assertEqual(interval["status"], "insufficient_market_clusters")
+        self.assertEqual(interval["market_clusters"], 2)
+        self.assertIsNone(interval["lower_mean_return_pct"])
+        self.assertIn("shared news", concentration["interpretation"])
 
     def test_forward_return_concentration_marks_missing_market_identity(self):
         history = [
@@ -148,6 +152,44 @@ class BacktestTests(unittest.TestCase):
         self.assertEqual(concentration["unique_markets_with_market_id"], 0)
         self.assertEqual(concentration["market_id_coverage_pct"], 0.0)
         self.assertIsNone(concentration["market_equal_weight_mean_return_pct"])
+        self.assertEqual(
+            concentration["market_equal_weight_bootstrap_95pct_interval"]["status"],
+            "insufficient_market_clusters",
+        )
+
+    def test_market_cluster_bootstrap_interval_is_reproducible(self):
+        history = []
+        for index in range(10):
+            token_id = f"token-{index}"
+            market_id = f"market-{index}"
+            start = 1_800_000_000 + index * 10_000
+            future_price = 0.54 + index * 0.003
+            history.extend([
+                {"timestamp": start, "token_id": token_id,
+                 "market_id": market_id, "observed_price": 0.50},
+                {"timestamp": start + 3600, "token_id": token_id,
+                 "market_id": market_id, "observed_price": 0.56},
+                {"timestamp": start + 7200, "token_id": token_id,
+                 "market_id": market_id, "observed_price": future_price},
+            ])
+
+        first = evaluate_forward_returns(
+            history, threshold=0.03, horizons_hours=(1,)
+        )["horizons"]["1h"]["positive_move_return_sample_concentration"]
+        second = evaluate_forward_returns(
+            list(reversed(history)), threshold=0.03, horizons_hours=(1,)
+        )["horizons"]["1h"]["positive_move_return_sample_concentration"]
+        interval = first["market_equal_weight_bootstrap_95pct_interval"]
+
+        self.assertEqual(first["return_observations"], 10)
+        self.assertEqual(interval["status"], "estimated")
+        self.assertEqual(interval["market_clusters"], 10)
+        self.assertEqual(interval["bootstrap_replicates"], 2000)
+        self.assertLess(interval["lower_mean_return_pct"], interval["upper_mean_return_pct"])
+        self.assertEqual(
+            interval,
+            second["market_equal_weight_bootstrap_95pct_interval"],
+        )
 
     def test_forward_returns_reports_both_momentum_and_contrarian_long_directions(self):
         prices = [0.50, 0.56, 0.50, 0.56, 0.50, 0.48, 0.52]

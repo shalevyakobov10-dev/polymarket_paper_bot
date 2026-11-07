@@ -19,12 +19,13 @@ export default defineRailway(() => {
     // Railway auto-detects the repository-root Dockerfile.
     replicas: { "europe-west4": 1 },
     healthcheck: "/health",
-    healthcheckTimeout: 60,
+    healthcheckTimeout: 300,
     volumeMounts: {
       "/app/data": data
     },
     env: {
       DATA_DIR: "/app/data",
+      RAILWAY_DEPLOYMENT_DRAINING_SECONDS: "30",
       DRY_RUN: "true",
       LIVE_EXECUTION_ENABLED: "false",
       LIVE_TRADING_ENABLED: "false",

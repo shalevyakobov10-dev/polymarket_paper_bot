@@ -1,7 +1,9 @@
 import { defineRailway, github, project, service, volume } from "railway/iac";
 
 /**
- * Railway project definition for the paper-only public market research worker.
+ * Railway project definition for the continuous event-aware paper research worker.
+ * The worker is always DRY_RUN-only; this IaC never enables account monitoring or live orders.
+ * The source remains main so deployment consumes only code after the release branch is merged.
  *
  * Review with `railway config plan` before applying. This file defines
  * infrastructure, but does not deploy it until an authenticated user applies it.

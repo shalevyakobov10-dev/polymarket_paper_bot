@@ -120,6 +120,7 @@ def _accepted_venue_receipt(response: Any, order_id: str) -> dict[str, Any]:
         "taking_amount": amount("taking_amount"),
         "trade_ids": identifiers("trade_ids"),
         "transactions_hashes": identifiers("transactions_hashes"),
+        "order_type": LIVE_ORDER_TYPE,
     }
 
 

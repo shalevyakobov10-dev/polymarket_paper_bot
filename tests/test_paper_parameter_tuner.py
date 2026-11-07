@@ -38,6 +38,8 @@ class PaperParameterTunerTests(unittest.TestCase):
         self.assertEqual(result["status"], "validated_for_paper_only")
         self.assertEqual(result["folds_scored"], 3)
         self.assertEqual([row["status"] for row in result["fold_reports"]], ["passed"] * 3)
+        self.assertGreaterEqual(result["candidate_holdout_net_pnl"], result["baseline_holdout_net_pnl"])
+        self.assertTrue(all(row["net_pnl_improvement"] >= 0 for row in result["fold_reports"]))
 
     def test_candidate_is_rejected_when_one_chronological_holdout_fold_is_bad(self):
         rows = []
@@ -58,6 +60,28 @@ class PaperParameterTunerTests(unittest.TestCase):
         self.assertEqual(result["status"], "rejected")
         self.assertIn("fold", result["reason"])
         self.assertEqual(result["fold_reports"][1]["status"], "rejected")
+
+    def test_candidate_is_rejected_when_mean_roi_improves_but_total_net_pnl_falls(self):
+        rows = []
+        for index in range(90):
+            if index >= 63:
+                if index % 3 == 0:
+                    rows.append(trade(index, 0.31, 0.01, 1.00))
+                else:
+                    rows.append(trade(index, 0.50, 0.02, 0.10, "dynamic_take_profit"))
+            elif index % 3 == 0:
+                rows.append(trade(index, 0.31, -0.02, -0.20))
+            else:
+                rows.append(trade(index, 0.50, 0.02, 0.20, "dynamic_take_profit"))
+        result = tune_sentiment_threshold(
+            rows, current_threshold=0.30, minimum_closed_trades=60,
+            minimum_train_trades=30, minimum_holdout_trades=15,
+        )
+        self.assertGreater(result["candidate_holdout_mean_roi"], result["baseline_holdout_mean_roi"])
+        self.assertLess(result["candidate_holdout_net_pnl"], result["baseline_holdout_net_pnl"])
+        self.assertFalse(result["applied"])
+        self.assertEqual(result["new_threshold"], 0.30)
+        self.assertEqual(result["status"], "rejected")
 
     def test_insufficient_data_never_changes_threshold(self):
         rows = [trade(i, 0.5, 0.1, 1.0) for i in range(20)]

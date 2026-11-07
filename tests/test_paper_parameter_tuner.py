@@ -51,7 +51,6 @@ class PaperParameterTunerTests(unittest.TestCase):
         self.assertTrue(all(row["training_trade_count"] >= 30 for row in result["training_candidate_scores"]))
         self.assertEqual(len(result["input_dataset_sha256"]), 64)
         self.assertEqual(len(result["evaluation_run_sha256"]), 64)
-        self.assertEqual(result["evaluation_run_sha256"], forward["evaluation_run_sha256"])
 
     def test_candidate_is_rejected_when_one_chronological_holdout_fold_is_bad(self):
         rows = []
@@ -152,6 +151,8 @@ class PaperParameterTunerTests(unittest.TestCase):
         different_config = tune_sentiment_threshold(rows, current_threshold=0.31)
         self.assertNotEqual(forward["evaluation_run_sha256"], different_config["evaluation_run_sha256"])
         self.assertEqual(forward["input_dataset_sha256"], forward["input_dataset_sha256"].lower())
+        self.assertEqual(len(forward["evaluation_run_sha256"]), 64)
+        self.assertEqual(forward["evaluation_run_sha256"], reversed_result["evaluation_run_sha256"])
 
     def test_postmortem_groups_losing_trades_by_exit_reason(self):
         rows = [trade(1, 0.4, -0.1, -1, "dynamic_stop_loss"),

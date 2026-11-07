@@ -134,6 +134,9 @@ class OrderBookTests(unittest.TestCase):
         self.assertEqual(len(result), 10)
 
 
+    def test_empty_token_batch_returns_without_creating_zero_worker_pool(self):
+        self.assertEqual(market_data.fetch_order_books([]), {})
+
     def test_explicit_batch_limit_cannot_exceed_global_environment_cap(self):
         rows = [{"token_id": str(index)} for index in range(5)]
         with patch.dict("os.environ", {"ORDERBOOK_TOKENS_PER_POLL": "3"}):

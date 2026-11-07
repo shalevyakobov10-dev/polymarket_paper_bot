@@ -442,3 +442,10 @@ The worker writes an atomic heartbeat file at `EVENT_PAPER_WORKER_STATUS_FILE` (
 Transient polling errors use bounded exponential retry. After five consecutive failed cycles, the worker exits and the supervisor restarts it with capped backoff. The authenticated account monitor remains separately disabled by default. The supervisor removes `LIVE_*` and account credential values from the event worker environment and forcibly sets `DRY_RUN=true` and `LIVE_EXECUTION_ENABLED=false`.
 
 Mount a persistent, single-writer volume at `/app/data` for Docker deployments; otherwise the paper portfolio and historical archive may be lost when the container is replaced. Do not mount the same SQLite database into multiple replicas. CI explicitly disables the event worker to keep the container smoke test isolated from external polling.
+
+
+## Paper strategy performance report
+
+The event-aware paper summary includes a descriptive report from CLOSED simulated trades only: net PnL, fee drag, expectancy per trade, net profit factor, average win/loss, win rate with a Wilson 95% interval, holding time, and maximum drawdown along the realized closed-trade sequence. It explicitly requires at least 60 closed trades before even labeling the in-sample sample size as sufficient.
+
+This report is not a proof of edge or an out-of-sample validation. Realized drawdown excludes intratrade and open-position mark-to-market drawdown. Sharpe and Sortino are deliberately omitted because irregular trade outcomes are not a periodic return series. The report always sets `out_of_sample_validated=false` and `live_execution_eligible=false`; only a separate chronological walk-forward evaluation with enough resolved outcomes can support a future release review.

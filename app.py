@@ -1083,7 +1083,22 @@ def health_payload(
         paper_component["heartbeat_fresh"] = bool(
             paper_worker_snapshot.get("heartbeat_fresh")
         )
-        if paper_state == "degraded" and paper_component["status"] == "healthy":
+        paper_component["last_backup_at"] = paper_worker_snapshot.get("last_backup_at")
+        paper_component["backup_manifest_name"] = paper_worker_snapshot.get("backup_manifest_name")
+        paper_component["backup_files_last_run"] = int(
+            paper_worker_snapshot.get("backup_files_last_run") or 0
+        )
+        paper_component["backup_error_type"] = paper_worker_snapshot.get("backup_error_type")
+        paper_component["backup_consecutive_failures"] = int(
+            paper_worker_snapshot.get("backup_consecutive_failures") or 0
+        )
+        paper_component["backup_retry_delay_seconds"] = float(
+            paper_worker_snapshot.get("backup_retry_delay_seconds") or 0.0
+        )
+        if (
+            (paper_state == "degraded" or paper_worker_snapshot.get("backup_error_type"))
+            and paper_component["status"] == "healthy"
+        ):
             paper_component["status"] = "degraded"
         if paper_state == "failed":
             paper_component["status"] = "failed"

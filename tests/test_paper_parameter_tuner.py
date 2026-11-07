@@ -4,7 +4,7 @@ from datetime import datetime, timedelta, timezone
 from paper_parameter_tuner import postmortem_losers, tune_sentiment_threshold
 
 
-def trade(index, strength, roi, pnl, reason="dynamic_stop_loss", *, trade_id=None):
+def trade(index, strength, roi, pnl, reason="dynamic_stop_loss", *, trade_id=None, market_id=None):
     closed = datetime(2026, 10, 1, tzinfo=timezone.utc) + timedelta(hours=index)
     row = {
         "status": "CLOSED",
@@ -16,6 +16,8 @@ def trade(index, strength, roi, pnl, reason="dynamic_stop_loss", *, trade_id=Non
     }
     if trade_id is not None:
         row["trade_id"] = trade_id
+    if market_id is not None:
+        row["market_id"] = market_id
     return row
 
 
@@ -78,6 +80,14 @@ class PaperParameterTunerTests(unittest.TestCase):
         rows.append(trade(61, 0.5, 0.1, 1.0, trade_id="1"))
         result = tune_sentiment_threshold(rows, current_threshold=0.3)
         self.assertEqual(result["duplicate_trade_ids_excluded"], 1)
+        self.assertEqual(result["closed_trade_count"], 59)
+        self.assertFalse(result["applied"])
+
+    def test_duplicate_market_ids_are_excluded_to_avoid_reusing_one_resolution(self):
+        rows = [trade(i, 0.5, 0.1, 1.0, market_id=f"market-{i}") for i in range(60)]
+        rows.append(trade(61, 0.5, 0.1, 1.0, market_id="market-1"))
+        result = tune_sentiment_threshold(rows, current_threshold=0.3)
+        self.assertEqual(result["duplicate_market_ids_excluded"], 1)
         self.assertEqual(result["closed_trade_count"], 59)
         self.assertFalse(result["applied"])
 

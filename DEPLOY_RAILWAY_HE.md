@@ -5,7 +5,7 @@
 
 ## פריסה עם תצורת התשתית שבמאגר
 
-הקובץ `.railway/railway.ts` מגדיר שירות אחד בשם `polymarket-paper-bot` ממאגר GitHub הזה ומ-branch `main`, Volume בנפח 1GB, חיבור Volume אל `/app/data`, health check, וערכי סיכון קבועים ל-Paper Trading. הוא מציב את השירות ואת ה-Volume באזור `europe-west4`. התצורה כוללת גם איסוף GDELT בארבעה מסלולי נושא בכל מחזור (חלון שעה), רישום/אימון מחזורי של מודל כל 15 דקות והערכת holdout/walk-forward כל 6 שעות.
+הקובץ `.railway/railway.ts` מגדיר שירות אחד בשם `polymarket-paper-bot` ממאגר GitHub הזה ומ-branch `main`, Volume בנפח 1GB, חיבור Volume אל `/app/data`, health check, וערכי סיכון קבועים ל-Paper Trading. הוא מציב את השירות ואת ה-Volume באזור `europe-west4`. התצורה מפעילה גם את `event_paper_worker.py` באופן רציף (Paper בלבד), קוראת שוק ציבורי דרך Gamma/CLOB, שומרת את תיק ה-Paper ואת ארכיון השוק ב-SQLite, ומבצעת גיבוי עקבי לשני המסדים כל שש שעות.
 
 Railway ממליצה כיום על Infrastructure as Code דרך `.railway/railway.ts`; קובצי `railway.json`/`railway.toml` הישנים הוצאו משימוש עבור שירותים חדשים. ראו [Railway IaC](https://docs.railway.com/infrastructure-as-code) ו-[Reference](https://docs.railway.com/infrastructure-as-code/reference).
 

@@ -49,6 +49,12 @@ class EventPaperWorkerTests(unittest.TestCase):
                 "portfolio": {"cash": 98.0, "equity": 100.0, "realized_pnl": 0.0,
                               "open_positions": 1, "closed_positions": 0, "win_rate_pct": None,
                               "active_event_evidence_threshold": 0.75,
+                              "performance": {"evaluation_status": "insufficient_sample",
+                                             "closed_trades": 2, "fees_paid": 0.4,
+                                             "out_of_sample_validated": True,
+                                             "live_execution_eligible": True,
+                                             "warnings": ["sample too small"],
+                                             "api_key": "must-not-persist"},
                               "POLYMARKET_PRIVATE_KEY": "must-not-persist"},
             }])
             stop = StopAfterWaits(1)
@@ -66,6 +72,10 @@ class EventPaperWorkerTests(unittest.TestCase):
             self.assertEqual(status["portfolio"]["cash"], 98.0)
             self.assertEqual(status["portfolio"]["open_positions"], 1)
             self.assertNotIn("POLYMARKET_PRIVATE_KEY", status["portfolio"])
+            self.assertEqual(status["portfolio"]["performance"]["closed_trades"], 2)
+            self.assertFalse(status["portfolio"]["performance"]["out_of_sample_validated"])
+            self.assertFalse(status["portfolio"]["performance"]["live_execution_eligible"])
+            self.assertNotIn("api_key", status["portfolio"]["performance"])
             self.assertEqual(status["execution"], "none")
             self.assertTrue(status["research_only"])
             self.assertNotIn("environment", status)

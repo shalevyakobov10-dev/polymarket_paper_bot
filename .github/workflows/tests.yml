@@ -55,6 +55,7 @@ jobs:
           curl --silent --show-error --fail http://127.0.0.1:18080/learning > /tmp/paper-learning.json
           curl --silent --show-error --fail http://127.0.0.1:18080/execution-readiness > /tmp/paper-execution-readiness.json
           curl --silent --show-error --fail http://127.0.0.1:18080/service-supervisor > /tmp/paper-service-supervisor.json
+          curl --silent --show-error --fail http://127.0.0.1:18080/event-paper > /tmp/event-paper.json
           python - <<'PY'
           import json
           from pathlib import Path
@@ -73,6 +74,7 @@ jobs:
           learning = json.loads(Path("/tmp/paper-learning.json").read_text())
           execution_readiness = json.loads(Path("/tmp/paper-execution-readiness.json").read_text())
           supervisor = json.loads(Path("/tmp/paper-service-supervisor.json").read_text())
+          event_paper = json.loads(Path("/tmp/event-paper.json").read_text())
           assert "items" in news and "feeds_configured" in news, "news endpoint schema mismatch"
           assert health.get("mode") == "paper_only", "health endpoint must remain paper-only"
           assert health.get("status") in {"healthy", "degraded", "unhealthy"}, "health endpoint status schema mismatch"
@@ -117,6 +119,10 @@ jobs:
           assert supervisor.get("event_paper_worker", {}).get("execution") == "none", "event paper worker status must remain research-only"
           assert supervisor.get("order_submission_allowed") is False, "supervisor status must never enable orders"
           assert supervisor.get("execution") == "none", "supervisor status must remain read-only"
+          assert event_paper.get("worker_state") == "disabled", "CI event paper worker must remain disabled"
+          assert event_paper.get("research_only") is True, "event paper endpoint must be research-only"
+          assert event_paper.get("live_execution_enabled") is False, "event paper endpoint must never enable live execution"
+          assert event_paper.get("execution") == "none", "event paper endpoint must not submit orders"
           assert "POLYMARKET_PRIVATE_KEY" not in supervisor, "supervisor status must not expose secrets"
           print("Container smoke check passed: research, learning, execution-readiness, and sanitized supervisor status endpoints returned valid JSON.")
           PY

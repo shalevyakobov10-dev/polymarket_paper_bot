@@ -449,3 +449,10 @@ Mount a persistent, single-writer volume at `/app/data` for Docker deployments; 
 The event-aware paper summary includes a descriptive report from CLOSED simulated trades only: net PnL, fee drag, expectancy per trade, net profit factor, average win/loss, win rate with a Wilson 95% interval, holding time, and maximum drawdown along the realized closed-trade sequence. It explicitly requires at least 60 closed trades before even labeling the in-sample sample size as sufficient.
 
 This report is not a proof of edge or an out-of-sample validation. Realized drawdown excludes intratrade and open-position mark-to-market drawdown. Sharpe and Sortino are deliberately omitted because irregular trade outcomes are not a periodic return series. The report always sets `out_of_sample_validated=false` and `live_execution_eligible=false`; only a separate chronological walk-forward evaluation with enough resolved outcomes can support a future release review.
+
+
+## Paper data backups and recovery
+
+Run `python backup_paper_data.py` to create a consistent online backup of both `PAPER_DATABASE_PATH` and `MARKET_HISTORY_DATABASE_PATH`. Backups are written to `PAPER_BACKUP_DIRECTORY` (default `DATA_DIR/backups`), each SQLite copy is checked with `PRAGMA integrity_check` and `foreign_key_check`, and a SHA-256 manifest is written after successful verification. The script never overwrites an existing backup and keeps the newest `PAPER_BACKUP_RETAIN` snapshots per database (default 30).
+
+For a 24/7 deployment, schedule this command on a persistent single-writer volume at least every six hours, and replicate the backup directory off-host. A backup on the same volume does not protect against volume loss. Recovery should restore to a new, unused database path and be verified before switching the service to it; do not overwrite a live SQLite file.

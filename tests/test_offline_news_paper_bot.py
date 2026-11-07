@@ -9,8 +9,8 @@ from offline_news_paper_bot import OfflineNewsPaperBot, PaperConfig
 
 
 class FakeNewsCollector:
-    def __init__(self):
-        self.items = []
+    def __init__(self, items=None):
+        self.items = list(items or [])
 
     def fetch_once(self):
         return {"feeds_configured": 0, "feeds_succeeded": 0, "feeds_failed": 0}
@@ -45,6 +45,117 @@ class OfflineNewsPaperBotTests(unittest.TestCase):
         with patch.dict(os.environ, {"DRY_RUN": "false"}, clear=True):
             with self.assertRaisesRegex(ValueError, "requires DRY_RUN=true"):
                 PaperConfig()
+
+    def test_event_outcome_consensus_sets_direction_instead_of_vader_sentiment(self):
+        now = datetime.now(timezone.utc).replace(microsecond=0)
+        row = {
+            "market_id": "market-fed",
+            "question": "Will the Fed cut interest rates in December?",
+            "yes_token_id": "market-fed:YES",
+            "no_token_id": "market-fed:NO",
+            "observed_at": now.isoformat(),
+            "yes_price": 0.45, "no_price": 0.55,
+            "yes_bid": 0.44, "yes_ask": 0.46,
+            "no_bid": 0.54, "no_ask": 0.56,
+        }
+        items = [
+            {"id": "1", "source": "Reuters", "publisher_id": "reuters.com",
+             "title": "Fed holds interest rates steady", "summary": "The central bank made no change.",
+             "published_at": now.isoformat()},
+            {"id": "2", "source": "AP", "publisher_id": "apnews.com",
+             "title": "Fed holds interest rates steady", "summary": "Officials kept rates unchanged.",
+             "published_at": now.isoformat()},
+        ]
+        with tempfile.TemporaryDirectory() as folder:
+            with self._make_config(folder):
+                bot = OfflineNewsPaperBot(
+                    PaperConfig(), news_collector=FakeNewsCollector(items),
+                    snapshot_provider=StaticProvider(row),
+                )
+                try:
+                    signal = bot._build_signals(items, [row], now)["market-fed"]
+                    self.assertTrue(signal["qualified"])
+                    self.assertEqual(signal["direction"], "NO")
+                    self.assertLess(signal["score"], 0)
+                    self.assertEqual(signal["publisher_count"], 2)
+                    self.assertEqual(signal["method"], "explicit_event_cue_publisher_consensus_v1")
+                    self.assertEqual(signal["sentiment_interpretation"],
+                                     "diagnostic_only_not_used_for_yes_no_direction")
+                finally:
+                    bot.close()
+
+    def test_generic_negative_sentiment_without_event_cue_does_not_create_direction(self):
+        now = datetime.now(timezone.utc).replace(microsecond=0)
+        row = {
+            "market_id": "market-fed",
+            "question": "Will the Fed cut interest rates in December?",
+            "yes_token_id": "market-fed:YES",
+            "no_token_id": "market-fed:NO",
+            "observed_at": now.isoformat(),
+            "yes_price": 0.45, "no_price": 0.55,
+            "yes_bid": 0.44, "yes_ask": 0.46,
+            "no_bid": 0.54, "no_ask": 0.56,
+        }
+        items = [
+            {"id": "1", "source": "Reuters", "publisher_id": "reuters.com",
+             "title": "Fed warns investors amid economic crisis",
+             "summary": "Officials discussed risks around interest rates.",
+             "published_at": now.isoformat()},
+            {"id": "2", "source": "AP", "publisher_id": "apnews.com",
+             "title": "Fed warns investors amid economic crisis",
+             "summary": "Officials discussed risks around interest rates.",
+             "published_at": now.isoformat()},
+        ]
+        with tempfile.TemporaryDirectory() as folder:
+            with self._make_config(folder):
+                bot = OfflineNewsPaperBot(
+                    PaperConfig(), news_collector=FakeNewsCollector(items),
+                    snapshot_provider=StaticProvider(row),
+                )
+                try:
+                    signal = bot._build_signals(items, [row], now)["market-fed"]
+                    self.assertFalse(signal["qualified"])
+                    self.assertIsNone(signal["direction"])
+                    self.assertIsNone(signal["score"])
+                finally:
+                    bot.close()
+
+    def test_conflicting_publishers_below_consensus_threshold_do_not_qualify(self):
+        now = datetime.now(timezone.utc).replace(microsecond=0)
+        row = {
+            "market_id": "market-fed",
+            "question": "Will the Fed cut interest rates in December?",
+            "yes_token_id": "market-fed:YES",
+            "no_token_id": "market-fed:NO",
+            "observed_at": now.isoformat(),
+            "yes_price": 0.45, "no_price": 0.55,
+            "yes_bid": 0.44, "yes_ask": 0.46,
+            "no_bid": 0.54, "no_ask": 0.56,
+        }
+        items = [
+            {"id": "1", "source": "Reuters", "publisher_id": "reuters.com",
+             "title": "Fed cuts interest rates", "summary": "A rate cut was announced.",
+             "published_at": now.isoformat()},
+            {"id": "2", "source": "AP", "publisher_id": "apnews.com",
+             "title": "Fed cuts interest rates", "summary": "A rate cut was announced.",
+             "published_at": now.isoformat()},
+            {"id": "3", "source": "BBC News", "publisher_id": "bbc.com",
+             "title": "Fed hikes interest rates", "summary": "Rates were increased.",
+             "published_at": now.isoformat()},
+        ]
+        with tempfile.TemporaryDirectory() as folder:
+            with self._make_config(folder):
+                bot = OfflineNewsPaperBot(
+                    PaperConfig(), news_collector=FakeNewsCollector(items),
+                    snapshot_provider=StaticProvider(row),
+                )
+                try:
+                    signal = bot._build_signals(items, [row], now)["market-fed"]
+                    self.assertFalse(signal["qualified"])
+                    self.assertIsNone(signal["direction"])
+                    self.assertAlmostEqual(signal["consensus_ratio"], 2 / 3, places=5)
+                finally:
+                    bot.close()
 
     def test_one_offline_cycle_stays_simulated_only(self):
         now = datetime(2026, 11, 6, 12, 0, tzinfo=timezone.utc)

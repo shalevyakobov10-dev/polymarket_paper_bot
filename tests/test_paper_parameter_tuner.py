@@ -166,6 +166,14 @@ class PaperParameterTunerTests(unittest.TestCase):
         self.assertEqual(utc_result["input_dataset_sha256"], offset_result["input_dataset_sha256"])
         self.assertEqual(utc_result["evaluation_run_sha256"], offset_result["evaluation_run_sha256"])
 
+    def test_sample_configuration_rejects_booleans_floats_and_strings(self):
+        for value in (True, 2.5, "60"):
+            with self.subTest(value=value):
+                with self.assertRaisesRegex(ValueError, "minimum_closed_trades must be an integer"):
+                    tune_sentiment_threshold(
+                        [], current_threshold=0.3, minimum_closed_trades=value
+                    )
+
     def test_postmortem_groups_losing_trades_by_exit_reason(self):
         rows = [trade(1, 0.4, -0.1, -1, "dynamic_stop_loss"),
                 trade(2, 0.5, -0.2, -2, "time_limit"),

@@ -113,7 +113,11 @@ def fetch_order_book(token_id: str) -> dict[str, Any]:
     return result
 
 
-def fetch_order_books(rows: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
+def fetch_order_books(
+    rows: list[dict[str, Any]],
+    *,
+    max_tokens: int | None = None,
+) -> dict[str, dict[str, Any]]:
     """Fetch a bounded batch concurrently while isolating per-token failures.
 
     Concurrency is deliberately capped to avoid turning a polling cycle into an
@@ -128,6 +132,14 @@ def fetch_order_books(rows: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
         return min(maximum, max(minimum, value))
 
     limit = bounded_env("ORDERBOOK_TOKENS_PER_POLL", 20, 0, 100)
+    if max_tokens is not None:
+        try:
+            requested_limit = int(max_tokens)
+        except (TypeError, ValueError, OverflowError):
+            raise ValueError("max_tokens must be an integer") from None
+        if not 0 <= requested_limit <= 100:
+            raise ValueError("max_tokens must be between 0 and 100")
+        limit = min(limit, requested_limit)
     if limit == 0:
         return {}
     workers = bounded_env("ORDERBOOK_FETCH_WORKERS", 4, 1, 8)

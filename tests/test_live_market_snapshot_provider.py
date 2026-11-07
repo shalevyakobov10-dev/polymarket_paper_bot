@@ -134,9 +134,9 @@ class LiveMarketSnapshotProviderTests(unittest.TestCase):
         raw = market()
         books = {
             "yes-token": book("yes-token", now, exchange_time=False),
-            "no-token": book("no-token", now),
+            "no-token": book("no-token", now, exchange_time=False),
         }
-        # Both timestamps are normally present; test a partial SDK payload explicitly.
+        # Neither timestamp is available initially; receipt time is the fallback.
         books["yes-token"]["exchange_timestamp"] = None
         live = provider.LiveClobMarketSnapshotProvider(
             market_fetcher=lambda: [raw],

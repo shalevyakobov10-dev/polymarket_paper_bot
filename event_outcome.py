@@ -224,11 +224,28 @@ def aggregate_event_outcome_evidence(
     minimum_publishers: int = 2,
     minimum_consensus_ratio: float = 0.75,
 ) -> dict[str, Any]:
-    """Count one non-conflicting fresh vote per publisher; otherwise abstain."""
-    if not math.isfinite(float(now_epoch)) or max_age_hours <= 0 or minimum_publishers < 1:
-        raise ValueError("invalid event evidence aggregation settings")
-    if not 0.5 < minimum_consensus_ratio <= 1.0:
-        raise ValueError("minimum_consensus_ratio must be in (0.5, 1]")
+    """Count one fresh vote per publisher and include source conflicts in consensus.
+
+    Publishers issuing contradictory decisive reports are not directional voters,
+    but they remain in the consensus denominator. This prevents a small agreeing
+    subset from appearing unanimous while other tracked publishers conflict.
+    """
+    try:
+        current_epoch = float(now_epoch)
+        maximum_age_hours = float(max_age_hours)
+        consensus_threshold = float(minimum_consensus_ratio)
+    except (TypeError, ValueError, OverflowError):
+        raise ValueError("invalid event evidence aggregation settings") from None
+    if (
+        not math.isfinite(current_epoch)
+        or not math.isfinite(maximum_age_hours)
+        or maximum_age_hours <= 0
+    ):
+        raise ValueError("now_epoch and max_age_hours must be finite; max_age_hours must be positive")
+    if isinstance(minimum_publishers, bool) or not isinstance(minimum_publishers, int) or minimum_publishers < 1:
+        raise ValueError("minimum_publishers must be a positive integer")
+    if not math.isfinite(consensus_threshold) or not 0.5 < consensus_threshold <= 1.0:
+        raise ValueError("minimum_consensus_ratio must be finite and in (0.5, 1]")
     publisher_directions: dict[str, set[str]] = {}
     article_count = stale_count = invalid_timestamp_count = ignored_ambiguous_count = 0
     for item in matches:
@@ -247,8 +264,8 @@ def aggregate_event_outcome_evidence(
         if not math.isfinite(published):
             invalid_timestamp_count += 1
             continue
-        age_hours = (float(now_epoch) - published) / 3600.0
-        if age_hours < -0.1 or age_hours > max_age_hours:
+        age_hours = (current_epoch - published) / 3600.0
+        if age_hours < -0.1 or age_hours > maximum_age_hours:
             stale_count += 1
             continue
         publisher = str(item.get("publisher_id") or item.get("source") or "").strip().casefold()
@@ -261,12 +278,16 @@ def aggregate_event_outcome_evidence(
     no_publishers = sum(1 for values in publisher_directions.values() if values == {"NO"})
     conflict_publishers = sum(1 for values in publisher_directions.values() if len(values) > 1)
     decisive_publishers = yes_publishers + no_publishers
-    ratio = max(yes_publishers, no_publishers) / decisive_publishers if decisive_publishers else 0.0
+    observed_publishers = len(publisher_directions)
+    # Conflicted publishers do not cast a directional vote, but they do count
+    # against consensus strength. Otherwise two agreeing publishers could appear
+    # unanimous even when many other publishers have contradictory evidence.
+    ratio = max(yes_publishers, no_publishers) / observed_publishers if observed_publishers else 0.0
     leading_direction = "YES" if yes_publishers > no_publishers else "NO" if no_publishers > yes_publishers else None
     qualified = bool(
         leading_direction is not None
         and decisive_publishers >= minimum_publishers
-        and ratio >= minimum_consensus_ratio
+        and ratio >= consensus_threshold
     )
     direction = leading_direction if qualified else None
     score = (ratio if direction == "YES" else -ratio) if direction else None
@@ -275,17 +296,19 @@ def aggregate_event_outcome_evidence(
         "direction": direction,
         "qualified": qualified,
         "publisher_count": decisive_publishers,
+        "observed_publisher_count": observed_publishers,
+        "consensus_denominator_count": observed_publishers,
         "yes_publisher_count": yes_publishers,
         "no_publisher_count": no_publishers,
         "conflict_publisher_count": conflict_publishers,
         "article_count": article_count,
         "consensus_ratio": round(ratio, 6),
-        "minimum_consensus_ratio": minimum_consensus_ratio,
+        "minimum_consensus_ratio": consensus_threshold,
         "minimum_publishers": minimum_publishers,
         "stale_article_count": stale_count,
         "invalid_timestamp_count": invalid_timestamp_count,
         "ignored_ambiguous_article_count": ignored_ambiguous_count,
-        "method": "explicit_event_cue_publisher_consensus_v1",
+        "method": "explicit_event_cue_publisher_consensus_v2_conflicts_in_denominator",
         "interpretation": "signed_consensus_strength_not_probability_or_expected_value",
         "research_only": True,
         "execution": "none",

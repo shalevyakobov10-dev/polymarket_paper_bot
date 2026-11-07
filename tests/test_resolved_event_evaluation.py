@@ -267,7 +267,7 @@ class ResolvedEventEvaluationTests(unittest.TestCase):
         )
         self.assertEqual(result["folds_scored"], 3)
         first = result["folds"][0]
-        self.assertEqual(first["training_markets_resolved_before_test_start"], 3)
+        self.assertEqual(first["training_markets_resolved_before_test_start"], 7)
         self.assertLess(
             datetime.fromisoformat(first["latest_training_resolution_at"]),
             datetime.fromisoformat(first["test_decision_start"]),

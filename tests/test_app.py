@@ -278,6 +278,18 @@ class ParserTests(unittest.TestCase):
         self.assertEqual(payload["components"]["event_paper_worker"]["status"], "healthy")
         self.assertNotIn("event_paper_worker", payload["degraded_components"])
 
+        backup_degraded = {**paper, "backup_error_type": "OSError",
+                           "backup_consecutive_failures": 1,
+                           "backup_retry_delay_seconds": 60}
+        healthy, payload = app.health_payload(
+            core, now, paper_worker_snapshot=backup_degraded
+        )
+        self.assertTrue(healthy)
+        self.assertEqual(payload["components"]["event_paper_worker"]["status"], "degraded")
+        self.assertEqual(
+            payload["components"]["event_paper_worker"]["backup_error_type"], "OSError"
+        )
+
         degraded = {**paper, "worker_state": "degraded", "consecutive_failures": 2}
         healthy, payload = app.health_payload(core, now, paper_worker_snapshot=degraded)
         self.assertTrue(healthy)

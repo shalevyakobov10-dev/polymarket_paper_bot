@@ -21,12 +21,14 @@ def sample_snapshot(**overrides):
         "volume_24h": 1200,
         "yes_book": {
             "observed_at": "2026-11-07T10:00:00+00:00",
+            "exchange_timestamp": "2026-11-07T09:59:59+00:00",
             "bids_top5": [{"price": 0.41, "size": 20}],
             "asks_top5": [{"price": 0.43, "size": 25}],
             "source": "official_polymarket_python_sdk",
         },
         "no_book": {
             "observed_at": "2026-11-07T10:00:00+00:00",
+            "exchange_timestamp": "2026-11-07T09:59:58+00:00",
             "bids_top5": [{"price": 0.57, "size": 20}],
             "asks_top5": [{"price": 0.59, "size": 25}],
             "source": "official_polymarket_python_sdk",
@@ -60,6 +62,8 @@ class MarketHistoryStoreTests(unittest.TestCase):
         self.assertAlmostEqual(rows[0]["yes_mid"], 0.42)
         self.assertAlmostEqual(rows[0]["no_mid"], 0.58)
         self.assertEqual(rows[0]["yes_book"]["bids_top5"][0]["size"], 20)
+        self.assertEqual(rows[0]["yes_book"]["exchange_timestamp"], "2026-11-07T09:59:59+00:00")
+        self.assertEqual(rows[0]["no_book"]["exchange_timestamp"], "2026-11-07T09:59:58+00:00")
         self.assertEqual(rows[0]["book_source"], "official_polymarket_python_sdk")
 
     def test_exact_duplicate_snapshot_is_ignored(self):

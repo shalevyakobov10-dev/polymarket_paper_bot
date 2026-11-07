@@ -28,6 +28,7 @@ jobs:
           set -euo pipefail
           docker run -d --rm --name polymarket-paper-bot-smoke \
             -e DATA_DIR=/tmp/polymarket-smoke-data \
+            -e ENABLE_EVENT_PAPER_WORKER=false \
             -p 18080:8080 polymarket-paper-bot:ci
           cleanup() { docker stop polymarket-paper-bot-smoke >/dev/null 2>&1 || true; }
           trap cleanup EXIT
@@ -108,6 +109,9 @@ jobs:
           assert supervisor.get("service_state") in {"starting", "running"}, "supervisor service state must be starting or running"
           assert supervisor.get("monitor_enabled") is False, "account monitor must remain disabled in smoke test"
           assert supervisor.get("monitor_state") == "disabled", "disabled monitor state mismatch"
+          assert supervisor.get("event_paper_worker_enabled") is False, "event paper worker must be disabled in smoke test"
+          assert supervisor.get("event_paper_worker_state") == "disabled", "event paper worker disabled state mismatch"
+          assert supervisor.get("event_paper_worker", {}).get("execution") == "none", "event paper worker status must remain research-only"
           assert supervisor.get("event_paper_worker_enabled") is False, "event paper worker must be disabled in smoke test"
           assert supervisor.get("event_paper_worker_state") == "disabled", "event paper worker disabled state mismatch"
           assert supervisor.get("event_paper_worker", {}).get("execution") == "none", "event paper worker status must remain research-only"

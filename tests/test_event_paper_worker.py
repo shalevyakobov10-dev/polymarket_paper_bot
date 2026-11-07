@@ -46,6 +46,10 @@ class EventPaperWorkerTests(unittest.TestCase):
             bot = FakeBot([{
                 "markets_loaded": 3, "opened": [{"market_id": "m1"}],
                 "closed": [], "close_blocked": [],
+                "portfolio": {"cash": 98.0, "equity": 100.0, "realized_pnl": 0.0,
+                              "open_positions": 1, "closed_positions": 0, "win_rate_pct": None,
+                              "active_event_evidence_threshold": 0.75,
+                              "POLYMARKET_PRIVATE_KEY": "must-not-persist"},
             }])
             stop = StopAfterWaits(1)
             result = run_worker(
@@ -59,6 +63,9 @@ class EventPaperWorkerTests(unittest.TestCase):
             self.assertEqual(status["cycles"], 1)
             self.assertEqual(status["markets_loaded_last_cycle"], 3)
             self.assertEqual(status["opened_last_cycle"], 1)
+            self.assertEqual(status["portfolio"]["cash"], 98.0)
+            self.assertEqual(status["portfolio"]["open_positions"], 1)
+            self.assertNotIn("POLYMARKET_PRIVATE_KEY", status["portfolio"])
             self.assertEqual(status["execution"], "none")
             self.assertTrue(status["research_only"])
             self.assertNotIn("environment", status)

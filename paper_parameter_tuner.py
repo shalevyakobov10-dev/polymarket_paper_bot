@@ -111,6 +111,23 @@ def tune_sentiment_threshold(
         if isinstance(row, dict) and str(row.get("status") or "").upper() == "CLOSED"
     ]
     input_fingerprint = _dataset_fingerprint(source_rows)
+    run_configuration = {
+        "current_threshold": current,
+        "minimum_closed_trades": minimum_closed_trades,
+        "minimum_train_trades": minimum_train_trades,
+        "minimum_holdout_trades": minimum_holdout_trades,
+        "holdout_folds": holdout_folds,
+        "minimum_fold_trades": minimum_fold_trades,
+        "training_fraction": 0.70,
+        "candidate_multipliers": [1.10, 1.20, 1.35, 1.50],
+        "minimum_net_roi_improvement": 0.001,
+        "net_pnl_must_not_decrease": True,
+    }
+    run_payload = json.dumps(
+        {"dataset_sha256": input_fingerprint, "configuration": run_configuration},
+        sort_keys=True, separators=(",", ":"), allow_nan=False,
+    )
+    evaluation_run_fingerprint = hashlib.sha256(run_payload.encode("utf-8")).hexdigest()
     missing_trade_id_count = sum(
         1 for row in source_rows
         if row.get("trade_id") is None or not str(row.get("trade_id")).strip()
@@ -135,6 +152,12 @@ def tune_sentiment_threshold(
     duplicate_market_ids = {
         market_id for market_id, count in market_id_counts.items() if count > 1
     }
+    duplicate_trade_rows_excluded = sum(
+        count for count in trade_id_counts.values() if count > 1
+    )
+    duplicate_market_rows_excluded = sum(
+        count for count in market_id_counts.values() if count > 1
+    )
 
     cleaned = []
     invalid_timestamp_count = 0
@@ -177,13 +200,19 @@ def tune_sentiment_threshold(
         "closed_trade_count": len(cleaned),
         "source_closed_trade_count": len(source_rows),
         "input_dataset_sha256": input_fingerprint,
+        "evaluation_run_sha256": evaluation_run_fingerprint,
+        "evaluation_configuration": run_configuration,
         "input_fingerprint_scope": "normalized_closed_trade_ids_markets_timestamps_signal_strength_net_roi_pnl_and_exit_reason",
         "missing_trade_id_rows_excluded": missing_trade_id_count,
         "missing_market_id_rows_excluded": missing_market_id_count,
         "invalid_timestamp_count": invalid_timestamp_count,
         "invalid_metric_count": invalid_metric_count,
         "duplicate_trade_ids_excluded": len(duplicate_trade_ids),
+        "duplicate_trade_rows_excluded": duplicate_trade_rows_excluded,
         "duplicate_market_ids_excluded": len(duplicate_market_ids),
+        "duplicate_market_rows_excluded": duplicate_market_rows_excluded,
+        "eligible_unique_markets": len(cleaned),
+        "excluded_closed_trade_rows": len(source_rows) - len(cleaned),
         "train_trade_count": 0,
         "holdout_trade_count": 0,
         "holdout_folds_requested": holdout_folds,

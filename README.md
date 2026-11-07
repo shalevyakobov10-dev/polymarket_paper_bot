@@ -4,7 +4,7 @@ A Python research service that polls public Polymarket Gamma market data, record
 
 ## Safety and limitations
 
-- **Paper/research only:** no wallet integration, order submission, deposits, or withdrawals. The `/execution-readiness` endpoint is an informational checklist; no environment variable or API request can enable live execution. `live_order_preflight.py` validates proposed BUY limits and risk constraints without network access; even a passing preflight never authorizes signing or order submission.
+- **Paper/research only:** no wallet integration, order submission, deposits, or withdrawals. The `/execution-readiness` endpoint is an informational checklist; no environment variable or API request can enable live execution. `live_order_preflight.py` validates proposed BUY limits and risk constraints without network access, including rejection of non-positive minimum order sizes; even a passing preflight never authorizes signing or order submission.
 - Candidate signals are experimental observations, not investment advice or evidence of profitability.
 - Public API connectivity, hosting, and long-running operation must be verified in the target environment.
 - Backtests and paper results do not guarantee future performance.

@@ -227,6 +227,7 @@ def read_event_paper_worker_status(
             "closed_last_cycle": max(0, int(raw.get("closed_last_cycle", 0))),
             "close_blocked_last_cycle": max(0, int(raw.get("close_blocked_last_cycle", 0))),
             "last_error_type": str(raw.get("last_error_type") or "")[:80] or None,
+            "last_cycle_warning": str(raw.get("last_cycle_warning") or "")[:120] or None,
             "portfolio": _safe_portfolio_summary(raw.get("portfolio")),
             "last_backup_at": raw.get("last_backup_at"),
             "last_backup_attempt_at": raw.get("last_backup_attempt_at"),
@@ -330,6 +331,7 @@ def run_worker(
         "closed_last_cycle": 0,
         "close_blocked_last_cycle": 0,
         "last_error_type": None,
+        "last_cycle_warning": None,
         "portfolio": None,
         "last_backup_at": last_backup_at.isoformat() if last_backup_at else None,
         "last_backup_attempt_at": last_backup_attempt_at.isoformat() if last_backup_attempt_at else None,
@@ -351,14 +353,17 @@ def run_worker(
             cycle_started = _utc_now()
             try:
                 result = bot.run_once()
+                markets_loaded = max(0, int(result.get("markets_loaded", 0)))
+                cycle_warning = None if markets_loaded > 0 else "no_usable_market_snapshots"
                 status.update({
-                    "worker_state": "degraded" if status.get("backup_error_type") else "running",
+                    "worker_state": "degraded" if status.get("backup_error_type") or cycle_warning else "running",
                     "last_cycle_at": cycle_started,
                     "last_success_at": _utc_now(),
                     "cycles": status["cycles"] + 1,
                     "consecutive_failures": 0,
                     "retry_delay_seconds": 0.0,
-                    "markets_loaded_last_cycle": max(0, int(result.get("markets_loaded", 0))),
+                    "markets_loaded_last_cycle": markets_loaded,
+                    "last_cycle_warning": cycle_warning,
                     "opened_last_cycle": len(result.get("opened") or []),
                     "closed_last_cycle": len(result.get("closed") or []),
                     "close_blocked_last_cycle": len(result.get("close_blocked") or []),
@@ -415,7 +420,7 @@ def run_worker(
                             "backup_error_type": None,
                             "backup_consecutive_failures": 0,
                             "backup_retry_delay_seconds": 0.0,
-                            "worker_state": "running",
+                            "worker_state": "degraded" if cycle_warning else "running",
                         })
                     except Exception as backup_exc:
                         backup_failures += 1
@@ -442,6 +447,7 @@ def run_worker(
                     "retry_delay_seconds": delay,
                     # Store only the exception type, never URLs, response bodies, or secrets.
                     "last_error_type": type(exc).__name__[:80],
+                    "last_cycle_warning": None,
                     "updated_at": _utc_now(),
                 })
                 _write_status(target, status)

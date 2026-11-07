@@ -47,6 +47,18 @@ def _number(value: Any) -> float | None:
     return parsed if math.isfinite(parsed) else None
 
 
+def _utc_timestamp(value: Any) -> datetime | None:
+    if value is None:
+        return None
+    try:
+        parsed = datetime.fromisoformat(str(value).strip().replace("Z", "+00:00"))
+    except (TypeError, ValueError, OverflowError):
+        return None
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        return None
+    return parsed.astimezone(timezone.utc)
+
+
 def _outcome_indices(market: dict[str, Any]) -> tuple[int, int] | None:
     outcomes = [str(value).strip().casefold() for value in _list_field(market.get("outcomes"))]
     yes = [index for index, value in enumerate(outcomes) if value in {"yes", "true"}]
@@ -151,15 +163,34 @@ class LiveClobMarketSnapshotProvider:
             yes_price = (yes_bid + yes_ask) / 2.0
             no_price = (no_bid + no_ask) / 2.0
             observed_values = [yes_book.get("observed_at"), no_book.get("observed_at")]
-            try:
-                observed = [
-                    datetime.fromisoformat(str(value).replace("Z", "+00:00")).astimezone(timezone.utc)
-                    for value in observed_values
-                ]
-            except (TypeError, ValueError, OverflowError):
+            observed = [_utc_timestamp(value) for value in observed_values]
+            if any(stamp is None for stamp in observed):
                 continue
-            ages = [(current - stamp).total_seconds() for stamp in observed]
-            if any(age < -5.0 or age > self.max_age_seconds for age in ages):
+            received_ages = [(current - stamp).total_seconds() for stamp in observed]
+            if any(age < -5.0 or age > self.max_age_seconds for age in received_ages):
+                continue
+
+            # A recently received response can still contain an old cached book.
+            # When the SDK supplies the venue timestamp, enforce the same freshness
+            # bound against it. Missing venue timestamps remain explicitly absent;
+            # malformed, timezone-naive, stale, or future-dated values fail closed.
+            exchange_stamps: list[datetime | None] = []
+            exchange_valid = True
+            for book in (yes_book, no_book):
+                raw_exchange_stamp = book.get("exchange_timestamp")
+                if raw_exchange_stamp is None or not str(raw_exchange_stamp).strip():
+                    exchange_stamps.append(None)
+                    continue
+                exchange_stamp = _utc_timestamp(raw_exchange_stamp)
+                if exchange_stamp is None:
+                    exchange_valid = False
+                    break
+                exchange_age = (current - exchange_stamp).total_seconds()
+                if exchange_age < -5.0 or exchange_age > self.max_age_seconds:
+                    exchange_valid = False
+                    break
+                exchange_stamps.append(exchange_stamp)
+            if not exchange_valid:
                 continue
             snapshots.append({
                 "market_id": market["market_id"],

@@ -50,6 +50,8 @@ class PaperParameterTunerTests(unittest.TestCase):
         self.assertEqual(len(result["training_candidate_scores"]), 4)
         self.assertTrue(all(row["training_trade_count"] >= 30 for row in result["training_candidate_scores"]))
         self.assertEqual(len(result["input_dataset_sha256"]), 64)
+        self.assertEqual(len(result["evaluation_run_sha256"]), 64)
+        self.assertEqual(result["evaluation_run_sha256"], forward["evaluation_run_sha256"])
 
     def test_candidate_is_rejected_when_one_chronological_holdout_fold_is_bad(self):
         rows = []
@@ -114,6 +116,7 @@ class PaperParameterTunerTests(unittest.TestCase):
         rows.append(trade(61, 0.5, 0.1, 1.0, trade_id="1"))
         result = tune_sentiment_threshold(rows, current_threshold=0.3)
         self.assertEqual(result["duplicate_trade_ids_excluded"], 1)
+        self.assertEqual(result["duplicate_trade_rows_excluded"], 2)
         self.assertEqual(result["closed_trade_count"], 59)
         self.assertFalse(result["applied"])
 
@@ -122,6 +125,7 @@ class PaperParameterTunerTests(unittest.TestCase):
         rows.append(trade(61, 0.5, 0.1, 1.0, market_id="market-1"))
         result = tune_sentiment_threshold(rows, current_threshold=0.3)
         self.assertEqual(result["duplicate_market_ids_excluded"], 1)
+        self.assertEqual(result["duplicate_market_rows_excluded"], 2)
         self.assertEqual(result["closed_trade_count"], 59)
         self.assertFalse(result["applied"])
 
@@ -144,6 +148,9 @@ class PaperParameterTunerTests(unittest.TestCase):
         changed = tune_sentiment_threshold(changed_rows, current_threshold=0.3)
         self.assertEqual(forward["input_dataset_sha256"], reversed_result["input_dataset_sha256"])
         self.assertNotEqual(forward["input_dataset_sha256"], changed["input_dataset_sha256"])
+        self.assertNotEqual(forward["evaluation_run_sha256"], changed["evaluation_run_sha256"])
+        different_config = tune_sentiment_threshold(rows, current_threshold=0.31)
+        self.assertNotEqual(forward["evaluation_run_sha256"], different_config["evaluation_run_sha256"])
         self.assertEqual(forward["input_dataset_sha256"], forward["input_dataset_sha256"].lower())
 
     def test_postmortem_groups_losing_trades_by_exit_reason(self):

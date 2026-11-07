@@ -51,7 +51,7 @@ def _book_payload(book: Any) -> str:
     if not isinstance(book, dict):
         book = {}
     allowed = (
-        "observed_at", "best_bid", "best_ask", "bids_top5", "asks_top5",
+        "observed_at", "exchange_timestamp", "best_bid", "best_ask", "bids_top5", "asks_top5",
         "bid_depth_usd_top5", "ask_depth_usd_top5", "depth_imbalance_top5",
         "source", "book_hash", "tick_size", "min_order_size",
     )

@@ -158,24 +158,32 @@ class EventOutcomeTests(unittest.TestCase):
     def test_invalid_aggregation_configuration_is_rejected(self):
         valid_now = 1_800_000_000.0
         invalid_calls = (
-            {"now_epoch": None},
+            {"now_epoch": None, "max_age_hours": 24.0, "minimum_publishers": 2, "minimum_consensus_ratio": 0.75},
             {"now_epoch": float("nan")},
             {"now_epoch": float("inf")},
+            {"now_epoch": True},
             {"max_age_hours": float("nan")},
             {"max_age_hours": float("inf")},
             {"max_age_hours": 0},
+            {"max_age_hours": True},
             {"minimum_publishers": True},
             {"minimum_publishers": 2.0},
             {"minimum_publishers": 0},
             {"minimum_consensus_ratio": float("nan")},
             {"minimum_consensus_ratio": float("inf")},
+            {"minimum_consensus_ratio": True},
         )
-        for kwargs in invalid_calls:
-            with self.subTest(kwargs=kwargs):
+        for overrides in invalid_calls:
+            with self.subTest(overrides=overrides):
+                params = {
+                    "now_epoch": valid_now,
+                    "max_age_hours": 24.0,
+                    "minimum_publishers": 2,
+                    "minimum_consensus_ratio": 0.75,
+                }
+                params.update(overrides)
                 with self.assertRaises(ValueError):
-                    aggregate_event_outcome_evidence(
-                        [], now_epoch=valid_now, **kwargs
-                    )
+                    aggregate_event_outcome_evidence([], **params)
 
     def test_conflict_adjusted_consensus_can_pass_only_at_configured_ratio(self):
         now = 1_800_000_000.0

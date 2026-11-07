@@ -1,8 +1,8 @@
-"""Offline news-driven paper simulator.
+"""News-driven Polymarket paper research engine.
 
-Market prices are supplied by a local JSON snapshot/replay file. This module
-fetches third-party RSS headlines only; it contains no Polymarket API client,
-wallet integration, signer, or order-submission code.
+Market prices may come from a local JSON replay or explicitly enabled public
+Gamma/CLOB read-only data. The engine never uses account credentials, signing,
+or order-submission code; every simulated position remains paper-only.
 """
 from __future__ import annotations
 
@@ -23,7 +23,7 @@ from adaptive_paper_risk import (
     dynamic_exit_levels,
     size_position_by_risk,
 )
-from market_snapshot_provider import JsonMarketSnapshotProvider
+from live_market_snapshot_provider import provider_from_env
 from event_outcome import aggregate_event_outcome_evidence, classify_event_outcome
 from news_monitor import DEFAULT_FEEDS, NewsCollector, match_news_to_markets
 from news_sentiment import aggregate_market_news_sentiment, analyze_news_sentiment
@@ -31,7 +31,7 @@ from paper_parameter_tuner import tune_sentiment_threshold
 
 DRY_RUN = True
 LIVE_EXECUTION_ENABLED = False
-ENGINE_MODE = "OFFLINE_NEWS_PAPER_ONLY"
+ENGINE_MODE = "NEWS_PAPER_RESEARCH_ONLY"
 
 
 def _bool_env(name: str, default: bool) -> bool:
@@ -128,6 +128,13 @@ class PaperConfig:
         self.auto_tune_minimum_trades = _int_env("PAPER_AUTO_TUNE_MINIMUM_TRADES", 60, 30, 10_000)
         self.auto_tune_interval_hours = _float_env("PAPER_AUTO_TUNE_INTERVAL_HOURS", 24.0, 1.0, 720.0)
         self.market_snapshot_file = Path(os.getenv("MARKET_SNAPSHOT_FILE", "./data/market_snapshots.json"))
+        self.market_data_source = os.getenv("PAPER_MARKET_DATA_SOURCE", "local_json").strip().lower()
+        if self.market_data_source not in {"local_json", "polymarket_public"}:
+            raise ValueError("PAPER_MARKET_DATA_SOURCE must be local_json or polymarket_public")
+        self.live_market_max_markets = _int_env("PAPER_LIVE_MARKET_MAX_MARKETS", 10, 1, 50)
+        self.live_market_max_book_age_seconds = _float_env(
+            "PAPER_LIVE_MARKET_MAX_BOOK_AGE_SECONDS", 30.0, 3.0, 180.0
+        )
         self.database_path = Path(os.getenv("PAPER_DATABASE_PATH", "./data/offline_news_paper.sqlite3"))
         self.news_log_path = Path(os.getenv("NEWS_LOG_PATH", "./data/offline_news_events.jsonl"))
         self.poll_seconds = _int_env("PAPER_POLL_SECONDS", 300, 30, 86_400)
@@ -139,7 +146,7 @@ class OfflineNewsPaperBot:
         config: PaperConfig | None = None,
         *,
         news_collector: NewsCollector | None = None,
-        snapshot_provider: JsonMarketSnapshotProvider | None = None,
+        snapshot_provider: Any | None = None,
     ) -> None:
         self.config = config or PaperConfig()
         self.config.database_path.parent.mkdir(parents=True, exist_ok=True)
@@ -150,9 +157,12 @@ class OfflineNewsPaperBot:
         self.db.execute("PRAGMA foreign_keys=ON")
         self._create_schema()
         self.news_collector = news_collector or NewsCollector(self.config.news_log_path, DEFAULT_FEEDS)
-        self.snapshot_provider = snapshot_provider or JsonMarketSnapshotProvider(
-            self.config.market_snapshot_file,
-            max_age_seconds=self.config.maximum_market_age_seconds,
+        self.snapshot_provider = snapshot_provider or provider_from_env(
+            local_path=str(self.config.market_snapshot_file),
+            local_max_age_seconds=self.config.maximum_market_age_seconds,
+            source=self.config.market_data_source,
+            max_markets=self.config.live_market_max_markets,
+            max_book_age_seconds=self.config.live_market_max_book_age_seconds,
         )
         self._ensure_account()
 
@@ -549,6 +559,14 @@ class OfflineNewsPaperBot:
             current = current.replace(tzinfo=timezone.utc)
         current = current.astimezone(timezone.utc)
         snapshots = self.snapshot_provider.load(now=current)
+        market_data_diagnostics = getattr(self.snapshot_provider, "last_diagnostics", None)
+        if market_data_diagnostics is None:
+            market_data_diagnostics = {
+                "source": self.config.market_data_source,
+                "snapshots_returned": len(snapshots),
+                "research_only": True,
+                "execution": "none",
+            }
         news_result = (
             self.news_collector.fetch_once()
             if fetch_news else {"feeds_configured": 0, "feeds_succeeded": 0, "feeds_failed": 0}
@@ -615,7 +633,10 @@ class OfflineNewsPaperBot:
         summary = self.summary()
         return {
             "mode": ENGINE_MODE, "dry_run": DRY_RUN, "live_execution_enabled": LIVE_EXECUTION_ENABLED,
-            "markets_loaded_from_local_file": len(snapshots),
+            "market_data_source": self.config.market_data_source,
+            "market_snapshots_loaded": len(snapshots),
+            "markets_loaded_from_local_file": len(snapshots) if self.config.market_data_source == "local_json" else 0,
+            "market_data_diagnostics": market_data_diagnostics,
             "news_feeds_configured": int(news_result.get("feeds_configured") or 0),
             "news_feeds_succeeded": int(news_result.get("feeds_succeeded") or 0),
             "news_feeds_failed": int(news_result.get("feeds_failed") or 0),

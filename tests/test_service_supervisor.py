@@ -69,6 +69,7 @@ class SupervisorTests(unittest.TestCase):
             python_executable="python-test",
         )
         self.assertIsNone(config.monitor_command)
+        self.assertIsNone(config.paper_worker_command)
         self.assertEqual(config.app_command, ("python-test", "app.py"))
         app = FakeProcess()
         commands = []
@@ -85,6 +86,82 @@ class SupervisorTests(unittest.TestCase):
         self.assertEqual(len(commands), 1)
         self.assertEqual(commands[0][0], ["python-test", "app.py"])
         self.assertTrue(app.terminated)
+
+    def test_event_paper_worker_is_sanitized_and_forced_to_paper_mode(self):
+        config = build_supervisor_config(
+            {
+                "ENABLE_EVENT_PAPER_WORKER": "true",
+                "DATA_DIR": "/persist/data",
+                "DRY_RUN": "false",
+                "LIVE_EXECUTION_ENABLED": "true",
+                "LIVE_TRADING_ENABLED": "true",
+                "LIVE_TRADING_CONFIRMATION": "synthetic-live-secret",
+                "LIVE_EXPECTED_WALLET": "synthetic-wallet",
+                "POLYMARKET_PRIVATE_KEY": "synthetic-private-key",
+            },
+            python_executable="python-test",
+        )
+        self.assertEqual(config.paper_worker_command, ("python-test", "event_paper_worker.py"))
+        self.assertEqual(config.paper_worker_env["DRY_RUN"], "true")
+        self.assertEqual(config.paper_worker_env["LIVE_EXECUTION_ENABLED"], "false")
+        self.assertNotIn("LIVE_TRADING_ENABLED", config.paper_worker_env)
+        self.assertNotIn("LIVE_TRADING_CONFIRMATION", config.paper_worker_env)
+        self.assertNotIn("LIVE_EXPECTED_WALLET", config.paper_worker_env)
+        self.assertNotIn("POLYMARKET_PRIVATE_KEY", config.paper_worker_env)
+        self.assertEqual(
+            config.paper_worker_env["PAPER_DATABASE_PATH"],
+            "/persist/data/offline_news_paper.sqlite3",
+        )
+        self.assertEqual(
+            config.paper_worker_env["MARKET_HISTORY_DATABASE_PATH"],
+            "/persist/data/market_history.sqlite3",
+        )
+        self.assertEqual(
+            config.paper_worker_env["EVENT_PAPER_WORKER_STATUS_FILE"],
+            "/persist/data/event_paper_worker_status.json",
+        )
+
+    def test_invalid_event_paper_worker_flag_fails_closed(self):
+        with self.assertRaisesRegex(ValueError, "ENABLE_EVENT_PAPER_WORKER"):
+            build_supervisor_config({"ENABLE_EVENT_PAPER_WORKER": "sometimes"})
+
+    def test_event_paper_worker_restarts_after_failure_with_bounded_backoff(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as directory:
+            config = build_supervisor_config(
+                {
+                    "ENABLE_EVENT_PAPER_WORKER": "true",
+                    "DATA_DIR": directory,
+                    "SERVICE_SUPERVISOR_POLL_SECONDS": "0.25",
+                },
+                python_executable="python-test",
+            )
+            app = FakeProcess()
+            failed_worker = FakeProcess(poll_results=[7])
+            restarted_worker = FakeProcess()
+            processes = [app, failed_worker, restarted_worker]
+            commands = []
+
+            def fake_popen(command, *, env):
+                commands.append((command, env))
+                return processes.pop(0)
+
+            event = FakeStopEvent(stop_after_waits=2)
+            result = run_supervisor(config, popen_factory=fake_popen, stop_event=event)
+            self.assertEqual(result, 0)
+            self.assertEqual(len(commands), 3)
+            self.assertEqual(commands[1][0], ["python-test", "event_paper_worker.py"])
+            self.assertEqual(commands[2][0], ["python-test", "event_paper_worker.py"])
+            self.assertNotIn("POLYMARKET_PRIVATE_KEY", commands[1][1])
+            self.assertEqual(failed_worker.returncode, 7)
+            self.assertTrue(restarted_worker.terminated)
+            status = read_supervisor_status(config.status_path)
+            self.assertTrue(status["event_paper_worker_enabled"])
+            self.assertEqual(status["event_paper_worker_state"], "stopped")
+            self.assertEqual(status["event_paper_worker_restart_count"], 1)
+            self.assertEqual(status["event_paper_worker_last_exit_code"], 7)
+            self.assertIsNone(status["event_paper_worker_next_restart_at"])
 
     def test_opt_in_monitor_requires_runtime_secret_and_never_puts_it_in_argv(self):
         with self.assertRaisesRegex(ValueError, "requires POLYMARKET_PRIVATE_KEY"):

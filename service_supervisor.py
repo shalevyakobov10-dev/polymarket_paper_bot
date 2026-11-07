@@ -1,10 +1,9 @@
-"""Small PID-1 supervisor for the paper worker and optional read-only account monitor.
+"""PID-1 supervisor for the HTTP service and isolated research/account workers.
 
-The authenticated monitor is opt-in and never receives credentials in argv.
-When enabled, it inherits secrets only from the runtime environment; its SQLite
-journal is persisted on the configured DATA_DIR volume. A monitor disconnect
-restarts that process with bounded exponential backoff. If the main HTTP worker
-exits, the container exits so the platform can restart the whole service.
+The event-aware paper worker uses public market/news data only and is enabled by
+default. The authenticated account monitor remains separately opt-in and
+read-only. Every child is restarted with bounded backoff; the HTTP worker remains
+the main service process whose failure exits the container.
 """
 from __future__ import annotations
 
@@ -37,6 +36,8 @@ class SupervisorConfig:
     monitor_command: tuple[str, ...] | None
     app_env: dict[str, str]
     monitor_env: dict[str, str] | None
+    paper_worker_command: tuple[str, ...] | None
+    paper_worker_env: dict[str, str] | None
     status_path: Path
     poll_interval_seconds: float = 1.0
     monitor_restart_base_seconds: float = 2.0
@@ -66,6 +67,10 @@ def build_supervisor_config(
     if enabled_raw not in {"true", "false"}:
         raise ValueError("ENABLE_USER_ORDER_MONITOR must be exactly true or false")
     monitor_enabled = enabled_raw == "true"
+    paper_enabled_raw = str(source.get("ENABLE_EVENT_PAPER_WORKER", "false")).strip().lower()
+    if paper_enabled_raw not in {"true", "false"}:
+        raise ValueError("ENABLE_EVENT_PAPER_WORKER must be exactly true or false")
+    paper_worker_enabled = paper_enabled_raw == "true"
 
     data_dir = Path(source.get("DATA_DIR", "data")).expanduser()
     database_path = Path(
@@ -90,11 +95,34 @@ def build_supervisor_config(
         "POLYMARKET_API_SECRET",
         "POLYMARKET_API_PASSPHRASE",
         "POLYMARKET_SECRET",
+        "POLYMARKET_DEPOSIT_WALLET",
+        "LIVE_EXPECTED_WALLET",
+        "LIVE_TRADING_CONFIRMATION",
     ):
         app_env.pop(secret_name, None)
+    for environment_name in tuple(app_env):
+        if environment_name.startswith("LIVE_"):
+            app_env.pop(environment_name, None)
+
+    # The research worker receives only the public worker environment, never
+    # account-monitor or future execution credentials.
+    paper_worker_env = dict(app_env)
+    paper_worker_env["DATA_DIR"] = str(data_dir)
+    paper_worker_env.setdefault("PAPER_DATABASE_PATH", str(data_dir / "offline_news_paper.sqlite3"))
+    paper_worker_env.setdefault("MARKET_HISTORY_DATABASE_PATH", str(data_dir / "market_history.sqlite3"))
+    paper_worker_env.setdefault("NEWS_LOG_PATH", str(data_dir / "offline_news_events.jsonl"))
+    paper_worker_env.setdefault("MARKET_SNAPSHOT_FILE", str(data_dir / "market_snapshots.json"))
+    paper_worker_env["DRY_RUN"] = "true"
+    paper_worker_env["LIVE_EXECUTION_ENABLED"] = "false"
+    paper_worker_env["EVENT_PAPER_WORKER_STATUS_FILE"] = str(
+        source.get("EVENT_PAPER_WORKER_STATUS_FILE", str(data_dir / "event_paper_worker_status.json"))
+    )
 
     executable = python_executable or sys.executable
     app_command = (executable, "app.py")
+    paper_worker_command: tuple[str, ...] | None = (
+        (executable, "event_paper_worker.py") if paper_worker_enabled else None
+    )
     monitor_command: tuple[str, ...] | None = None
 
     if monitor_enabled:
@@ -131,6 +159,8 @@ def build_supervisor_config(
         monitor_command=monitor_command,
         app_env=app_env,
         monitor_env=monitor_env if monitor_enabled else None,
+        paper_worker_command=paper_worker_command,
+        paper_worker_env=paper_worker_env if paper_worker_enabled else None,
         status_path=status_path,
         poll_interval_seconds=min(poll_interval, 10.0),
     )
@@ -175,17 +205,23 @@ def run_supervisor(
     stop_event: Any | None = None,
     logger: logging.Logger | None = None,
 ) -> int:
-    """Run the HTTP worker and optionally supervise the authenticated read-only monitor."""
+    """Run the HTTP worker and independently supervise optional child workers."""
     log = logger or LOGGER
     stopping = stop_event or threading.Event()
     monitor_enabled = config.monitor_command is not None
     monitor_state = "starting" if monitor_enabled else "disabled"
+    paper_worker_enabled = config.paper_worker_command is not None
+    paper_worker_state = "starting" if paper_worker_enabled else "disabled"
     service_state = "starting"
     monitor_process = None
+    paper_worker_process = None
     app_process = None
     monitor_failures = 0
+    paper_worker_failures = 0
     last_monitor_exit_code: int | None = None
     next_restart_at: str | None = None
+    last_paper_worker_exit_code: int | None = None
+    paper_worker_next_restart_at: str | None = None
     app_exit_code: int | None = None
 
     def publish_status() -> None:
@@ -198,6 +234,11 @@ def run_supervisor(
                 last_exit_code=last_monitor_exit_code,
                 app_exit_code=app_exit_code,
                 next_restart_at=next_restart_at,
+                event_paper_worker_enabled=paper_worker_enabled,
+                event_paper_worker_state=paper_worker_state,
+                event_paper_worker_restart_count=paper_worker_failures,
+                event_paper_worker_last_exit_code=last_paper_worker_exit_code,
+                event_paper_worker_next_restart_at=paper_worker_next_restart_at,
             )
             write_supervisor_status(config.status_path, payload)
         except (OSError, TypeError, ValueError) as exc:
@@ -230,6 +271,16 @@ def run_supervisor(
             env=dict(config.app_env),
         )
         log.info("started paper HTTP worker")
+        if paper_worker_enabled:
+            paper_worker_process = popen_factory(
+                list(config.paper_worker_command or ()),
+                env=dict(config.paper_worker_env or {}),
+            )
+            paper_worker_state = "running"
+            log.info("started event-aware paper research worker")
+        else:
+            paper_worker_state = "disabled"
+            log.info("event-aware paper research worker is disabled")
         if not monitor_enabled:
             log.info("authenticated account monitor is disabled")
         else:
@@ -248,10 +299,44 @@ def run_supervisor(
                 log.error("paper HTTP worker exited with code %s", app_code)
                 service_state = "app_failed"
                 monitor_state = "stopped" if monitor_enabled else "disabled"
+                paper_worker_state = "stopped" if paper_worker_enabled else "disabled"
                 app_exit_code = int(app_code)
                 next_restart_at = None
+                paper_worker_next_restart_at = None
                 publish_status()
                 return int(app_code) if int(app_code) != 0 else 1
+
+            if paper_worker_process is not None:
+                paper_code = paper_worker_process.poll()
+                if paper_code is not None:
+                    paper_worker_failures += 1
+                    last_paper_worker_exit_code = int(paper_code)
+                    delay = monitor_restart_delay(
+                        paper_worker_failures,
+                        base_seconds=config.monitor_restart_base_seconds,
+                        max_seconds=config.monitor_restart_max_seconds,
+                    )
+                    paper_worker_next_restart_at = (
+                        datetime.now(timezone.utc) + timedelta(seconds=delay)
+                    ).isoformat()
+                    paper_worker_state = "restarting"
+                    publish_status()
+                    log.warning(
+                        "event-aware paper worker exited with code %s; restart %s in %.1f seconds",
+                        paper_code,
+                        paper_worker_failures,
+                        delay,
+                    )
+                    if wait_with_heartbeat(delay):
+                        break
+                    paper_worker_process = popen_factory(
+                        list(config.paper_worker_command or ()),
+                        env=dict(config.paper_worker_env or {}),
+                    )
+                    paper_worker_state = "running"
+                    paper_worker_next_restart_at = None
+                    publish_status()
+                    continue
 
             if monitor_process is not None:
                 monitor_code = monitor_process.poll()
@@ -293,20 +378,30 @@ def run_supervisor(
     except Exception:
         service_state = "startup_failed"
         monitor_state = "stopped" if monitor_enabled else "disabled"
+        paper_worker_state = "stopped" if paper_worker_enabled else "disabled"
         next_restart_at = None
+        paper_worker_next_restart_at = None
         publish_status()
         raise
     finally:
         _stop_child(monitor_process)
+        _stop_child(paper_worker_process)
         _stop_child(app_process)
         if service_state != "app_failed" and service_state != "startup_failed":
             service_state = "stopped"
             monitor_state = "stopped" if monitor_enabled else "disabled"
+            paper_worker_state = "stopped" if paper_worker_enabled else "disabled"
             next_restart_at = None
+            paper_worker_next_restart_at = None
             publish_status()
 
 
 def main() -> int:
+    try:
+        from dotenv import load_dotenv
+        load_dotenv()
+    except ImportError:
+        pass
     logging.basicConfig(
         level=os.environ.get("LOG_LEVEL", "INFO").upper(),
         format="%(asctime)s %(levelname)s %(name)s %(message)s",

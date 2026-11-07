@@ -103,6 +103,40 @@ class SupervisorStatusTests(unittest.TestCase):
         self.assertEqual(loaded["monitor_last_exit_code"], 7)
         self.assertEqual(loaded["app_exit_code"], 17)
 
+    def test_event_paper_worker_restart_state_round_trips(self):
+        payload = build_supervisor_status(
+            service_state="running",
+            monitor_enabled=False,
+            monitor_state="disabled",
+            event_paper_worker_enabled=True,
+            event_paper_worker_state="restarting",
+            event_paper_worker_restart_count=2,
+            event_paper_worker_last_exit_code=7,
+            event_paper_worker_next_restart_at="2026-11-07T10:00:05+00:00",
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            target = Path(directory) / "status.json"
+            write_supervisor_status(target, payload)
+            loaded = read_supervisor_status(target)
+        self.assertTrue(loaded["event_paper_worker_enabled"])
+        self.assertEqual(loaded["event_paper_worker_state"], "restarting")
+        self.assertEqual(loaded["event_paper_worker_restart_count"], 2)
+        self.assertEqual(loaded["event_paper_worker_last_exit_code"], 7)
+        self.assertEqual(
+            loaded["event_paper_worker_next_restart_at"],
+            "2026-11-07T10:00:05+00:00",
+        )
+
+    def test_disabled_event_worker_must_use_disabled_status(self):
+        with self.assertRaisesRegex(ValueError, "disabled event paper worker"):
+            build_supervisor_status(
+                service_state="running",
+                monitor_enabled=False,
+                monitor_state="disabled",
+                event_paper_worker_enabled=False,
+                event_paper_worker_state="running",
+            )
+
     def test_status_builder_rejects_invalid_or_inconsistent_state(self):
         common = {
             "service_state": "running",

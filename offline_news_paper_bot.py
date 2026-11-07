@@ -1,8 +1,8 @@
-"""Offline news-driven paper simulator.
+"""News-driven paper simulator using public read-only market data.
 
-Market prices are supplied by a local JSON snapshot/replay file. This module
-fetches third-party RSS headlines only; it contains no Polymarket API client,
-wallet integration, signer, or order-submission code.
+The default provider discovers Gamma markets and reads public CLOB order books.
+A local JSON replay provider remains available for deterministic research. This
+module has no wallet integration, signer, or order-submission code.
 """
 from __future__ import annotations
 
@@ -24,9 +24,15 @@ from adaptive_paper_risk import (
     size_position_by_risk,
 )
 from market_snapshot_provider import JsonMarketSnapshotProvider
+from live_market_snapshot_provider import LiveClobMarketSnapshotProvider
+from market_history_store import MarketHistoryStore
+from paper_orderbook_execution import simulate_buy, simulate_sell
+from event_outcome import aggregate_event_outcome_evidence, classify_event_outcome
 from news_monitor import DEFAULT_FEEDS, NewsCollector, match_news_to_markets
 from news_sentiment import aggregate_market_news_sentiment, analyze_news_sentiment
 from paper_parameter_tuner import tune_sentiment_threshold
+from risk_manager import evaluate_paper_entry
+from paper_performance import evaluate_paper_performance
 
 DRY_RUN = True
 LIVE_EXECUTION_ENABLED = False
@@ -108,11 +114,13 @@ class PaperConfig:
         self.max_daily_drawdown_pct = _float_env("PAPER_MAX_DAILY_DRAWDOWN_PCT", 0.05, 0.005, 0.25)
         self.max_portfolio_drawdown_pct = _float_env("PAPER_MAX_PORTFOLIO_DRAWDOWN_PCT", 0.20, 0.01, 0.75)
         self.fee_rate = _float_env("PAPER_FEE_RATE", 0.01, 0.0, 0.20)
-        self.min_sentiment_threshold = _float_env("NEWS_SENTIMENT_THRESHOLD", 0.35, 0.05, 1.0)
+        self.min_event_evidence_threshold = _float_env("PAPER_EVENT_EVIDENCE_THRESHOLD", 0.75, 0.51, 1.0)
         self.minimum_publishers = _int_env("NEWS_MINIMUM_PUBLISHERS", 2, 1, 20)
+        self.minimum_event_consensus_ratio = _float_env("PAPER_MIN_EVENT_CONSENSUS_RATIO", 0.75, 0.51, 1.0)
         self.maximum_news_age_hours = _float_env("NEWS_MAXIMUM_AGE_HOURS", 24.0, 1.0, 168.0)
         self.half_life_hours = _float_env("NEWS_SENTIMENT_HALF_LIFE_HOURS", 6.0, 0.5, 72.0)
         self.maximum_spread_bps = _float_env("PAPER_MAX_SPREAD_BPS", 500.0, 10.0, 5000.0)
+        self.maximum_entry_impact_bps = _float_env("PAPER_MAX_ENTRY_IMPACT_BPS", 100.0, 1.0, 5000.0)
         self.maximum_market_age_seconds = _float_env("MARKET_SNAPSHOT_MAX_AGE_SECONDS", 180.0, 10.0, 3600.0)
         self.fallback_volatility = _float_env("PAPER_FALLBACK_VOLATILITY", 0.02, 0.001, 0.20)
         self.stop_volatility_multiplier = _float_env("PAPER_STOP_VOLATILITY_MULTIPLIER", 2.0, 0.5, 5.0)
@@ -126,7 +134,13 @@ class PaperConfig:
         self.auto_tune_minimum_trades = _int_env("PAPER_AUTO_TUNE_MINIMUM_TRADES", 60, 30, 10_000)
         self.auto_tune_interval_hours = _float_env("PAPER_AUTO_TUNE_INTERVAL_HOURS", 24.0, 1.0, 720.0)
         self.market_snapshot_file = Path(os.getenv("MARKET_SNAPSHOT_FILE", "./data/market_snapshots.json"))
+        self.market_data_source = os.getenv("PAPER_MARKET_DATA_SOURCE", "live_clob").strip().lower()
+        if self.market_data_source not in {"live_clob", "local_json"}:
+            raise ValueError("PAPER_MARKET_DATA_SOURCE must be live_clob or local_json")
         self.database_path = Path(os.getenv("PAPER_DATABASE_PATH", "./data/offline_news_paper.sqlite3"))
+        self.market_history_database_path = Path(
+            os.getenv("MARKET_HISTORY_DATABASE_PATH", "./data/market_history.sqlite3")
+        )
         self.news_log_path = Path(os.getenv("NEWS_LOG_PATH", "./data/offline_news_events.jsonl"))
         self.poll_seconds = _int_env("PAPER_POLL_SECONDS", 300, 30, 86_400)
 
@@ -142,20 +156,30 @@ class OfflineNewsPaperBot:
         self.config = config or PaperConfig()
         self.config.database_path.parent.mkdir(parents=True, exist_ok=True)
         self.config.news_log_path.parent.mkdir(parents=True, exist_ok=True)
+        self.config.market_history_database_path.parent.mkdir(parents=True, exist_ok=True)
+        self.market_history_store = MarketHistoryStore(self.config.market_history_database_path)
         self.db = sqlite3.connect(self.config.database_path, timeout=20)
         self.db.row_factory = sqlite3.Row
         self.db.execute("PRAGMA journal_mode=WAL")
         self.db.execute("PRAGMA foreign_keys=ON")
         self._create_schema()
         self.news_collector = news_collector or NewsCollector(self.config.news_log_path, DEFAULT_FEEDS)
-        self.snapshot_provider = snapshot_provider or JsonMarketSnapshotProvider(
-            self.config.market_snapshot_file,
-            max_age_seconds=self.config.maximum_market_age_seconds,
-        )
+        if snapshot_provider is not None:
+            self.snapshot_provider = snapshot_provider
+        elif self.config.market_data_source == "live_clob":
+            self.snapshot_provider = LiveClobMarketSnapshotProvider(
+                max_age_seconds=min(self.config.maximum_market_age_seconds, 30.0),
+            )
+        else:
+            self.snapshot_provider = JsonMarketSnapshotProvider(
+                self.config.market_snapshot_file,
+                max_age_seconds=self.config.maximum_market_age_seconds,
+            )
         self._ensure_account()
 
     def close(self) -> None:
         self.db.close()
+        self.market_history_store.close()
 
     def _create_schema(self) -> None:
         self.db.executescript("""
@@ -241,7 +265,7 @@ class OfflineNewsPaperBot:
             (
                 self.config.starting_cash, self.config.starting_cash,
                 self.config.starting_cash, current.date().isoformat(),
-                self.config.starting_cash, self.config.min_sentiment_threshold,
+                self.config.starting_cash, self.config.min_event_evidence_threshold,
             ),
         )
         self.db.commit()
@@ -295,13 +319,20 @@ class OfflineNewsPaperBot:
                     (token_id, snapshot["market_id"], snapshot["observed_at"], mid, bid, ask),
                 )
 
-    def _close_due_trades(self, snapshots: dict[str, dict[str, Any]], now: datetime) -> list[dict[str, Any]]:
+    def _close_due_trades(
+        self,
+        snapshots: dict[str, dict[str, Any]],
+        now: datetime,
+    ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
         closed: list[dict[str, Any]] = []
+        blocked: list[dict[str, Any]] = []
         for trade in self._open_trades():
             snapshot = snapshots.get(str(trade["market_id"]))
             if snapshot is None:
                 continue
-            _token, bid, _ask, _mid = self._book_values(snapshot, str(trade["direction"]))
+            direction = str(trade["direction"])
+            suffix = "yes" if direction == "YES" else "no"
+            _token, bid, _ask, _mid = self._book_values(snapshot, direction)
             self.db.execute(
                 "UPDATE trades SET last_mark_price=? WHERE trade_id=?",
                 (bid, trade["trade_id"]),
@@ -317,29 +348,62 @@ class OfflineNewsPaperBot:
                 reason = "time_limit"
             if reason is None:
                 continue
-            shares = float(trade["shares"])
-            exit_fee = shares * bid * self.config.fee_rate
-            net_proceeds = shares * bid - exit_fee
+
+            book = snapshot.get(f"{suffix}_book")
+            bids = book.get("bids_top5") if isinstance(book, dict) else None
+            try:
+                fill = simulate_sell(bids, shares=float(trade["shares"]))
+            except ValueError:
+                fill = None
+            if fill is None:
+                blocked.append({
+                    "trade_id": trade["trade_id"], "market_id": trade["market_id"],
+                    "direction": direction, "reason": "visible_bid_depth_unavailable",
+                    "execution": "none",
+                })
+                continue
+            if abs(float(fill["best_price"]) - bid) > 1e-8:
+                blocked.append({
+                    "trade_id": trade["trade_id"], "market_id": trade["market_id"],
+                    "direction": direction, "reason": "visible_bid_depth_mismatch",
+                    "execution": "none",
+                })
+                continue
+            if fill["complete"] is not True:
+                blocked.append({
+                    "trade_id": trade["trade_id"], "market_id": trade["market_id"],
+                    "direction": direction, "reason": "insufficient_visible_bid_depth",
+                    "unfilled_shares": fill["unfilled_shares"],
+                    "execution": "none",
+                })
+                continue
+
+            exit_price = float(fill["average_price"])
+            gross_proceeds = float(fill["quote_proceeds"])
+            exit_fee = gross_proceeds * self.config.fee_rate
+            net_proceeds = gross_proceeds - exit_fee
             pnl = net_proceeds - float(trade["notional"]) - float(trade["entry_fee"])
             cost = float(trade["notional"]) + float(trade["entry_fee"])
             net_roi = pnl / cost if cost > 0 else 0.0
             self.db.execute(
                 "UPDATE trades SET status='CLOSED',closed_at=?,exit_price=?,exit_fee=?,pnl=?,"
                 "net_roi=?,exit_reason=?,last_mark_price=? WHERE trade_id=?",
-                (_iso(now), bid, exit_fee, pnl, net_roi, reason, bid, trade["trade_id"]),
+                (_iso(now), exit_price, exit_fee, pnl, net_roi, reason, bid, trade["trade_id"]),
             )
-            account = self._account()
             self.db.execute(
                 "UPDATE account_state SET cash=cash+? WHERE singleton_id=1",
                 (net_proceeds,),
             )
             closed.append({
                 "trade_id": trade["trade_id"], "market_id": trade["market_id"],
-                "direction": trade["direction"], "pnl": round(pnl, 8),
+                "direction": direction, "pnl": round(pnl, 8),
                 "net_roi": round(net_roi, 8), "exit_reason": reason,
+                "exit_price": exit_price, "best_bid": bid,
+                "price_impact_bps": fill["price_impact_bps"],
+                "levels_used": fill["levels_used"],
                 "execution": "simulated_only",
             })
-        return closed
+        return closed, blocked
 
     def _open_trade(
         self,
@@ -354,13 +418,26 @@ class OfflineNewsPaperBot:
             (snapshot["market_id"],),
         ).fetchone():
             return None, "market_already_has_open_position"
-        direction = "YES" if float(signal["score"]) > 0 else "NO"
-        token_id, bid, ask, mid = self._book_values(snapshot, direction)
-        spread_bps = (ask - bid) / mid * 10_000.0 if mid > 0 else float("inf")
+        direction = str(signal.get("direction") or "").upper()
+        if direction not in {"YES", "NO"}:
+            return None, "event_direction_unverified"
+        token_id, bid, ask, _mid = self._book_values(snapshot, direction)
+        spread_bps = (ask - bid) / ((ask + bid) / 2.0) * 10_000.0
         if spread_bps > self.config.maximum_spread_bps:
             return None, "spread_above_limit"
+
+        suffix = "yes" if direction == "YES" else "no"
+        book = snapshot.get(f"{suffix}_book")
+        asks = book.get("asks_top5") if isinstance(book, dict) else None
+        if not isinstance(asks, list) or not asks:
+            return None, "visible_ask_depth_unavailable"
         history = self._history(token_id)
-        levels = dynamic_exit_levels(
+        account = self._account()
+        equity = self._equity()
+        exposure = sum(float(row["notional"]) for row in self._open_trades())
+        remaining_capacity = max(0.0, self.config.max_open_exposure_usd - exposure)
+
+        initial_levels = dynamic_exit_levels(
             entry_price=ask,
             price_history=history,
             volatility_multiplier=self.config.stop_volatility_multiplier,
@@ -369,26 +446,113 @@ class OfflineNewsPaperBot:
             minimum_stop_distance=self.config.minimum_stop_distance,
             maximum_stop_distance=self.config.maximum_stop_distance,
         )
-        account = self._account()
-        equity = self._equity()
-        exposure = sum(float(row["notional"]) for row in self._open_trades())
-        remaining_capacity = max(0.0, self.config.max_open_exposure_usd - exposure)
-        sizing = size_position_by_risk(
+        initial_sizing = size_position_by_risk(
             equity=equity,
             available_cash=float(account["cash"]),
             remaining_exposure_capacity=remaining_capacity,
             entry_price=ask,
-            stop_distance=levels.stop_distance,
+            stop_distance=initial_levels.stop_distance,
             risk_per_trade_pct=self.config.risk_per_trade_pct,
             max_position_usd=self.config.max_position_usd,
         )
-        if not sizing["approved"]:
+        if not initial_sizing["approved"]:
             return None, "risk_sizing_rejected"
-        notional = float(sizing["notional_usd"])
-        shares = float(sizing["shares"])
+
+        candidate_notional = float(initial_sizing["notional_usd"])
+        fill = None
+        levels = None
+        sizing = None
+        entry_price = ask
+        for _attempt in range(4):
+            try:
+                candidate_fill = simulate_buy(asks, quote_budget=candidate_notional)
+            except ValueError:
+                return None, "visible_ask_depth_unavailable"
+            if abs(float(candidate_fill["best_price"]) - ask) > 1e-8:
+                return None, "visible_ask_depth_mismatch"
+            if float(candidate_fill["price_impact_bps"] or 0.0) > self.config.maximum_entry_impact_bps:
+                return None, "entry_impact_above_limit"
+            if candidate_fill["complete"] is not True:
+                return None, "insufficient_visible_ask_depth"
+
+            candidate_entry = float(candidate_fill["average_price"])
+            candidate_levels = dynamic_exit_levels(
+                entry_price=candidate_entry,
+                price_history=history,
+                volatility_multiplier=self.config.stop_volatility_multiplier,
+                reward_to_risk=self.config.take_profit_r_multiple,
+                fallback_volatility=self.config.fallback_volatility,
+                minimum_stop_distance=self.config.minimum_stop_distance,
+                maximum_stop_distance=self.config.maximum_stop_distance,
+            )
+            candidate_sizing = size_position_by_risk(
+                equity=equity,
+                available_cash=float(account["cash"]),
+                remaining_exposure_capacity=remaining_capacity,
+                entry_price=candidate_entry,
+                stop_distance=candidate_levels.stop_distance,
+                risk_per_trade_pct=self.config.risk_per_trade_pct,
+                max_position_usd=self.config.max_position_usd,
+            )
+            if not candidate_sizing["approved"]:
+                return None, "depth_adjusted_risk_sizing_rejected"
+            allowed_notional = min(
+                candidate_notional, float(candidate_sizing["notional_usd"])
+            )
+            if allowed_notional >= candidate_notional - 1e-7:
+                fill = candidate_fill
+                levels = candidate_levels
+                sizing = candidate_sizing
+                entry_price = candidate_entry
+                break
+            candidate_notional = allowed_notional
+
+        if fill is None or levels is None or sizing is None:
+            return None, "depth_adjusted_risk_sizing_unstable"
+        notional = float(fill["quote_filled"])
+        shares = float(fill["shares_filled"])
         entry_fee = notional * self.config.fee_rate
         if notional + entry_fee > float(account["cash"]) + 1e-9:
             return None, "insufficient_paper_cash_after_fees"
+
+        # Independent final hard-risk check. The daily equity change is split
+        # into realized PnL and its residual mark-to-market component so the
+        # second gate sees the same total daily loss basis as the primary gate.
+        latest_account = self._account()
+        current_equity = self._equity()
+        day_realized = float(self.db.execute(
+            "SELECT COALESCE(SUM(pnl),0) AS pnl FROM trades "
+            "WHERE status='CLOSED' AND closed_at>=?",
+            (str(latest_account["day_key"]),),
+        ).fetchone()["pnl"] or 0.0)
+        day_equity_change = current_equity - float(latest_account["day_start_equity"])
+        residual_unrealized = day_equity_change - day_realized
+        equity_peak = max(float(latest_account["equity_peak"]), current_equity)
+        current_drawdown_pct = (
+            max(0.0, (equity_peak - current_equity) / equity_peak * 100.0)
+            if equity_peak > 0 else 100.0
+        )
+        risk_decision = evaluate_paper_entry(
+            price=entry_price,
+            requested_notional=notional,
+            cash=float(latest_account["cash"]),
+            open_exposure=sum(float(row["notional"]) for row in self._open_trades()),
+            open_positions=len(self._open_trades()),
+            max_position_usd=self.config.max_position_usd,
+            max_open_exposure_usd=self.config.max_open_exposure_usd,
+            max_open_positions=self.config.max_open_positions,
+            daily_realized_pnl=day_realized,
+            open_unrealized_pnl=residual_unrealized,
+            daily_loss_limit_usd=max(
+                0.01,
+                float(latest_account["day_start_equity"]) * self.config.max_daily_drawdown_pct,
+            ),
+            fee_rate=self.config.fee_rate,
+            current_drawdown_pct=current_drawdown_pct,
+            max_portfolio_drawdown_pct=self.config.max_portfolio_drawdown_pct * 100.0,
+        )
+        if not risk_decision.approved:
+            return None, f"independent_risk_gate:{risk_decision.reason}"
 
         self.db.execute(
             "INSERT INTO trades(market_id,question,direction,token_id,opened_at,entry_price,shares,"
@@ -397,9 +561,9 @@ class OfflineNewsPaperBot:
             "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'OPEN')",
             (
                 snapshot["market_id"], snapshot["question"], direction, token_id, _iso(now),
-                ask, shares, notional, entry_fee, levels.stop_loss_price,
+                entry_price, shares, notional, entry_fee, levels.stop_loss_price,
                 levels.take_profit_price, float(signal["score"]), abs(float(signal["score"])),
-                float(signal["confidence"]), int(signal["publisher_count"]),
+                float(signal.get("sentiment_confidence") or 0.0), int(signal["publisher_count"]),
                 float(signal["threshold"]), bid,
             ),
         )
@@ -409,10 +573,14 @@ class OfflineNewsPaperBot:
         )
         return {
             "market_id": snapshot["market_id"], "direction": direction,
-            "entry_price": ask, "notional": notional, "shares": shares,
+            "entry_price": entry_price, "best_ask": ask,
+            "price_impact_bps": fill["price_impact_bps"],
+            "levels_used": fill["levels_used"],
+            "notional": notional, "shares": shares,
             "stop_loss_price": levels.stop_loss_price,
             "take_profit_price": levels.take_profit_price,
             "estimated_loss_at_stop_usd": sizing["estimated_loss_at_stop_usd"],
+            "independent_risk_gate": risk_decision.as_dict(),
             "execution": "simulated_only",
         }, ""
 
@@ -442,20 +610,34 @@ class OfflineNewsPaperBot:
         snapshots: list[dict[str, Any]],
         now: datetime,
     ) -> dict[str, dict[str, Any]]:
+        """Build event-proposition signals; VADER is diagnostic only, never directional."""
         markets = [
             {"market_id": row["market_id"], "question": row["question"], "volume_24h": row.get("volume_24h")}
             for row in snapshots
         ]
         by_market: dict[str, list[dict[str, Any]]] = {}
         for news in news_items:
+            title = str(news.get("title") or "")
             candidates = match_news_to_markets(news, markets, max_matches=3)
             sentiment = analyze_news_sentiment(
-                str(news.get("title") or "") + ". " + str(news.get("summary") or "")
+                title + ". " + str(news.get("summary") or "")
             )
             published_epoch = _parse_published_epoch(news.get("published_at"))
             for candidate in candidates:
+                relevance = candidate.get("relevance_score")
+                if not isinstance(relevance, (int, float)) or not math.isfinite(float(relevance)) or float(relevance) < 0.40:
+                    continue
+                event = classify_event_outcome(
+                    str(candidate.get("question") or ""),
+                    title,
+                )
                 by_market.setdefault(str(candidate["market_id"]), []).append({
                     **candidate,
+                    "event_direction": event.get("direction"),
+                    "event_evidence_status": event.get("status"),
+                    "event_evidence_reason": event.get("reason"),
+                    "event_family": event.get("family"),
+                    "event_matched_cues": event.get("matched_cues", []),
                     "sentiment_score": sentiment.get("score"),
                     "sentiment_supported": sentiment.get("supported") is True,
                     "publisher_id": str(news.get("publisher_id") or news.get("source") or ""),
@@ -466,15 +648,34 @@ class OfflineNewsPaperBot:
         results: dict[str, dict[str, Any]] = {}
         now_epoch = now.timestamp()
         for market_id, matches in by_market.items():
-            aggregate = aggregate_market_news_sentiment(
+            event_signal = aggregate_event_outcome_evidence(
+                matches,
+                now_epoch=now_epoch,
+                max_age_hours=self.config.maximum_news_age_hours,
+                minimum_publishers=self.config.minimum_publishers,
+                minimum_consensus_ratio=self.config.minimum_event_consensus_ratio,
+            )
+            sentiment = aggregate_market_news_sentiment(
                 matches,
                 now_epoch=now_epoch,
                 max_age_hours=self.config.maximum_news_age_hours,
                 half_life_hours=self.config.half_life_hours,
                 minimum_publishers=self.config.minimum_publishers,
             )
-            aggregate["matches"] = len(matches)
-            results[market_id] = aggregate
+            event_signal.update({
+                "matches": len(matches),
+                "event_families": sorted({
+                    str(row.get("event_family"))
+                    for row in matches
+                    if row.get("event_family")
+                }),
+                "sentiment_score": sentiment.get("score"),
+                "sentiment_confidence": sentiment.get("confidence", 0.0),
+                "sentiment_publisher_count": sentiment.get("publisher_count", 0),
+                "sentiment_article_count": sentiment.get("article_count", 0),
+                "sentiment_interpretation": "diagnostic_only_not_used_for_yes_no_direction",
+            })
+            results[market_id] = event_signal
         return results
 
     def maybe_tune(self, now: datetime) -> dict[str, Any] | None:
@@ -487,7 +688,7 @@ class OfflineNewsPaperBot:
             if (now - parsed.astimezone(timezone.utc)) < timedelta(hours=self.config.auto_tune_interval_hours):
                 return None
         rows = self.db.execute(
-            "SELECT status,signal_strength,entry_threshold,pnl,net_roi,closed_at,exit_reason "
+            "SELECT trade_id,market_id,status,signal_strength,entry_threshold,pnl,net_roi,closed_at,exit_reason "
             "FROM trades WHERE status='CLOSED' ORDER BY closed_at,trade_id"
         ).fetchall()
         trades = [dict(row) for row in rows]
@@ -512,6 +713,9 @@ class OfflineNewsPaperBot:
             current = current.replace(tzinfo=timezone.utc)
         current = current.astimezone(timezone.utc)
         snapshots = self.snapshot_provider.load(now=current)
+        # Persist the observation set before any paper decision is evaluated. A
+        # storage error aborts this cycle rather than silently losing its audit trail.
+        market_history = self.market_history_store.append_snapshots(snapshots, captured_at=current)
         news_result = (
             self.news_collector.fetch_once()
             if fetch_news else {"feeds_configured": 0, "feeds_succeeded": 0, "feeds_failed": 0}
@@ -521,7 +725,7 @@ class OfflineNewsPaperBot:
         by_market = {row["market_id"]: row for row in snapshots}
 
         with self.db:
-            closed = self._close_due_trades(by_market, current)
+            closed, close_blocked = self._close_due_trades(by_market, current)
             gates = self._update_equity_and_gates(current)
             opened = []
             decisions = []
@@ -529,11 +733,16 @@ class OfflineNewsPaperBot:
             threshold = float(account["active_sentiment_threshold"])
             for snapshot in snapshots:
                 signal = signals.get(snapshot["market_id"])
-                if not signal or not signal.get("qualified") or signal.get("score") is None:
+                if (
+                    not signal
+                    or signal.get("qualified") is not True
+                    or signal.get("direction") not in {"YES", "NO"}
+                    or signal.get("score") is None
+                ):
                     continue
                 score = float(signal["score"])
                 threshold_now = float(self._account()["active_sentiment_threshold"])
-                direction = "YES" if score > 0 else "NO"
+                direction = str(signal["direction"])
                 eligible = abs(score) >= threshold_now
                 reason = "signal_threshold_not_met"
                 if eligible:
@@ -558,7 +767,8 @@ class OfflineNewsPaperBot:
                     "publisher_count,article_count,selected_direction,decision,reason) "
                     "VALUES(?,?,?,?,?,?,?,?,?)",
                     (
-                        _iso(current), snapshot["market_id"], score, float(signal["confidence"]),
+                        _iso(current), snapshot["market_id"], signal.get("sentiment_score"),
+                        float(signal.get("sentiment_confidence") or 0.0),
                         int(signal["publisher_count"]), int(signal["article_count"]),
                         direction, "ENTERED" if reason == "paper_position_opened" else "SKIPPED",
                         reason,
@@ -572,11 +782,16 @@ class OfflineNewsPaperBot:
         summary = self.summary()
         return {
             "mode": ENGINE_MODE, "dry_run": DRY_RUN, "live_execution_enabled": LIVE_EXECUTION_ENABLED,
-            "markets_loaded_from_local_file": len(snapshots),
+            "markets_loaded": len(snapshots),
+            "market_data_source": self.config.market_data_source,
+            "market_history": market_history,
             "news_feeds_configured": int(news_result.get("feeds_configured") or 0),
             "news_feeds_succeeded": int(news_result.get("feeds_succeeded") or 0),
             "news_feeds_failed": int(news_result.get("feeds_failed") or 0),
-            "market_signals": len(signals), "opened": opened, "closed": closed,
+            "market_signals": len(signals),
+            "qualified_event_signals": sum(1 for signal in signals.values() if signal.get("qualified") is True),
+            "event_signal_method": "explicit_event_cue_publisher_consensus_v1",
+            "opened": opened, "closed": closed, "close_blocked": close_blocked,
             "tuning": tuning, "risk_gates": final_gates, "portfolio": summary,
             "research_only": True, "execution": "none",
         }
@@ -588,12 +803,42 @@ class OfflineNewsPaperBot:
         closed_count = self.db.execute("SELECT COUNT(*) AS n FROM trades WHERE status='CLOSED'").fetchone()["n"]
         win_count = self.db.execute("SELECT COUNT(*) AS n FROM trades WHERE status='CLOSED' AND pnl>0").fetchone()["n"]
         realized = self.db.execute("SELECT COALESCE(SUM(pnl),0) AS pnl FROM trades WHERE status='CLOSED'").fetchone()["pnl"]
+        closed_rows = self.db.execute(
+            "SELECT trade_id,pnl,entry_fee,exit_fee,opened_at,closed_at "
+            "FROM trades WHERE status='CLOSED' ORDER BY closed_at,trade_id"
+        ).fetchall()
+        performance = evaluate_paper_performance(
+            [dict(row) for row in closed_rows],
+            starting_cash=float(account["starting_cash"]),
+        )
+        tuning_row = self.db.execute(
+            "SELECT ran_at,result_json FROM tuning_runs ORDER BY tuning_id DESC LIMIT 1"
+        ).fetchone()
+        last_tuning = None
+        if tuning_row is not None:
+            try:
+                tuning_result = json.loads(str(tuning_row["result_json"]))
+                if not isinstance(tuning_result, dict):
+                    raise ValueError("tuning result must be an object")
+                last_tuning = {
+                    "ran_at": str(tuning_row["ran_at"]),
+                    "result": tuning_result,
+                }
+            except (TypeError, ValueError, json.JSONDecodeError):
+                last_tuning = {
+                    "ran_at": str(tuning_row["ran_at"]),
+                    "status": "unreadable_audit_record",
+                    "applied": False,
+                }
         return {
             "cash": round(float(account["cash"]), 8), "equity": round(equity, 8),
             "realized_pnl": round(float(realized or 0.0), 8),
             "open_positions": int(open_count), "closed_positions": int(closed_count),
             "win_rate_pct": round(100.0 * int(win_count) / int(closed_count), 4) if closed_count else None,
-            "active_sentiment_threshold": float(account["active_sentiment_threshold"]),
+            "active_event_evidence_threshold": float(account["active_sentiment_threshold"]),
+            "active_sentiment_threshold": float(account["active_sentiment_threshold"]),  # backward-compatible API alias
+            "performance": performance,
+            "last_tuning": last_tuning,
             "mode": ENGINE_MODE, "execution": "none",
         }
 
@@ -604,7 +849,7 @@ def main() -> None:
         load_dotenv()
     except ImportError:
         pass
-    parser = argparse.ArgumentParser(description="Offline news-driven Polymarket-style paper simulator")
+    parser = argparse.ArgumentParser(description="News-driven paper simulator using public read-only Polymarket market data")
     parser.add_argument("--once", action="store_true", help="Run one snapshot/news cycle and exit")
     args = parser.parse_args()
     bot = OfflineNewsPaperBot()

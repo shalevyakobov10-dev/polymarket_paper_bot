@@ -72,6 +72,24 @@ class OrderBookTests(unittest.TestCase):
         self.assertTrue(result["book_usable"])
         self.assertEqual(result["execution"], "none")
 
+    def test_fetch_order_book_preserves_string_exchange_timestamp(self):
+        sdk_book = SimpleNamespace(
+            asset_id="yes-token",
+            timestamp="2026-11-04T08:00:00+00:00",
+            bids=(SimpleNamespace(price="0.48", size="10"),),
+            asks=(SimpleNamespace(price="0.52", size="10"),),
+            hash="book-hash",
+            min_order_size="5",
+            tick_size="0.01",
+            neg_risk=False,
+        )
+        sdk_client = MagicMock()
+        sdk_client.__enter__.return_value = sdk_client
+        sdk_client.get_order_book.return_value = sdk_book
+        with patch.object(market_data, "PublicClient", return_value=sdk_client):
+            result = market_data.fetch_order_book("yes-token")
+        self.assertEqual(result["exchange_timestamp"], "2026-11-04T08:00:00+00:00")
+
     def test_fetch_order_book_rejects_blank_token_before_network(self):
         with patch.object(market_data, "PublicClient") as factory:
             with self.assertRaisesRegex(ValueError, "token_id is required"):

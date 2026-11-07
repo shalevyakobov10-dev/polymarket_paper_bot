@@ -1,0 +1,114 @@
+name: Paper deployment uptime monitor
+on:
+  push:
+    branches: [main, research/event-aware-news-signals]
+    paths:
+      - ".github/workflows/paper-uptime-monitor.yml"
+  pull_request:
+    branches: [main, research/live-execution-gateway, research/event-aware-news-signals]
+    paths:
+      - ".github/workflows/paper-uptime-monitor.yml"
+  workflow_dispatch:
+  schedule:
+    - cron: "*/15 * * * *"
+permissions:
+  contents: read
+jobs:
+  monitor:
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    env:
+      PAPER_SERVICE_URL: ${{ vars.PAPER_SERVICE_URL }}
+    steps:
+      - name: Explain that monitoring is not configured yet
+        if: ${{ env.PAPER_SERVICE_URL == '' }}
+        run: |
+          echo "PAPER_SERVICE_URL is not configured; cloud uptime checks are intentionally skipped until a deployment URL is added."
+          {
+            echo "## Uptime monitor not configured"
+            echo "Set the repository variable `PAPER_SERVICE_URL` to the public Railway service URL after deployment. No account secret is required."
+          } >> "$GITHUB_STEP_SUMMARY"
+      - name: Check public service health and event-paper worker
+        if: ${{ env.PAPER_SERVICE_URL != '' }}
+        env:
+          PAPER_SERVICE_URL: ${{ vars.PAPER_SERVICE_URL }}
+        run: |
+          python - <<'PY'
+          import json
+          import os
+          from datetime import datetime, timezone
+          from urllib.error import HTTPError, URLError
+          from urllib.parse import urlsplit
+          from urllib.request import Request, urlopen
+
+          raw = os.environ.get("PAPER_SERVICE_URL", "").strip().rstrip("/")
+          parsed = urlsplit(raw)
+          if parsed.scheme != "https" or not parsed.netloc or parsed.username or parsed.password or parsed.query or parsed.fragment:
+              raise SystemExit("PAPER_SERVICE_URL must be a public HTTPS base URL without credentials, query, or fragment")
+
+          def read_json(path):
+              request = Request(
+                  raw + path,
+                  headers={"Accept": "application/json", "User-Agent": "PolymarketPaperBot-UptimeMonitor/1.0"},
+              )
+              try:
+                  with urlopen(request, timeout=15) as response:
+                      if response.status != 200:
+                          raise RuntimeError(f"{path} returned HTTP {response.status}")
+                      return json.loads(response.read().decode("utf-8"))
+              except HTTPError as exc:
+                  raise RuntimeError(f"{path} returned HTTP {exc.code}") from None
+              except (URLError, TimeoutError, OSError, ValueError, json.JSONDecodeError) as exc:
+                  raise RuntimeError(f"{path} request failed: {type(exc).__name__}") from None
+
+          health = read_json("/health")
+          paper = read_json("/event-paper")
+
+          if health.get("ok") is not True or health.get("status") != "healthy":
+              raise SystemExit("Service health is not healthy.")
+          component = (health.get("components") or {}).get("event_paper_worker") or {}
+          if component.get("status") != "healthy" or component.get("heartbeat_fresh") is not True:
+              raise SystemExit("Event paper worker health or heartbeat is not healthy.")
+          if paper.get("worker_state") != "running" or paper.get("heartbeat_fresh") is not True:
+              raise SystemExit("Event paper worker is not running with a fresh heartbeat.")
+          if int(paper.get("markets_loaded_last_cycle") or 0) < 1:
+              raise SystemExit("Latest paper cycle did not load any usable markets.")
+          if paper.get("live_execution_enabled") is not False or paper.get("execution") != "none":
+              raise SystemExit("Paper worker execution mode is not explicitly disabled.")
+          if paper.get("backup_error_type"):
+              raise SystemExit("Paper database backup is reporting an error.")
+          if int(paper.get("backup_files_last_run") or 0) != 2:
+              raise SystemExit("Both paper SQLite databases have not been backed up yet.")
+          backup_at = paper.get("last_backup_at")
+          if not backup_at:
+              raise SystemExit("No successful paper database backup has been recorded.")
+          try:
+              parsed_backup = datetime.fromisoformat(str(backup_at).replace("Z", "+00:00"))
+          except ValueError:
+              raise SystemExit("The last successful backup timestamp is invalid.") from None
+          if parsed_backup.tzinfo is None:
+              raise SystemExit("The last successful backup timestamp has no timezone.")
+          backup_age_hours = (
+              datetime.now(timezone.utc) - parsed_backup.astimezone(timezone.utc)
+          ).total_seconds() / 3600.0
+          if backup_age_hours < -0.1 or backup_age_hours > 8.0:
+              raise SystemExit("The last successful paper database backup is older than eight hours.")
+
+          portfolio = paper.get("portfolio") or {}
+          performance = portfolio.get("performance") or {}
+          closed = int(performance.get("closed_trades") or 0)
+          print(
+              "OK: public service is healthy; event-paper heartbeat is fresh; "
+              f"{paper.get('markets_loaded_last_cycle')} usable markets loaded; "
+              f"two SQLite backups verified in status; closed paper trades={closed}."
+          )
+          print("Monitoring is read-only; live order submission remains disabled.")
+          with open(os.environ["GITHUB_STEP_SUMMARY"], "a", encoding="utf-8") as summary:
+              summary.write("## Paper deployment health\n")
+              summary.write("- Service health: healthy\n")
+              summary.write("- Event-paper heartbeat: fresh\n")
+              summary.write(f"- Usable markets in latest cycle: {paper.get('markets_loaded_last_cycle')}\n")
+              summary.write(f"- Closed paper trades: {closed}\n")
+              summary.write(f"- Last verified backup age: {backup_age_hours:.2f} hours\n")
+              summary.write("- Live execution: disabled\n")
+          PY

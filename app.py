@@ -28,9 +28,14 @@ from model_governance import ModelGovernanceLedger
 from execution_readiness import execution_readiness_payload
 from resilience import exponential_backoff_seconds, parse_retry_after
 from supervisor_status import read_supervisor_status
+from event_paper_worker import read_event_paper_worker_status
 
 GAMMA_URL = "https://gamma-api.polymarket.com/markets"
 POLL_SECONDS = max(15, int(os.getenv("POLL_SECONDS", "60")))
+try:
+    EVENT_PAPER_POLL_SECONDS = min(86_400, max(30, int(os.getenv("PAPER_POLL_SECONDS", "300"))))
+except (ValueError, TypeError):
+    EVENT_PAPER_POLL_SECONDS = 300
 try:
     NEWS_POLL_SECONDS = min(3600, max(60, int(os.getenv("NEWS_POLL_SECONDS", "300"))))
 except (ValueError, TypeError):
@@ -49,6 +54,7 @@ except (ValueError, TypeError):
     MODEL_EVALUATION_SECONDS = 21600
 DATA_DIR = Path(os.getenv("DATA_DIR", "data"))
 SUPERVISOR_STATUS_FILE = Path(os.getenv("SERVICE_SUPERVISOR_STATUS_FILE", str(DATA_DIR / "service_supervisor_status.json")))
+EVENT_PAPER_WORKER_STATUS_FILE = Path(os.getenv("EVENT_PAPER_WORKER_STATUS_FILE", str(DATA_DIR / "event_paper_worker_status.json")))
 SNAPSHOTS = DATA_DIR / "market_snapshots.jsonl"
 SIGNALS = DATA_DIR / "candidate_signals.jsonl"
 ORDERBOOK_SNAPSHOTS = DATA_DIR / "orderbook_snapshots.jsonl"
@@ -980,6 +986,7 @@ def health_payload(
     resolution_snapshot: dict | None = None,
     gdelt_snapshot: dict | None = None,
     learning_snapshot: dict | None = None,
+    paper_worker_snapshot: dict | None = None,
 ) -> tuple[bool, dict]:
     """Report core market readiness and separately expose optional collector degradation."""
     current = now or datetime.now(timezone.utc)
@@ -1055,6 +1062,51 @@ def health_payload(
         )
         components["model_learning"] = learning_component
 
+    if paper_worker_snapshot is not None:
+        paper_state = str(paper_worker_snapshot.get("worker_state") or "unknown")
+        paper_component = _health_component(
+            name="event_paper_worker",
+            worker_running=paper_state in {"starting", "running", "degraded"},
+            last_success_at=paper_worker_snapshot.get("last_success_at"),
+            stale_after_seconds=max(900, EVENT_PAPER_POLL_SECONDS * 3),
+            now=current,
+            last_error=paper_worker_snapshot.get("last_error_type"),
+        )
+        paper_component["worker_state"] = paper_state
+        paper_component["last_cycle_warning"] = paper_worker_snapshot.get("last_cycle_warning")
+        paper_component["cycles"] = int(paper_worker_snapshot.get("cycles") or 0)
+        paper_component["consecutive_failures"] = int(
+            paper_worker_snapshot.get("consecutive_failures") or 0
+        )
+        paper_component["total_failures"] = int(
+            paper_worker_snapshot.get("total_failures") or 0
+        )
+        paper_component["heartbeat_fresh"] = bool(
+            paper_worker_snapshot.get("heartbeat_fresh")
+        )
+        if not paper_component["heartbeat_fresh"]:
+            paper_component["status"] = "stale"
+        paper_component["last_backup_at"] = paper_worker_snapshot.get("last_backup_at")
+        paper_component["backup_manifest_name"] = paper_worker_snapshot.get("backup_manifest_name")
+        paper_component["backup_files_last_run"] = int(
+            paper_worker_snapshot.get("backup_files_last_run") or 0
+        )
+        paper_component["backup_error_type"] = paper_worker_snapshot.get("backup_error_type")
+        paper_component["backup_consecutive_failures"] = int(
+            paper_worker_snapshot.get("backup_consecutive_failures") or 0
+        )
+        paper_component["backup_retry_delay_seconds"] = float(
+            paper_worker_snapshot.get("backup_retry_delay_seconds") or 0.0
+        )
+        if (
+            (paper_state == "degraded" or paper_worker_snapshot.get("backup_error_type"))
+            and paper_component["status"] == "healthy"
+        ):
+            paper_component["status"] = "degraded"
+        if paper_state == "failed":
+            paper_component["status"] = "failed"
+        components["event_paper_worker"] = paper_component
+
     if stream_snapshot is not None:
         stream_worker_running = bool(stream_snapshot.get("worker_running"))
         stream_last_connect = stream_snapshot.get("last_connect_at")
@@ -1071,14 +1123,23 @@ def health_payload(
         stream_component["last_message_at"] = stream_snapshot.get("last_message_at")
         components["market_stream"] = stream_component
 
-    healthy = market_component["status"] == "healthy"
+    required_components = ["market_data"]
+    if paper_worker_snapshot is not None:
+        required_components.append("event_paper_worker")
+    healthy = all(components[name]["status"] == "healthy" for name in required_components)
     degraded = [
         name for name, component in components.items()
-        if name != "market_data" and component["status"] != "healthy"
+        if name not in required_components and component["status"] != "healthy"
+    ]
+    required_failures = [
+        name for name in required_components
+        if components[name]["status"] != "healthy"
     ]
     payload = {
         "ok": healthy,
         "status": "unhealthy" if not healthy else ("degraded" if degraded else "healthy"),
+        "required_components": required_components,
+        "required_component_failures": required_failures,
         "mode": "paper_only",
         "worker_running": bool(snapshot.get("worker_running")),
         "last_success_at": snapshot.get("last_success_at"),
@@ -1090,7 +1151,7 @@ def health_payload(
         "next_retry_at": snapshot.get("next_retry_at"),
         "components": components,
         "degraded_components": degraded,
-        "health_policy": "market_data_is_required; news_gdelt_resolution_stream_and_model_learning_are_reported_as_optional_degraded_components",
+        "health_policy": "market_data_is_required; event_paper_worker_is_required_when_enabled; news_gdelt_resolution_stream_and_model_learning_are_optional",
     }
     if not healthy and not payload["last_error"]:
         payload["last_error"] = "No recent successful market poll"
@@ -1244,7 +1305,7 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def do_GET(self):
-        if self.path in ("/", "/status", "/health", "/paper", "/news", "/matches", "/market-stream", "/resolutions", "/forecast-evaluation", "/research-features", "/independent-model-evaluation", "/model-forecasts", "/learning", "/execution-readiness", "/service-supervisor"):
+        if self.path in ("/", "/status", "/health", "/paper", "/news", "/matches", "/market-stream", "/resolutions", "/forecast-evaluation", "/research-features", "/independent-model-evaluation", "/model-forecasts", "/learning", "/execution-readiness", "/service-supervisor", "/event-paper"):
             with _lock:
                 snapshot = dict(_state)
             if self.path == "/health":
@@ -1256,6 +1317,12 @@ class Handler(BaseHTTPRequestHandler):
                     resolution_snapshot = dict(_resolution_state)
                 with _learning_lock:
                     learning_snapshot = dict(_learning_state)
+                supervisor_snapshot = read_supervisor_status(SUPERVISOR_STATUS_FILE)
+                paper_worker_snapshot = (
+                    read_event_paper_worker_status(EVENT_PAPER_WORKER_STATUS_FILE)
+                    if supervisor_snapshot.get("event_paper_worker_enabled") is True
+                    else None
+                )
                 healthy, payload = health_payload(
                     snapshot,
                     news_snapshot=news_snapshot,
@@ -1263,6 +1330,7 @@ class Handler(BaseHTTPRequestHandler):
                     resolution_snapshot=resolution_snapshot,
                     gdelt_snapshot=gdelt_snapshot,
                     learning_snapshot=learning_snapshot,
+                    paper_worker_snapshot=paper_worker_snapshot,
                 )
                 self._send(200 if healthy else 503, payload)
             elif self.path == "/paper":
@@ -1324,8 +1392,26 @@ class Handler(BaseHTTPRequestHandler):
                     })
             elif self.path == "/execution-readiness":
                 self._send(200, execution_readiness_payload())
+            elif self.path == "/event-paper":
+                supervisor_snapshot = read_supervisor_status(SUPERVISOR_STATUS_FILE)
+                if supervisor_snapshot.get("event_paper_worker_enabled") is True:
+                    worker_snapshot = read_event_paper_worker_status(EVENT_PAPER_WORKER_STATUS_FILE)
+                else:
+                    worker_snapshot = {
+                        "worker_state": "disabled",
+                        "heartbeat_fresh": False,
+                        "execution": "none",
+                    }
+                worker_snapshot.update({
+                    "mode": "OFFLINE_NEWS_PAPER_ONLY",
+                    "research_only": True,
+                    "live_execution_enabled": False,
+                    "execution": "none",
+                })
+                self._send(200, worker_snapshot)
             elif self.path == "/service-supervisor":
                 payload = read_supervisor_status(SUPERVISOR_STATUS_FILE)
+                payload["event_paper_worker"] = read_event_paper_worker_status(EVENT_PAPER_WORKER_STATUS_FILE)
                 payload.update({
                     "read_only": True,
                     "order_submission_allowed": False,

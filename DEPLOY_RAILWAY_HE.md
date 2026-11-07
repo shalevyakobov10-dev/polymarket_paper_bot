@@ -5,7 +5,7 @@
 
 ## פריסה עם תצורת התשתית שבמאגר
 
-הקובץ `.railway/railway.ts` מגדיר שירות אחד בשם `polymarket-paper-bot` ממאגר GitHub הזה ומ-branch `main`, Volume בנפח 1GB, חיבור Volume אל `/app/data`, health check, וערכי סיכון קבועים ל-Paper Trading. הוא מציב את השירות ואת ה-Volume באזור `europe-west4`. התצורה כוללת גם איסוף GDELT בארבעה מסלולי נושא בכל מחזור (חלון שעה), רישום/אימון מחזורי של מודל כל 15 דקות והערכת holdout/walk-forward כל 6 שעות.
+הקובץ `.railway/railway.ts` מגדיר שירות אחד בשם `polymarket-paper-bot` ממאגר GitHub הזה ומ-branch `main`, Volume בנפח 1GB, חיבור Volume אל `/app/data`, health check, וערכי סיכון קבועים ל-Paper Trading. הוא מציב את השירות ואת ה-Volume באזור `europe-west4`. התצורה מפעילה גם את `event_paper_worker.py` באופן רציף (Paper בלבד), קוראת שוק ציבורי דרך Gamma/CLOB, שומרת את תיק ה-Paper ואת ארכיון השוק ב-SQLite, ומבצעת גיבוי עקבי לשני המסדים כל שש שעות.
 
 Railway ממליצה כיום על Infrastructure as Code דרך `.railway/railway.ts`; קובצי `railway.json`/`railway.toml` הישנים הוצאו משימוש עבור שירותים חדשים. ראו [Railway IaC](https://docs.railway.com/infrastructure-as-code) ו-[Reference](https://docs.railway.com/infrastructure-as-code/reference).
 
@@ -38,7 +38,9 @@ Railway ממליצה כיום על Infrastructure as Code דרך `.railway/railw
    ```
 7. ב-Railway, הפק Domain ציבורי לשירות דרך Settings/Networking אם צריך גישה חיצונית. Domain שנוצר על ידי Railway מנוהל דרך הממשק, לא על ידי קובץ ה-IaC.
 
-הקובץ מציב `DATA_DIR=/app/data`, `POLL_SECONDS=60`, סריקה של עד 400 שווקים פעילים ו-20 שווקים מנוטרים, ומגדיר במפורש `ENABLE_USER_ORDER_MONITOR=false`. המאזין המאומת לא יופעל אלא לאחר opt-in מפורש. הוא **לא** מפעיל מסחר אמיתי. לא נקבע סף 0.005, משום שה-backtest מצא שכל הספים שנבדקו הפסידו בתיק המדומה. ברירת המחדל המחקרית נשארת 0.03.
+התצורה מגדירה `DATA_DIR=/app/data`, `ENABLE_EVENT_PAPER_WORKER=true`, `PAPER_MARKET_DATA_SOURCE=live_clob`, ארכיון שוק ותיק Paper נפרדים, גיבויים כל שש שעות, `DRY_RUN=true`, `LIVE_EXECUTION_ENABLED=false`, וגם `ENABLE_USER_ORDER_MONITOR=false`. מנוע ה-Paper משתמש בסף ראיות אירוע 0.75, הסכמה מינימלית של שני מפרסמים, עמלות סימולציה 1% ומגבלת השפעת מחיר 100 bps. השירות עדיין **לא נפרס**; יש למזג/לשחרר את קוד ה-worker לענף `main` לפני שה-IaC יוכל להפעיל אותו. התצורה אינה מפעילה מסחר אמיתי.
+
+ה-healthcheck מוגדר עם timeout של 300 שניות, וחלון graceful shutdown של 30 שניות מוגדר כדי לאפשר כיבוי מסודר. לפי Railway, ה-healthcheck מאשר שהפריסה החדשה מוכנה לפני ניתוב תעבורה; הוא אינו ניטור רציף אחרי שהפריסה פעילה. לאחר פריסה יש להוסיף uptime monitor חיצוני ל-`/health`, ולנטר גם heartbeat ו-`/event-paper`. לאחר פריסה, הגדר ב-GitHub repository variable בשם `PAPER_SERVICE_URL` לכתובת ה-HTTPS הציבורית של Railway. ה-workflow `Paper deployment uptime monitor` יבדוק כל 15 דקות את `/health` ואת `/event-paper`, לרבות heartbeat, שווקים שימושיים, מצב גיבוי ושמירה על מצב ללא מסחר אמיתי. כל עוד המשתנה לא הוגדר, הבדיקות מדולגות במפורש.
 
 
 ## Supervisor ומאזין חשבון אופציונלי
@@ -71,7 +73,7 @@ python restore_order_journal.py --source /path/to/verified-backup.sqlite3 --dest
 
 כלי השחזור פותח את הגיבוי לקריאה בלבד, בודק integrity, קשרי foreign keys, מבנה טבלאות, כל מסמכי JSON שנשמרו ביומן, רצף מעברי המצבים והאירועים לפי `order_lifecycle.py`, רציפות תנאי הפקודה והמונים, עקביות של venue-order index, אריתמטיקה מלאה של צילומי סיכון היסטוריים והתאמת timestamp של מצב הסנכרון לצילום הקיים. הוא בונה קובץ זמני, מאמת אותו שוב ומשווה ספירות רשומות לפני פרסום אטומי שאינו דורס יעד קיים. הוא מסרב לגיבוי שיש לצדו קובצי WAL/SHM/journal. תחילה יש לבדוק את השחזור בסביבת staging, לפתוח אותו בגרסת הקוד התואמת ולהשוות את מספר הרשומות. אם נמצאות רשומות `submission_pending`, יש לשמר אותן ולבצע `recover_interrupted_submissions()` רק לאחר הבטחת בעלות בלעדית על היומן; הפעולה הופכת אותן ל-`submission_unknown` ואינה מאפשרת שליחה חוזרת. **אין להצביע על מסד הנתונים הפעיל או להחליף אותו כשהשירות עדיין פועל**: יש לעצור את השירות, לבצע גיבוי נוסף, לוודא שאין writer פעיל, ואז לבצע מעבר מתוכנן עם אפשרות rollback. כלי השחזור אינו עוצר שירות, אינו משנה משתני Railway ואינו מחליף אוטומטית את מסד הנתונים של היישום.
 
-**חשוב:** תצורת Railway הנוכחית אינה מגדירה scheduler, יעד off-host, הצפנה או retention לגיבויים. שמירת עותק נוסף באותו Volume אינה הגנה מפני אובדן ה-Volume. לפני שימוש פרודקשני יש להגדיר תהליך מתוזמן ליעד אחסון עצמאי, לשמור מספר דורות, להגביל הרשאות ולתרגל שחזור. הגיבוי מכיל מידע על חשבון והזמנות ויש להגן עליו כמו על מסד המקור.
+**חשוב:** מנוע ה-Paper מגבה כעת את שני מסדי הנתונים ל-`/app/data/backups` כל שש שעות, עם בדיקת SQLite ו-manifest SHA-256 ושמירת 30 דורות. אבל העותקים נשמרים באותו Railway Volume. התצורה עדיין אינה מגדירה יעד off-host, הצפנה או שחזור אוטומטי. לפני שימוש פרודקשני יש להגדיר יעד אחסון עצמאי, להגביל הרשאות ולתרגל שחזור. הגיבוי מכיל מידע רגיש על פעילות החשבון והעסקאות ויש להגן עליו כמו על מסד המקור.
 
 ## בדיקת מנהל התהליכים
 
@@ -80,9 +82,11 @@ python restore_order_journal.py --source /path/to/verified-backup.sqlite3 --dest
 ## אימות אחרי הפריסה
 
 לאחר שהשירות פעיל, פתח את ה-Domain ובדוק:
-- `/health` — בדיקת חיות בסיסית של HTTP.
-- `/status` — מצב worker, זמן הסריקה האחרונה, כמות שווקים/תוצאות, שגיאה אחרונה וסיכום הסימולציה.
-- `/paper` — יתרת הסימולציה, מדדי ביצועים ופוזיציות מדומות פתוחות.
+- `/health` — בדיקת readiness; כאשר `ENABLE_EVENT_PAPER_WORKER=true`, היא דורשת גם worker פעיל ו-heartbeat טרי.
+- `/service-supervisor` — מצב PID-1, תהליכי worker, ומדדי restart.
+- `/event-paper` — מחזורי event-paper, תיק מדומה, מדדי ביצועים, מצב גיבוי ו-heartbeat.
+- `/status` — מצב worker השוק הוותיק, זמן הסריקה האחרונה, כמות שווקים/תוצאות וסיכום הסימולציה.
+- `/paper` — תיק הסימולציה של מנוע השירות הוותיק; אינו אותו תיק כמו `/event-paper`.
 - `/learning` — גרסת המודל, כמות שווקים באימון, מספר תחזיות שהבשילו, Brier/Log Loss מול baseline ותוצאות לפי גרסת מודל.
 - `/news` — מצב RSS/GDELT, מסלולי הנושא שהצליחו/נכשלו, פריטים עדכניים וטריות המידע.
 
@@ -90,7 +94,7 @@ python restore_order_journal.py --source /path/to/verified-backup.sqlite3 --dest
 
 ## בדיקת API ציבורי מתוך GitHub Actions
 
-ה-workflow `Public API smoke check` מבצע קריאת read-only ל-Gamma ללא חשבון או מפתחות. הריצה האחרונה שנבדקה: [Public API smoke check #6](https://github.com/shalevyakobov10-dev/polymarket_paper_bot/actions/runs/40111586766). זו בדיקת API נקודתית, לא הוכחה שה-worker בענן פועל לאורך זמן.
+ה-workflow `Public API smoke check` מבצע קריאות read-only ל-Gamma ולספרי CLOB ציבוריים, דרך ה-provider האמיתי, ללא חשבון או מפתחות. הוא דורש לפחות snapshot בינארי טרי אחד שבו ספרי YES ו-NO דו-צדדיים ושימושיים. זו בדיקת API נקודתית בלבד: היא אינה מוכיחה זמינות רציפה, עומק היסטורי, או שה-worker פועל בענן לאורך זמן.
 
 ## ריצת backtest היסטורית
 

@@ -47,6 +47,7 @@ The service listens on port 8080 by default. Routes:
 - `/model-forecasts`: research-only current-market probability estimates from a regularized model trained only on resolved labels available before forecast time; stale rows and unresolved training labels are excluded, and no actions are issued
 - `/learning`: realized forecast feedback, rolling error metrics, and a restart-safe research champion/challenger governance ledger
 - `/execution-readiness`: read-only, fail-closed diagnostics for prerequisites to any future live-launch review; never enables or submits orders
+- `/event-paper`: sanitized status and paper portfolio metrics for the separately supervised event-aware paper engine; always research-only and non-executable
 
 Environment variables for market selection:
 - `GAMMA_DISCOVERY_LIMIT` (default `400`, bounded to 20–500 active markets fetched for ranking)
@@ -237,7 +238,7 @@ Run tests with `python -m unittest discover -s tests -v` (or `python -m pytest -
 
 ## Centralized paper risk gate
 
-New entries are evaluated by `risk_manager.py` before the simulator opens a position. The gate checks valid outcome prices, requested position size, aggregate exposure, concurrent position count, available simulated cash after fees, a daily loss stop that combines realized P&L with current unrealized P&L, and whether an opposing outcome from the same market is already open. The simulator will not hold two different outcomes of the same market at once. Rejected candidates carry a stable reason code. These are simulation safeguards, not a guarantee against losses or a validated strategy.
+After depth-aware fill sizing, every proposed entry passes through `risk_manager.py` as an independent final hard gate immediately before the trade is inserted. It rechecks valid outcome price, requested notional, aggregate exposure, concurrent position count, available simulated cash after fees, daily equity loss (realized P&L plus the residual mark-to-market component), and peak-to-current portfolio drawdown. The simulator also prevents two outcomes of the same market from being held at once. The structured risk decision is included in successful entry results; rejected candidates carry a stable reason code. These are simulation safeguards, not a guarantee against losses or a validated strategy.
 
 
 The paper simulator has a persistent, latched portfolio drawdown circuit breaker. Once the configured peak-to-current-equity drawdown limit is crossed, new simulated entries remain halted even if equity later recovers; the latch survives restarts and appears in the paper metrics and audit log. Legacy states whose recorded maximum drawdown already crossed the configured limit migrate into the halted state. The only reset currently available clears the complete paper portfolio state; there is no automatic release.
@@ -392,11 +393,11 @@ Run repeatedly using PAPER_POLL_SECONDS:
 python -m dotenv run -- python offline_news_paper_bot.py
 ```
 
-The engine buys the YES or NO outcome token in the simulation only based on an experimental publisher-weighted news sentiment feature. This is not a probability estimate: positive/negative prose sentiment is only a crude directional proxy and can be wrong for event questions. VADER is English-oriented; Hebrew/Arabic/non-English headlines are recorded as unscored instead of being misclassified.
+The engine no longer uses generic positive/negative prose sentiment to choose YES or NO. Paper direction comes from a deliberately narrow, rule-based event-evidence layer that compares explicit headline actions with supported market-question types (for example, a rate cut/hold/hike or a bill passing/failing). It requires fresh publication timestamps, at least two distinct publishers, and a configurable publisher consensus ratio (default 75%). Speculative headlines, conflicting cues, unsupported question types, missing timestamps, and weak publisher consensus abstain and cannot open a paper position. VADER remains an English-oriented diagnostic feature only; it does not choose the market side. This is still lexical research evidence, not verified event truth, a probability estimate, or proof of a tradable edge. Hebrew/Arabic/non-English headlines remain unscored by VADER.
 
 Dynamic stops use rolling absolute price-change volatility with bounded minimum/maximum distances. Position size is capped by a per-trade equity-risk budget, cash, and total paper exposure. New entries stop when daily or peak-to-trough drawdown gates are breached. Exits are simulated at the supplied best bid, entries at the supplied best ask, with a configurable two-sided fee assumption.
 
-The learning loop reviews closed losing trades and can only raise the sentiment entry threshold. It needs at least 60 closed paper trades, chooses a candidate on the first 70% of chronological data, and tests that single candidate on the final 30%. It applies the change to this offline simulator only when the holdout sample is large enough and mean net ROI improves by at least 0.1 percentage points. This is a small-sample heuristic, not proof of a predictive edge; the SQLite tuning_runs table keeps an audit record.
+The paper-only learning loop reviews closed losing trades and can only raise the event-evidence entry-strength threshold; it cannot alter live settings. The active event-evidence strength threshold defaults to 0.75 and can be configured with `PAPER_EVENT_EVIDENCE_THRESHOLD`; the minimum publisher consensus is separately configured with `PAPER_MIN_EVENT_CONSENSUS_RATIO`. Tuning needs at least 60 valid closed paper trades, normalizes timezone-aware close timestamps to UTC, excludes invalid timestamps, duplicate trade IDs, and repeated market IDs (so a market resolution cannot be counted more than once), selects one stricter candidate using only the first 70% of chronological data, and then tests that same frozen candidate across three consecutive holdout windows in the final 30%. A change is applied to this offline simulator only when every holdout window has enough baseline and candidate trades, positive candidate net ROI and net PnL, at least 0.1 percentage points of net-ROI improvement, and candidate total net PnL no lower than the active policy; the pooled holdout must meet the same ROI and total-PnL constraints. Any failed or undersized fold prevents the update. This remains a paper-only, small-sample heuristic; it is not proof of a predictive edge. Each run records a SHA-256 fingerprint of normalized closed-trade inputs plus a separate fingerprint of the evaluation configuration, train/holdout time bounds, candidate training scores, fold-level net ROI/PnL comparisons, and explicit excluded-row counts. The latest sanitized audit is exposed in `/event-paper` alongside the current Paper portfolio, while the complete record remains in SQLite `tuning_runs`.
 
 The legacy py-clob-client repository was archived on 25 May 2026 and its maintainers state that it is no longer functional; the newer official SDK is polymarket-client. This offline runner intentionally does not use either SDK. See https://github.com/Polymarket/py-clob-client and https://github.com/Polymarket/py-sdk.
 ## Gated live execution adapter (not armed)
@@ -408,3 +409,89 @@ The separate live gateway uses Polymarket's official unified Python SDK (`polyma
 The gateway intentionally does not implement SELL, GTC/resting, batch, cancel-all, or autonomous retries in this iteration. Do not arm it until legal/account eligibility, robust out-of-sample strategy evidence, independent security review, incident recovery and production monitoring are complete.
 
 The built-in authenticated client factory is intentionally EOA-only for now. The official SDK's high-level `SecureClient.create()` can automatically deploy a not-yet-deployed Deposit Wallet during client initialization; this gateway blocks signer/wallet address mismatches rather than allowing an implicit on-chain deployment. Proxy/Deposit Wallet support requires a separately reviewed, explicit deployment-state check and is not silently enabled.
+
+
+### Live public market data for paper research
+
+The offline news paper engine now defaults to `PAPER_MARKET_DATA_SOURCE=live_clob`. It discovers a bounded set of active binary markets from the public Gamma API, maps explicit YES/NO outcomes to CLOB token IDs, and fetches both public order books through the official unauthenticated SDK. A market is withheld unless both books are two-sided, non-crossed, and fresh (maximum 30 seconds by default). The simulator marks entries at the current book midpoint, not stale Gamma outcome prices. This is read-only market data only: no account credentials, signing, order submission, or live execution are used. Set `PAPER_MARKET_DATA_SOURCE=local_json` to replay manually prepared snapshots. Live public data availability is dependent on Polymarket API reachability and rate limits; an empty/failed discovery cycle yields no eligible snapshots rather than a fallback to stale prices.
+
+
+## Event-aware paper engine market-history archive
+
+The event-aware paper engine also writes each acquired market snapshot to the versioned, append-only SQLite database at `MARKET_HISTORY_DATABASE_PATH` (default `./data/market_history.sqlite3`). It records the observed UTC timestamp, local capture timestamp, YES/NO best bid and ask, calculated midpoints, 24-hour volume when available, source labels, and the visible top-five bid/ask levels for both outcomes. The archive uses SQLite WAL, full synchronous commits, market/time indexes, a schema version, and idempotent inserts for duplicate market observations. A changed quote at the same timestamp is retained as a separate observation.
+
+The archive is written before news signals or paper decisions are evaluated. If its write fails, that polling cycle stops rather than continuing without the market-data audit record. It is a local research archive; it does not turn midpoint marks into executable fills, reconstruct full historical order books, or enable real-money trading. Keep the SQLite file on a persistent single-writer volume and back it up with the rest of the research data.
+
+
+## Depth-aware paper execution assumptions
+
+The event-aware paper engine now simulates BUY orders by consuming the captured top-five ask levels and SELL exits by consuming the captured top-five bid levels. Entry sizing is rechecked against the resulting weighted-average entry price, and the paper ledger stores that weighted average rather than assuming every share filled at the best ask. A close is not booked unless the captured bid ladder can absorb the entire simulated position; insufficient depth is surfaced as a blocked close and the position remains open. Missing or inconsistent depth blocks a new entry.
+
+This is a conservative visible-liquidity approximation. It does not model queue priority, hidden liquidity, latency, subsequent book movement, market impact beyond the recorded five levels, partial fills over time, or exchange-side fees beyond the configured paper fee assumption. It is not a substitute for historical tick-by-tick order-book replay or live execution evidence.
+
+
+New entries also enforce `PAPER_MAX_ENTRY_IMPACT_BPS` (default 100 bps). The limit is checked against the simulated weighted-average fill price versus the best displayed ask; an entry whose visible depth would cause larger price impact is rejected before it is recorded. Exit fills still report their realized simulated book impact rather than suppressing a required risk exit.
+
+
+## Continuous event-aware paper worker
+
+The Docker image enables `event_paper_worker.py` by default through `ENABLE_EVENT_PAPER_WORKER=true`. The PID-1 supervisor runs it as a separate process beside the HTTP API. It polls public Gamma/CLOB snapshots and the configured RSS feeds, appends market observations to the market-history SQLite archive, evaluates event-aware paper signals, and persists the simulated portfolio.
+
+The worker writes an atomic heartbeat file at `EVENT_PAPER_WORKER_STATUS_FILE` (default `DATA_DIR/event_paper_worker_status.json`). Its heartbeat is refreshed during the normal polling interval and retry waits, not only after a completed cycle. The HTTP `/service-supervisor` endpoint returns the sanitized worker state, last successful cycle, market count, blocked exits, failure count, and heartbeat freshness.
+
+Transient polling errors use bounded exponential retry. After five consecutive failed cycles, the worker exits and the supervisor restarts it with capped backoff. The authenticated account monitor remains separately disabled by default. The supervisor removes `LIVE_*` and account credential values from the event worker environment and forcibly sets `DRY_RUN=true` and `LIVE_EXECUTION_ENABLED=false`.
+
+Mount a persistent, single-writer volume at `/app/data` for Docker deployments; otherwise the paper portfolio and historical archive may be lost when the container is replaced. Do not mount the same SQLite database into multiple replicas. CI explicitly disables the event worker to keep the container smoke test isolated from external polling.
+
+
+## Paper strategy performance report
+
+The event-aware paper summary includes a descriptive report from CLOSED simulated trades only: net PnL, fee drag, expectancy per trade, net profit factor, average win/loss, win rate with a Wilson 95% interval, holding time, and maximum drawdown along the realized closed-trade sequence. It explicitly requires at least 60 closed trades before even labeling the in-sample sample size as sufficient.
+
+This report is not a proof of edge or an out-of-sample validation. Realized drawdown excludes intratrade and open-position mark-to-market drawdown. Sharpe and Sortino are deliberately omitted because irregular trade outcomes are not a periodic return series. The report always sets `out_of_sample_validated=false` and `live_execution_eligible=false`; only a separate chronological walk-forward evaluation with enough resolved outcomes can support a future release review.
+
+
+## Paper data backups and recovery
+
+Run `python backup_paper_data.py` to create a consistent online backup of both `PAPER_DATABASE_PATH` and `MARKET_HISTORY_DATABASE_PATH`. Backups are written to `PAPER_BACKUP_DIRECTORY` (default `DATA_DIR/backups`), each SQLite copy is checked with `PRAGMA integrity_check` and `foreign_key_check`, and a SHA-256 manifest is written after successful verification. The script never overwrites an existing backup and keeps the newest `PAPER_BACKUP_RETAIN` snapshots per database (default 30).
+
+The continuous event paper worker runs this backup automatically after the first successful cycle and then every `PAPER_BACKUP_INTERVAL_HOURS` (default 6, bounded 1–168). Failed backups are visible as a degraded worker/health component and retry with capped exponential delay. The CLI can also be run manually. Keep the backup directory on the persistent volume and replicate it off-host; a backup on the same volume does not protect against volume loss. Recovery should restore to a new, unused database path and be verified before switching the service to it; do not overwrite a live SQLite file.
+
+
+## External deployment uptime monitoring
+
+The optional `.github/workflows/paper-uptime-monitor.yml` checks the deployed service every 15 minutes once the repository variable `PAPER_SERVICE_URL` is configured to the public HTTPS base URL. It checks `/health` and `/event-paper`, requires a fresh event-worker heartbeat and at least one usable market in the last cycle, verifies the last paper backup covered both SQLite databases and is no older than eight hours, and confirms live order execution remains disabled. It does not need wallet or account credentials. Until the URL variable is set, the workflow explicitly skips cloud checks rather than reporting a false failure. This monitor is not a substitute for Railway process supervision or a dedicated alerting/incident-response system.
+
+## Chronological event-paper market replay
+
+```bash
+python historical_replay.py \
+  --paper-db data/offline_news_paper.sqlite3 \
+  --market-history-db data/market_history.sqlite3 \
+  --notional-usd 5 \
+  --holding-hours 6 \
+  --fee-rate 0.01 \
+  --output data/historical-replay.json
+```
+
+The replay reads both SQLite databases in read-only mode and considers only decisions recorded as `ENTERED`. It selects the latest market snapshot whose local capture time **and** provider observation time are no later than the decision timestamp. It then uses the first fully eligible snapshot at or after the fixed holding horizon for the simulated exit. BUY and SELL fills consume the archived top-five visible levels; incomplete entries are excluded and incomplete exits remain unresolved. Entry and exit fees are applied separately using the configured proportional fee assumption.
+
+This is a point-in-time execution-cost diagnostic, not a regenerated historical news strategy or a portfolio-level backtest. It uses fixed notional rather than the historical dynamic sizing/portfolio state, does not reconstruct stop-loss/take-profit paths, and does not model queue position, hidden depth, latency, or intraperiod book changes. The default `--fee-rate 0.01` is an explicit research assumption, not a claim about the venue's fee schedule; set it to the appropriate rate for the market being analyzed. The report always sets `out_of_sample_validated=false` and `live_execution_eligible=false`.
+
+## Resolution-aligned event-paper evaluation
+
+```bash
+python resolved_event_evaluation.py \
+  --paper-db data/offline_news_paper.sqlite3 \
+  --market-history-db data/market_history.sqlite3 \
+  --resolution-log data/resolved_markets.jsonl \
+  --resolution-backups 3 \
+  --settlement-fee-rate 0.0 \
+  --output data/resolved-event-evaluation.json
+```
+
+This read-only evaluator links each recorded `ENTERED` event-paper decision to its matching paper trade, the last fresh archived YES/NO book captured and observed no later than the decision, and a definitive exact-binary market outcome from the existing Gamma resolution archive. It replays the top-five ask-side VWAP and verifies that the replayed fill matches the saved paper trade ledger before scoring. It models a binary settlement payout of one dollar per winning share and subtracts the recorded entry fee; `--settlement-fee-rate` is an explicit assumption (default zero), not a verified venue/withdrawal fee. Conflicting resolution records, disputed/unknown statuses, post-decision books, stale books, and ledger mismatches are withheld.
+
+**Do not confuse this with actual realized Paper PnL.** The resolution score is a counterfactual hold-to-resolution result using the recorded entry. The Paper engine may already have exited at a stop, target, or time limit; the report includes that actual close/PnL separately for comparison, and its aggregate metrics report actual realized Paper PnL only for ledger trades marked CLOSED alongside the separate settlement counterfactual. One earliest eligible entry is retained per market so repeated signals on the same eventual binary outcome do not inflate the sample.
+
+The expanding-window walk-forward selects only among stricter filters of entries already taken by the historical policy. It purges any training market whose resolution was not available before the next test fold begins. It reports each fold's training candidate scores and later test metrics; it never changes the running strategy threshold. A consistency-gate pass is exploratory only: the report always sets `out_of_sample_validated=false` and `live_execution_eligible=false`. Small samples, selection effects, related markets, shared news events, incomplete rotated resolution history, and the fixed one-dollar settlement assumption can all bias results. No result from this command alone authorizes real-money execution.

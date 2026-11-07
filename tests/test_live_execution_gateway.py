@@ -277,9 +277,27 @@ class LiveExecutionGatewayTests(unittest.TestCase):
     def test_closed_only_account_is_blocked_before_submission(self):
         self.client.closed_only = True
         result = self._run_gateway()
-        self.assertEqual(result["reason"], "account_is_closed_only")
+        self.assertEqual(result["reason"], "account_closed_only_status_unverified")
         self.assertEqual(self.client.posts, [])
         self.assertEqual(self.journal.get_intent("paper-intent-001")["status"], "prepared")
+
+    def test_unknown_closed_only_status_fails_closed(self):
+        self.client.closed_only = None
+        result = self._run_gateway()
+        self.assertEqual(result["reason"], "account_closed_only_status_unverified")
+        self.assertEqual(self.client.created, [])
+        self.assertEqual(self.client.posts, [])
+        self.assertEqual(self.journal.get_intent("paper-intent-001")["status"], "prepared")
+
+    def test_missing_sdk_ok_flag_is_ambiguous_not_accepted(self):
+        self.client.response = {"order_id": "venue-order-ambiguous", "status": "matched"}
+        result = self._run_gateway()
+        self.assertEqual(result["reason"], "submission_outcome_ambiguous_reconcile_required")
+        state = self.journal.get_intent("paper-intent-001")
+        self.assertEqual(state["status"], "submission_unknown")
+        self.assertEqual(state["submission_attempts"], 1)
+        self.assertNotIn("venue_response", state)
+        self.assertEqual(len(self.client.posts), 1)
 
     def test_insufficient_collateral_is_blocked_before_submission(self):
         self.client.balance = "1000000"

@@ -40,6 +40,8 @@ Railway ממליצה כיום על Infrastructure as Code דרך `.railway/railw
 
 התצורה מגדירה `DATA_DIR=/app/data`, `ENABLE_EVENT_PAPER_WORKER=true`, `PAPER_MARKET_DATA_SOURCE=live_clob`, ארכיון שוק ותיק Paper נפרדים, גיבויים כל שש שעות, `DRY_RUN=true`, `LIVE_EXECUTION_ENABLED=false`, וגם `ENABLE_USER_ORDER_MONITOR=false`. מנוע ה-Paper משתמש בסף ראיות אירוע 0.75, הסכמה מינימלית של שני מפרסמים, עמלות סימולציה 1% ומגבלת השפעת מחיר 100 bps. השירות עדיין **לא נפרס**; יש למזג/לשחרר את קוד ה-worker לענף `main` לפני שה-IaC יוכל להפעיל אותו. התצורה אינה מפעילה מסחר אמיתי.
 
+ה-healthcheck מוגדר עם timeout של 300 שניות, וחלון graceful shutdown של 30 שניות מוגדר כדי לאפשר כיבוי מסודר. לפי Railway, ה-healthcheck מאשר שהפריסה החדשה מוכנה לפני ניתוב תעבורה; הוא אינו ניטור רציף אחרי שהפריסה פעילה. לאחר פריסה יש להוסיף uptime monitor חיצוני ל-`/health`, ולנטר גם heartbeat ו-`/event-paper`.
+
 
 ## Supervisor ומאזין חשבון אופציונלי
 

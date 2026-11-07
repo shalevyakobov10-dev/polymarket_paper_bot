@@ -420,3 +420,10 @@ The offline news paper engine now defaults to `PAPER_MARKET_DATA_SOURCE=live_clo
 The event-aware paper engine also writes each acquired market snapshot to the versioned, append-only SQLite database at `MARKET_HISTORY_DATABASE_PATH` (default `./data/market_history.sqlite3`). It records the observed UTC timestamp, local capture timestamp, YES/NO best bid and ask, calculated midpoints, 24-hour volume when available, source labels, and the visible top-five bid/ask levels for both outcomes. The archive uses SQLite WAL, full synchronous commits, market/time indexes, a schema version, and idempotent inserts for duplicate market observations. A changed quote at the same timestamp is retained as a separate observation.
 
 The archive is written before news signals or paper decisions are evaluated. If its write fails, that polling cycle stops rather than continuing without the market-data audit record. It is a local research archive; it does not turn midpoint marks into executable fills, reconstruct full historical order books, or enable real-money trading. Keep the SQLite file on a persistent single-writer volume and back it up with the rest of the research data.
+
+
+## Depth-aware paper execution assumptions
+
+The event-aware paper engine now simulates BUY orders by consuming the captured top-five ask levels and SELL exits by consuming the captured top-five bid levels. Entry sizing is rechecked against the resulting weighted-average entry price, and the paper ledger stores that weighted average rather than assuming every share filled at the best ask. A close is not booked unless the captured bid ladder can absorb the entire simulated position; insufficient depth is surfaced as a blocked close and the position remains open. Missing or inconsistent depth blocks a new entry.
+
+This is a conservative visible-liquidity approximation. It does not model queue priority, hidden liquidity, latency, subsequent book movement, market impact beyond the recorded five levels, partial fills over time, or exchange-side fees beyond the configured paper fee assumption. It is not a substitute for historical tick-by-tick order-book replay or live execution evidence.

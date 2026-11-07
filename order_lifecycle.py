@@ -114,7 +114,7 @@ def _validate_venue_response(state: dict[str, Any]) -> None:
     if kind == "accepted":
         allowed = {
             "kind", "order_id", "status", "making_amount", "taking_amount",
-            "trade_ids", "transactions_hashes",
+            "trade_ids", "transactions_hashes", "order_type",
         }
         if set(receipt) - allowed:
             raise ValueError("venue_response contains unsupported accepted fields")
@@ -127,6 +127,8 @@ def _validate_venue_response(state: dict[str, Any]) -> None:
             raise ValueError("accepted venue_response conflicts with the lifecycle status")
         if receipt.get("status") not in {"live", "matched", "delayed"}:
             raise ValueError("venue_response has an unsupported accepted status")
+        if "order_type" in receipt and receipt.get("order_type") != "FAK":
+            raise ValueError("venue_response has an unsupported order type")
         for field in ("making_amount", "taking_amount"):
             amount = receipt.get(field)
             if amount is not None and _decimal(amount, f"venue_response.{field}") < 0:

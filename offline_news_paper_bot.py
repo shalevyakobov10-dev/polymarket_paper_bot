@@ -24,6 +24,7 @@ from adaptive_paper_risk import (
     size_position_by_risk,
 )
 from market_snapshot_provider import JsonMarketSnapshotProvider
+from polymarket_public_market_feed import PolymarketPublicMarketSnapshotProvider
 from news_monitor import DEFAULT_FEEDS, NewsCollector, match_news_to_markets
 from news_sentiment import aggregate_market_news_sentiment, analyze_news_sentiment
 from paper_parameter_tuner import tune_sentiment_threshold
@@ -126,9 +127,13 @@ class PaperConfig:
         self.auto_tune_minimum_trades = _int_env("PAPER_AUTO_TUNE_MINIMUM_TRADES", 60, 30, 10_000)
         self.auto_tune_interval_hours = _float_env("PAPER_AUTO_TUNE_INTERVAL_HOURS", 24.0, 1.0, 720.0)
         self.market_snapshot_file = Path(os.getenv("MARKET_SNAPSHOT_FILE", "./data/market_snapshots.json"))
+        self.market_data_source = os.getenv("MARKET_DATA_SOURCE", "local_json").strip().lower()
+        if self.market_data_source not in {"local_json", "polymarket_public"}:
+            raise ValueError("MARKET_DATA_SOURCE must be local_json or polymarket_public")
+        self.public_markets_to_track = _int_env("PUBLIC_MARKETS_TO_TRACK", 10, 1, 10)
         self.database_path = Path(os.getenv("PAPER_DATABASE_PATH", "./data/offline_news_paper.sqlite3"))
         self.news_log_path = Path(os.getenv("NEWS_LOG_PATH", "./data/offline_news_events.jsonl"))
-        self.poll_seconds = _int_env("PAPER_POLL_SECONDS", 300, 30, 86_400)
+        self.poll_seconds = _int_env("PAPER_POLL_SECONDS", 60, 30, 86_400)
 
 
 class OfflineNewsPaperBot:
@@ -148,10 +153,21 @@ class OfflineNewsPaperBot:
         self.db.execute("PRAGMA foreign_keys=ON")
         self._create_schema()
         self.news_collector = news_collector or NewsCollector(self.config.news_log_path, DEFAULT_FEEDS)
-        self.snapshot_provider = snapshot_provider or JsonMarketSnapshotProvider(
-            self.config.market_snapshot_file,
-            max_age_seconds=self.config.maximum_market_age_seconds,
-        )
+        if snapshot_provider is not None:
+            self.snapshot_provider = snapshot_provider
+        elif self.config.market_data_source == "polymarket_public":
+            self.snapshot_provider = PolymarketPublicMarketSnapshotProvider(
+                max_age_seconds=self.config.maximum_market_age_seconds,
+                max_markets=self.config.public_markets_to_track,
+                websocket_enabled=_bool_env("PUBLIC_MARKET_WS_ENABLED", True),
+                websocket_session_seconds=_int_env("PUBLIC_MARKET_WS_SESSION_SECONDS", 15, 5, 120),
+                stream_log_path=Path(os.getenv("MARKET_STREAM_LOG_PATH", "./data/market_stream_events.jsonl")),
+            )
+        else:
+            self.snapshot_provider = JsonMarketSnapshotProvider(
+                self.config.market_snapshot_file,
+                max_age_seconds=self.config.maximum_market_age_seconds,
+            )
         self._ensure_account()
 
     def close(self) -> None:
@@ -512,6 +528,12 @@ class OfflineNewsPaperBot:
             current = current.replace(tzinfo=timezone.utc)
         current = current.astimezone(timezone.utc)
         snapshots = self.snapshot_provider.load(now=current)
+        market_diagnostics = getattr(self.snapshot_provider, "last_diagnostics", None)
+        if not isinstance(market_diagnostics, dict):
+            market_diagnostics = {
+                "source": self.config.market_data_source,
+                "snapshots_returned": len(snapshots),
+            }
         news_result = (
             self.news_collector.fetch_once()
             if fetch_news else {"feeds_configured": 0, "feeds_succeeded": 0, "feeds_failed": 0}
@@ -572,7 +594,9 @@ class OfflineNewsPaperBot:
         summary = self.summary()
         return {
             "mode": ENGINE_MODE, "dry_run": DRY_RUN, "live_execution_enabled": LIVE_EXECUTION_ENABLED,
-            "markets_loaded_from_local_file": len(snapshots),
+            "market_snapshots_loaded": len(snapshots),
+            "market_data_source": self.config.market_data_source,
+            "market_data_diagnostics": market_diagnostics,
             "news_feeds_configured": int(news_result.get("feeds_configured") or 0),
             "news_feeds_succeeded": int(news_result.get("feeds_succeeded") or 0),
             "news_feeds_failed": int(news_result.get("feeds_failed") or 0),

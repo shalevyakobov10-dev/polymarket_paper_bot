@@ -200,6 +200,10 @@ class OfflineNewsPaperBotTests(unittest.TestCase):
                     self.assertGreater(opened["entry_price"], row["yes_ask"])
                     self.assertEqual(opened["levels_used"], 2)
                     self.assertGreater(opened["price_impact_bps"], 0)
+                    self.assertTrue(opened["independent_risk_gate"]["approved"])
+                    self.assertEqual(
+                        opened["independent_risk_gate"]["reason"], "approved_paper_entry"
+                    )
 
                     no_depth = {**row, "market_id": "no-depth", "yes_book": {"asks_top5": [], "bids_top5": []}}
                     blocked, block_reason = bot._open_trade(

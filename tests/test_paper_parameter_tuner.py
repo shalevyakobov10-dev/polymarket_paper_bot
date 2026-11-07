@@ -4,7 +4,7 @@ from datetime import datetime, timedelta, timezone
 from paper_parameter_tuner import postmortem_losers, tune_sentiment_threshold
 
 
-def trade(index, strength, roi, pnl, reason="dynamic_stop_loss", *, trade_id=None, market_id=None):
+def trade(index, strength, roi, pnl, reason="dynamic_stop_loss", *, trade_id="auto", market_id="auto"):
     closed = datetime(2026, 10, 1, tzinfo=timezone.utc) + timedelta(hours=index)
     row = {
         "status": "CLOSED",
@@ -14,6 +14,10 @@ def trade(index, strength, roi, pnl, reason="dynamic_stop_loss", *, trade_id=Non
         "pnl": pnl,
         "exit_reason": reason,
     }
+    if trade_id == "auto":
+        trade_id = f"trade-{index}"
+    if market_id == "auto":
+        market_id = f"market-{index}"
     if trade_id is not None:
         row["trade_id"] = trade_id
     if market_id is not None:
@@ -42,6 +46,9 @@ class PaperParameterTunerTests(unittest.TestCase):
         self.assertEqual([row["status"] for row in result["fold_reports"]], ["passed"] * 3)
         self.assertGreaterEqual(result["candidate_holdout_net_pnl"], result["baseline_holdout_net_pnl"])
         self.assertTrue(all(row["net_pnl_improvement"] >= 0 for row in result["fold_reports"]))
+        self.assertLess(result["train_time_end"], result["holdout_time_start"])
+        self.assertEqual(len(result["training_candidate_scores"]), 5)
+        self.assertEqual(len(result["input_dataset_sha256"]), 64)
 
     def test_candidate_is_rejected_when_one_chronological_holdout_fold_is_bad(self):
         rows = []
@@ -116,6 +123,27 @@ class PaperParameterTunerTests(unittest.TestCase):
         self.assertEqual(result["duplicate_market_ids_excluded"], 1)
         self.assertEqual(result["closed_trade_count"], 59)
         self.assertFalse(result["applied"])
+
+    def test_missing_trade_or_market_identity_is_excluded_fail_closed(self):
+        rows = [trade(i, 0.5, 0.1, 1.0) for i in range(60)]
+        rows[0].pop("trade_id")
+        rows[1].pop("market_id")
+        result = tune_sentiment_threshold(rows, current_threshold=0.3)
+        self.assertEqual(result["missing_trade_id_rows_excluded"], 1)
+        self.assertEqual(result["missing_market_id_rows_excluded"], 1)
+        self.assertEqual(result["closed_trade_count"], 58)
+        self.assertFalse(result["applied"])
+
+    def test_dataset_fingerprint_is_order_independent_and_changes_with_economic_data(self):
+        rows = [trade(i, 0.5, 0.01, 0.1) for i in range(60)]
+        forward = tune_sentiment_threshold(rows, current_threshold=0.3)
+        reversed_result = tune_sentiment_threshold(list(reversed(rows)), current_threshold=0.3)
+        changed_rows = [dict(row) for row in rows]
+        changed_rows[10]["pnl"] = 0.11
+        changed = tune_sentiment_threshold(changed_rows, current_threshold=0.3)
+        self.assertEqual(forward["input_dataset_sha256"], reversed_result["input_dataset_sha256"])
+        self.assertNotEqual(forward["input_dataset_sha256"], changed["input_dataset_sha256"])
+        self.assertEqual(forward["input_dataset_sha256"], forward["input_dataset_sha256"].lower())
 
     def test_postmortem_groups_losing_trades_by_exit_reason(self):
         rows = [trade(1, 0.4, -0.1, -1, "dynamic_stop_loss"),

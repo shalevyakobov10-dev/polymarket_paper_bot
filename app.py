@@ -1083,6 +1083,8 @@ def health_payload(
         paper_component["heartbeat_fresh"] = bool(
             paper_worker_snapshot.get("heartbeat_fresh")
         )
+        if not paper_component["heartbeat_fresh"]:
+            paper_component["status"] = "stale"
         paper_component["last_backup_at"] = paper_worker_snapshot.get("last_backup_at")
         paper_component["backup_manifest_name"] = paper_worker_snapshot.get("backup_manifest_name")
         paper_component["backup_files_last_run"] = int(

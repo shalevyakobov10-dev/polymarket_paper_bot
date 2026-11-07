@@ -1,3 +1,4 @@
+import json
 import os
 import tempfile
 import unittest
@@ -330,6 +331,53 @@ class OfflineNewsPaperBotTests(unittest.TestCase):
                     self.assertEqual(performance["evaluation_status"], "positive_in_sample_unvalidated")
                     self.assertFalse(performance["out_of_sample_validated"])
                     self.assertFalse(performance["live_execution_eligible"])
+                finally:
+                    bot.close()
+
+    def test_summary_exposes_last_tuning_audit_record(self):
+        with tempfile.TemporaryDirectory() as folder:
+            with self._make_config(folder):
+                bot = OfflineNewsPaperBot(
+                    PaperConfig(), news_collector=FakeNewsCollector(),
+                    snapshot_provider=StaticProvider({}),
+                )
+                try:
+                    report = {
+                        "status": "rejected",
+                        "applied": False,
+                        "input_dataset_sha256": "a" * 64,
+                        "evaluation_run_sha256": "b" * 64,
+                        "live_execution_eligible": False,
+                        "real_money_execution": "not_implemented",
+                    }
+                    with bot.db:
+                        bot.db.execute(
+                            "INSERT INTO tuning_runs(ran_at,result_json) VALUES(?,?)",
+                            (now := datetime(2026, 11, 7, 12, 0, tzinfo=timezone.utc).isoformat(),
+                             json.dumps(report)),
+                        )
+                    summary = bot.summary()
+                    self.assertEqual(summary["last_tuning"]["ran_at"], now)
+                    self.assertEqual(summary["last_tuning"]["result"], report)
+                finally:
+                    bot.close()
+
+    def test_summary_handles_unreadable_tuning_audit_record_without_failing(self):
+        with tempfile.TemporaryDirectory() as folder:
+            with self._make_config(folder):
+                bot = OfflineNewsPaperBot(
+                    PaperConfig(), news_collector=FakeNewsCollector(),
+                    snapshot_provider=StaticProvider({}),
+                )
+                try:
+                    with bot.db:
+                        bot.db.execute(
+                            "INSERT INTO tuning_runs(ran_at,result_json) VALUES(?,?)",
+                            ("2026-11-07T12:00:00+00:00", "{broken-json"),
+                        )
+                    last_tuning = bot.summary()["last_tuning"]
+                    self.assertEqual(last_tuning["status"], "unreadable_audit_record")
+                    self.assertFalse(last_tuning["applied"])
                 finally:
                     bot.close()
 

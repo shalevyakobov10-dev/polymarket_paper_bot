@@ -25,6 +25,7 @@ from adaptive_paper_risk import (
 )
 from market_snapshot_provider import JsonMarketSnapshotProvider
 from live_market_snapshot_provider import LiveClobMarketSnapshotProvider
+from market_history_store import MarketHistoryStore
 from event_outcome import aggregate_event_outcome_evidence, classify_event_outcome
 from news_monitor import DEFAULT_FEEDS, NewsCollector, match_news_to_markets
 from news_sentiment import aggregate_market_news_sentiment, analyze_news_sentiment
@@ -133,6 +134,9 @@ class PaperConfig:
         if self.market_data_source not in {"live_clob", "local_json"}:
             raise ValueError("PAPER_MARKET_DATA_SOURCE must be live_clob or local_json")
         self.database_path = Path(os.getenv("PAPER_DATABASE_PATH", "./data/offline_news_paper.sqlite3"))
+        self.market_history_database_path = Path(
+            os.getenv("MARKET_HISTORY_DATABASE_PATH", "./data/market_history.sqlite3")
+        )
         self.news_log_path = Path(os.getenv("NEWS_LOG_PATH", "./data/offline_news_events.jsonl"))
         self.poll_seconds = _int_env("PAPER_POLL_SECONDS", 300, 30, 86_400)
 
@@ -148,6 +152,8 @@ class OfflineNewsPaperBot:
         self.config = config or PaperConfig()
         self.config.database_path.parent.mkdir(parents=True, exist_ok=True)
         self.config.news_log_path.parent.mkdir(parents=True, exist_ok=True)
+        self.config.market_history_database_path.parent.mkdir(parents=True, exist_ok=True)
+        self.market_history_store = MarketHistoryStore(self.config.market_history_database_path)
         self.db = sqlite3.connect(self.config.database_path, timeout=20)
         self.db.row_factory = sqlite3.Row
         self.db.execute("PRAGMA journal_mode=WAL")
@@ -169,6 +175,7 @@ class OfflineNewsPaperBot:
 
     def close(self) -> None:
         self.db.close()
+        self.market_history_store.close()
 
     def _create_schema(self) -> None:
         self.db.executescript("""
@@ -560,6 +567,9 @@ class OfflineNewsPaperBot:
             current = current.replace(tzinfo=timezone.utc)
         current = current.astimezone(timezone.utc)
         snapshots = self.snapshot_provider.load(now=current)
+        # Persist the observation set before any paper decision is evaluated. A
+        # storage error aborts this cycle rather than silently losing its audit trail.
+        market_history = self.market_history_store.append_snapshots(snapshots, captured_at=current)
         news_result = (
             self.news_collector.fetch_once()
             if fetch_news else {"feeds_configured": 0, "feeds_succeeded": 0, "feeds_failed": 0}
@@ -628,6 +638,7 @@ class OfflineNewsPaperBot:
             "mode": ENGINE_MODE, "dry_run": DRY_RUN, "live_execution_enabled": LIVE_EXECUTION_ENABLED,
             "markets_loaded": len(snapshots),
             "market_data_source": self.config.market_data_source,
+            "market_history": market_history,
             "news_feeds_configured": int(news_result.get("feeds_configured") or 0),
             "news_feeds_succeeded": int(news_result.get("feeds_succeeded") or 0),
             "news_feeds_failed": int(news_result.get("feeds_failed") or 0),

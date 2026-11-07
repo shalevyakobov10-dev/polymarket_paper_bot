@@ -251,13 +251,15 @@ class LiveClobMarketSnapshotProvider:
                 skipped += 1
                 continue
 
-            exchange_stamps = [
-                _timestamp(yes_book.get("exchange_timestamp")),
-                _timestamp(no_book.get("exchange_timestamp")),
+            exchange_raw = [
+                yes_book.get("exchange_timestamp"),
+                no_book.get("exchange_timestamp"),
             ]
-            if any(stamp is not None for stamp in exchange_stamps):
-                # If the SDK exposes exchange time for either outcome, require it
-                # for both and validate both against the same age ceiling.
+            exchange_stamps = [_timestamp(value) for value in exchange_raw]
+            if any(str(value or "").strip() for value in exchange_raw):
+                # If the SDK supplies exchange time for either outcome, require
+                # parseable, fresh exchange time for both. Invalid timestamps do
+                # not silently fall back to local receipt time.
                 if any(stamp is None for stamp in exchange_stamps):
                     skipped += 1
                     continue

@@ -31,6 +31,7 @@ from event_outcome import aggregate_event_outcome_evidence, classify_event_outco
 from news_monitor import DEFAULT_FEEDS, NewsCollector, match_news_to_markets
 from news_sentiment import aggregate_market_news_sentiment, analyze_news_sentiment
 from paper_parameter_tuner import tune_sentiment_threshold
+from risk_manager import evaluate_paper_entry
 from paper_performance import evaluate_paper_performance
 
 DRY_RUN = True
@@ -514,6 +515,45 @@ class OfflineNewsPaperBot:
         if notional + entry_fee > float(account["cash"]) + 1e-9:
             return None, "insufficient_paper_cash_after_fees"
 
+        # Independent final hard-risk check. The daily equity change is split
+        # into realized PnL and its residual mark-to-market component so the
+        # second gate sees the same total daily loss basis as the primary gate.
+        latest_account = self._account()
+        current_equity = self._equity()
+        day_realized = float(self.db.execute(
+            "SELECT COALESCE(SUM(pnl),0) AS pnl FROM trades "
+            "WHERE status='CLOSED' AND closed_at>=?",
+            (str(latest_account["day_key"]),),
+        ).fetchone()["pnl"] or 0.0)
+        day_equity_change = current_equity - float(latest_account["day_start_equity"])
+        residual_unrealized = day_equity_change - day_realized
+        equity_peak = max(float(latest_account["equity_peak"]), current_equity)
+        current_drawdown_pct = (
+            max(0.0, (equity_peak - current_equity) / equity_peak * 100.0)
+            if equity_peak > 0 else 100.0
+        )
+        risk_decision = evaluate_paper_entry(
+            price=entry_price,
+            requested_notional=notional,
+            cash=float(latest_account["cash"]),
+            open_exposure=sum(float(row["notional"]) for row in self._open_trades()),
+            open_positions=len(self._open_trades()),
+            max_position_usd=self.config.max_position_usd,
+            max_open_exposure_usd=self.config.max_open_exposure_usd,
+            max_open_positions=self.config.max_open_positions,
+            daily_realized_pnl=day_realized,
+            open_unrealized_pnl=residual_unrealized,
+            daily_loss_limit_usd=max(
+                0.01,
+                float(latest_account["day_start_equity"]) * self.config.max_daily_drawdown_pct,
+            ),
+            fee_rate=self.config.fee_rate,
+            current_drawdown_pct=current_drawdown_pct,
+            max_portfolio_drawdown_pct=self.config.max_portfolio_drawdown_pct * 100.0,
+        )
+        if not risk_decision.approved:
+            return None, f"independent_risk_gate:{risk_decision.reason}"
+
         self.db.execute(
             "INSERT INTO trades(market_id,question,direction,token_id,opened_at,entry_price,shares,"
             "notional,entry_fee,stop_loss_price,take_profit_price,signal_score,signal_strength,"
@@ -540,6 +580,7 @@ class OfflineNewsPaperBot:
             "stop_loss_price": levels.stop_loss_price,
             "take_profit_price": levels.take_profit_price,
             "estimated_loss_at_stop_usd": sizing["estimated_loss_at_stop_usd"],
+            "independent_risk_gate": risk_decision.as_dict(),
             "execution": "simulated_only",
         }, ""
 

@@ -59,6 +59,67 @@ def _write_status(path: Path, payload: dict[str, Any]) -> None:
                 pass
 
 
+def _safe_performance_summary(raw: Any) -> dict[str, Any] | None:
+    if not isinstance(raw, dict):
+        return None
+    import math
+    numeric_fields = (
+        "win_rate_pct", "total_net_pnl", "return_on_starting_cash_pct",
+        "net_expectancy_per_trade", "average_win", "average_loss",
+        "net_profit_factor", "gross_pnl_before_fees", "fees_paid",
+        "average_hold_hours", "max_closed_trade_drawdown",
+        "max_closed_trade_drawdown_pct",
+    )
+    integer_fields = (
+        "closed_trades", "minimum_trades_required", "wins", "losses",
+        "breakeven", "invalid_rows_excluded",
+    )
+    result: dict[str, Any] = {
+        "evaluation_status": str(raw.get("evaluation_status") or "unknown")[:80],
+        "out_of_sample_validated": False,
+        "live_execution_eligible": False,
+        "research_only": True,
+        "execution": "none",
+    }
+    for field in numeric_fields:
+        value = raw.get(field)
+        if isinstance(value, bool):
+            continue
+        try:
+            parsed = float(value)
+        except (TypeError, ValueError, OverflowError):
+            continue
+        if math.isfinite(parsed):
+            result[field] = parsed
+    for field in integer_fields:
+        value = raw.get(field)
+        if isinstance(value, bool):
+            continue
+        try:
+            parsed = int(value)
+        except (TypeError, ValueError, OverflowError):
+            continue
+        if parsed >= 0:
+            result[field] = parsed
+    interval = raw.get("win_rate_95pct_wilson_interval_pct")
+    if isinstance(interval, list) and len(interval) == 2:
+        parsed_interval = []
+        for value in interval:
+            try:
+                number = float(value)
+            except (TypeError, ValueError, OverflowError):
+                break
+            if not math.isfinite(number):
+                break
+            parsed_interval.append(number)
+        if len(parsed_interval) == 2:
+            result["win_rate_95pct_wilson_interval_pct"] = parsed_interval
+    warnings = raw.get("warnings")
+    if isinstance(warnings, list):
+        result["warnings"] = [str(item)[:240] for item in warnings[:8]]
+    return result
+
+
 def _safe_portfolio_summary(raw: Any) -> dict[str, Any] | None:
     if not isinstance(raw, dict):
         return None
@@ -89,6 +150,7 @@ def _safe_portfolio_summary(raw: Any) -> dict[str, Any] | None:
             continue
         if parsed >= 0:
             result[field] = parsed
+    result["performance"] = _safe_performance_summary(raw.get("performance"))
     return result
 
 

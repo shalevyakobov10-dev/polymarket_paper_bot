@@ -336,17 +336,34 @@ def provider_from_env(
     *,
     local_path: str,
     local_max_age_seconds: float,
+    source: str | None = None,
+    max_markets: int | None = None,
+    max_book_age_seconds: float | None = None,
 ) -> Any:
-    """Select the default local replay provider or explicit read-only public CLOB mode."""
-    source = os.getenv("PAPER_MARKET_DATA_SOURCE", "local_json").strip().lower()
-    if source == "local_json":
+    """Select local replay or explicitly enabled read-only public CLOB data."""
+    selected_source = (
+        str(source).strip().lower()
+        if source is not None
+        else os.getenv("PAPER_MARKET_DATA_SOURCE", "local_json").strip().lower()
+    )
+    if selected_source == "local_json":
         from market_snapshot_provider import JsonMarketSnapshotProvider
         return JsonMarketSnapshotProvider(local_path, max_age_seconds=local_max_age_seconds)
-    if source != "polymarket_public":
+    if selected_source != "polymarket_public":
         raise ValueError("PAPER_MARKET_DATA_SOURCE must be local_json or polymarket_public")
-    max_markets = _bounded_int_env("PAPER_LIVE_MARKET_MAX_MARKETS", 10, 1, 50)
-    max_book_age = float(os.getenv("PAPER_LIVE_MARKET_MAX_BOOK_AGE_SECONDS", "30"))
+    selected_markets = (
+        int(max_markets)
+        if max_markets is not None
+        else _bounded_int_env("PAPER_LIVE_MARKET_MAX_MARKETS", 10, 1, 50)
+    )
+    if max_book_age_seconds is None:
+        try:
+            selected_book_age = float(os.getenv("PAPER_LIVE_MARKET_MAX_BOOK_AGE_SECONDS", "30"))
+        except (TypeError, ValueError, OverflowError):
+            raise ValueError("PAPER_LIVE_MARKET_MAX_BOOK_AGE_SECONDS must be a number") from None
+    else:
+        selected_book_age = float(max_book_age_seconds)
     return LiveClobMarketSnapshotProvider(
-        max_markets=max_markets,
-        max_book_age_seconds=max_book_age,
+        max_markets=selected_markets,
+        max_book_age_seconds=selected_book_age,
     )

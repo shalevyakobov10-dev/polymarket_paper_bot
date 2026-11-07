@@ -31,6 +31,7 @@ from event_outcome import aggregate_event_outcome_evidence, classify_event_outco
 from news_monitor import DEFAULT_FEEDS, NewsCollector, match_news_to_markets
 from news_sentiment import aggregate_market_news_sentiment, analyze_news_sentiment
 from paper_parameter_tuner import tune_sentiment_threshold
+from paper_performance import evaluate_paper_performance
 
 DRY_RUN = True
 LIVE_EXECUTION_ENABLED = False
@@ -761,6 +762,14 @@ class OfflineNewsPaperBot:
         closed_count = self.db.execute("SELECT COUNT(*) AS n FROM trades WHERE status='CLOSED'").fetchone()["n"]
         win_count = self.db.execute("SELECT COUNT(*) AS n FROM trades WHERE status='CLOSED' AND pnl>0").fetchone()["n"]
         realized = self.db.execute("SELECT COALESCE(SUM(pnl),0) AS pnl FROM trades WHERE status='CLOSED'").fetchone()["pnl"]
+        closed_rows = self.db.execute(
+            "SELECT trade_id,pnl,entry_fee,exit_fee,opened_at,closed_at "
+            "FROM trades WHERE status='CLOSED' ORDER BY closed_at,trade_id"
+        ).fetchall()
+        performance = evaluate_paper_performance(
+            [dict(row) for row in closed_rows],
+            starting_cash=float(account["starting_cash"]),
+        )
         return {
             "cash": round(float(account["cash"]), 8), "equity": round(equity, 8),
             "realized_pnl": round(float(realized or 0.0), 8),
@@ -768,6 +777,7 @@ class OfflineNewsPaperBot:
             "win_rate_pct": round(100.0 * int(win_count) / int(closed_count), 4) if closed_count else None,
             "active_event_evidence_threshold": float(account["active_sentiment_threshold"]),
             "active_sentiment_threshold": float(account["active_sentiment_threshold"]),  # backward-compatible API alias
+            "performance": performance,
             "mode": ENGINE_MODE, "execution": "none",
         }
 

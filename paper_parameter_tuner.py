@@ -91,13 +91,22 @@ def tune_sentiment_threshold(
     duplicate_trade_ids = {
         trade_id for trade_id, count in trade_id_counts.items() if count > 1
     }
+    market_id_counts = Counter(
+        str(row.get("market_id")).strip()
+        for row in source_rows
+        if row.get("market_id") is not None and str(row.get("market_id")).strip()
+    )
+    duplicate_market_ids = {
+        market_id for market_id, count in market_id_counts.items() if count > 1
+    }
 
     cleaned = []
     invalid_timestamp_count = 0
     invalid_metric_count = 0
     for row in source_rows:
         trade_id = str(row.get("trade_id")).strip() if row.get("trade_id") is not None else ""
-        if trade_id and trade_id in duplicate_trade_ids:
+        market_id = str(row.get("market_id")).strip() if row.get("market_id") is not None else ""
+        if (trade_id and trade_id in duplicate_trade_ids) or (market_id and market_id in duplicate_market_ids):
             continue
         strength = _finite(row.get("signal_strength"))
         roi = _finite(row.get("net_roi"))
@@ -129,6 +138,7 @@ def tune_sentiment_threshold(
         "invalid_timestamp_count": invalid_timestamp_count,
         "invalid_metric_count": invalid_metric_count,
         "duplicate_trade_ids_excluded": len(duplicate_trade_ids),
+        "duplicate_market_ids_excluded": len(duplicate_market_ids),
         "train_trade_count": 0,
         "holdout_trade_count": 0,
         "holdout_folds_requested": holdout_folds,

@@ -424,12 +424,32 @@ def _validate_and_score_entry(
 
 
 def _metrics(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    actual_rows = [
+        row for row in rows
+        if str(row.get("paper_trade_status") or "").upper() == "CLOSED"
+        and isinstance(row.get("paper_trade_actual_net_pnl_usd"), (int, float))
+        and math.isfinite(float(row["paper_trade_actual_net_pnl_usd"]))
+    ]
+    actual_pnl = [float(row["paper_trade_actual_net_pnl_usd"]) for row in actual_rows]
+    actual_wins = sum(1 for value in actual_pnl if value > 0)
+    actual_losses = sum(1 for value in actual_pnl if value < 0)
+    actual_metrics = {
+        "actual_paper_closed_trade_count": len(actual_rows),
+        "actual_paper_realized_net_pnl_usd": round(sum(actual_pnl), 8),
+        "actual_paper_realized_wins": actual_wins,
+        "actual_paper_realized_losses": actual_losses,
+        "actual_paper_realized_win_rate_pct": (
+            round(100.0 * actual_wins / len(actual_rows), 4) if actual_rows else None
+        ),
+        "actual_paper_average_realized_pnl_usd": round(mean(actual_pnl), 8) if actual_rows else None,
+    }
     if not rows:
         return {
             "n": 0, "wins": 0, "losses": 0, "win_rate_pct": None,
             "total_entry_cost_usd": 0.0, "total_net_pnl_usd": 0.0,
             "net_roi_pct": None, "average_net_pnl_usd": None,
             "profit_factor": None, "average_entry_impact_bps": None,
+            **actual_metrics,
         }
     pnl = [float(row["counterfactual_net_pnl_usd"]) for row in rows]
     costs = [float(row["entry_notional_usd"]) + float(row["entry_fee_usd"]) for row in rows]
@@ -454,6 +474,7 @@ def _metrics(rows: list[dict[str, Any]]) -> dict[str, Any]:
         "average_net_roi_per_trade_pct": round(mean(float(row["counterfactual_net_roi_pct"]) for row in rows), 8),
         "profit_factor": round(gross_profit / gross_loss, 8) if gross_loss > 0 else None,
         "average_entry_impact_bps": round(mean(float(row["entry_price_impact_bps"]) for row in rows), 8),
+        **actual_metrics,
     }
 
 

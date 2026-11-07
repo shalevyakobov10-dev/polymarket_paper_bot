@@ -809,7 +809,7 @@ def main() -> None:
     )
     parser.add_argument("--paper-db", required=True)
     parser.add_argument("--market-history-db", required=True)
-    parser.add_argument("--resolution-log", default="data/resolutions.jsonl")
+    parser.add_argument("--resolution-log", default="data/resolved_markets.jsonl")
     parser.add_argument("--resolution-backups", type=int, default=3)
     parser.add_argument("--max-entry-age-seconds", type=float, default=300.0)
     parser.add_argument("--settlement-fee-rate", type=float, default=0.0)

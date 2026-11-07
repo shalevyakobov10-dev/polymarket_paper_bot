@@ -24,6 +24,7 @@ from adaptive_paper_risk import (
     size_position_by_risk,
 )
 from market_snapshot_provider import JsonMarketSnapshotProvider
+from live_market_snapshot_provider import LiveClobMarketSnapshotProvider
 from event_outcome import aggregate_event_outcome_evidence, classify_event_outcome
 from news_monitor import DEFAULT_FEEDS, NewsCollector, match_news_to_markets
 from news_sentiment import aggregate_market_news_sentiment, analyze_news_sentiment
@@ -128,6 +129,9 @@ class PaperConfig:
         self.auto_tune_minimum_trades = _int_env("PAPER_AUTO_TUNE_MINIMUM_TRADES", 60, 30, 10_000)
         self.auto_tune_interval_hours = _float_env("PAPER_AUTO_TUNE_INTERVAL_HOURS", 24.0, 1.0, 720.0)
         self.market_snapshot_file = Path(os.getenv("MARKET_SNAPSHOT_FILE", "./data/market_snapshots.json"))
+        self.market_data_source = os.getenv("PAPER_MARKET_DATA_SOURCE", "live_clob").strip().lower()
+        if self.market_data_source not in {"live_clob", "local_json"}:
+            raise ValueError("PAPER_MARKET_DATA_SOURCE must be live_clob or local_json")
         self.database_path = Path(os.getenv("PAPER_DATABASE_PATH", "./data/offline_news_paper.sqlite3"))
         self.news_log_path = Path(os.getenv("NEWS_LOG_PATH", "./data/offline_news_events.jsonl"))
         self.poll_seconds = _int_env("PAPER_POLL_SECONDS", 300, 30, 86_400)
@@ -150,10 +154,17 @@ class OfflineNewsPaperBot:
         self.db.execute("PRAGMA foreign_keys=ON")
         self._create_schema()
         self.news_collector = news_collector or NewsCollector(self.config.news_log_path, DEFAULT_FEEDS)
-        self.snapshot_provider = snapshot_provider or JsonMarketSnapshotProvider(
-            self.config.market_snapshot_file,
-            max_age_seconds=self.config.maximum_market_age_seconds,
-        )
+        if snapshot_provider is not None:
+            self.snapshot_provider = snapshot_provider
+        elif self.config.market_data_source == "live_clob":
+            self.snapshot_provider = LiveClobMarketSnapshotProvider(
+                max_age_seconds=min(self.config.maximum_market_age_seconds, 30.0),
+            )
+        else:
+            self.snapshot_provider = JsonMarketSnapshotProvider(
+                self.config.market_snapshot_file,
+                max_age_seconds=self.config.maximum_market_age_seconds,
+            )
         self._ensure_account()
 
     def close(self) -> None:
@@ -615,7 +626,8 @@ class OfflineNewsPaperBot:
         summary = self.summary()
         return {
             "mode": ENGINE_MODE, "dry_run": DRY_RUN, "live_execution_enabled": LIVE_EXECUTION_ENABLED,
-            "markets_loaded_from_local_file": len(snapshots),
+            "markets_loaded": len(snapshots),
+            "market_data_source": self.config.market_data_source,
             "news_feeds_configured": int(news_result.get("feeds_configured") or 0),
             "news_feeds_succeeded": int(news_result.get("feeds_succeeded") or 0),
             "news_feeds_failed": int(news_result.get("feeds_failed") or 0),

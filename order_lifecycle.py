@@ -304,6 +304,8 @@ def reconcile_submission(
         raise ValueError("found_open requires zero filled_size; use found_partially_filled")
     if target_status == "rejected" and reported_fill != 0:
         raise ValueError("found_rejected requires zero filled_size")
+    if target_status == "cancelled" and reported_fill >= order_size:
+        raise ValueError("found_cancelled requires an unfilled remainder")
 
     state["status"] = target_status
     state["exchange_order_id"] = found_id

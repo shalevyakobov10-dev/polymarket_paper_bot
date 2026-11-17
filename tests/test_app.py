@@ -10,6 +10,7 @@ from urllib.request import urlopen as http_urlopen
 from urllib.parse import parse_qs, urlparse
 
 import app
+from supervisor_status import build_supervisor_status, write_supervisor_status
 
 
 class ParserTests(unittest.TestCase):
@@ -309,6 +310,73 @@ class ParserTests(unittest.TestCase):
         }
         healthy, payload = app.health_payload(stopped, now)
         self.assertFalse(healthy)
+
+
+
+    def test_service_supervisor_endpoint_reports_sanitized_process_status(self):
+        server = app.ThreadingHTTPServer(("127.0.0.1", 0), app.Handler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        old_path = app.SUPERVISOR_STATUS_FILE
+        with tempfile.TemporaryDirectory() as directory:
+            try:
+                app.SUPERVISOR_STATUS_FILE = Path(directory) / "supervisor.json"
+                write_supervisor_status(
+                    app.SUPERVISOR_STATUS_FILE,
+                    build_supervisor_status(
+                        service_state="running",
+                        monitor_enabled=True,
+                        monitor_state="restarting",
+                        restart_count=2,
+                        last_exit_code=7,
+                        next_restart_at="2026-11-04T20:00:05+00:00",
+                    ),
+                )
+                thread.start()
+                address = f"http://127.0.0.1:{server.server_port}/service-supervisor"
+                with http_urlopen(address, timeout=3) as response:
+                    payload = json.loads(response.read().decode("utf-8"))
+                self.assertTrue(payload["supervised"])
+                self.assertTrue(payload["status_fresh"])
+                self.assertIsNotNone(payload["status_age_seconds"])
+                self.assertEqual(payload["service_state"], "running")
+                self.assertEqual(payload["monitor_state"], "restarting")
+                self.assertEqual(payload["monitor_restart_count"], 2)
+                self.assertEqual(payload["monitor_last_exit_code"], 7)
+                self.assertTrue(payload["read_only"])
+                self.assertFalse(payload["order_submission_allowed"])
+                self.assertFalse(payload["order_signing_allowed"])
+                self.assertEqual(payload["execution"], "none")
+                self.assertIsNone(payload["app_exit_code"])
+                self.assertNotIn("POLYMARKET_PRIVATE_KEY", payload)
+            finally:
+                server.shutdown()
+                server.server_close()
+                if thread.is_alive():
+                    thread.join(timeout=2)
+                app.SUPERVISOR_STATUS_FILE = old_path
+
+    def test_service_supervisor_endpoint_is_explicit_when_not_supervised(self):
+        server = app.ThreadingHTTPServer(("127.0.0.1", 0), app.Handler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        old_path = app.SUPERVISOR_STATUS_FILE
+        with tempfile.TemporaryDirectory() as directory:
+            try:
+                app.SUPERVISOR_STATUS_FILE = Path(directory) / "not-created.json"
+                thread.start()
+                address = f"http://127.0.0.1:{server.server_port}/service-supervisor"
+                with http_urlopen(address, timeout=3) as response:
+                    payload = json.loads(response.read().decode("utf-8"))
+                self.assertFalse(payload["supervised"])
+                self.assertEqual(payload["service_state"], "unknown")
+                self.assertEqual(payload["status_error"], "status_file_missing")
+                self.assertFalse(payload["order_submission_allowed"])
+                self.assertEqual(payload["execution"], "none")
+            finally:
+                server.shutdown()
+                server.server_close()
+                if thread.is_alive():
+                    thread.join(timeout=2)
+                app.SUPERVISOR_STATUS_FILE = old_path
 
 
     def test_news_endpoint_returns_status_and_attributed_items(self):

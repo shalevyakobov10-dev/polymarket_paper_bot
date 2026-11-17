@@ -42,6 +42,11 @@ def evaluate_live_order_preflight(
     max_book_age_seconds: float,
     max_price_impact_bps: float,
     max_order_notional_usd: float,
+    available_collateral_usd: float,
+    estimated_fees_usd: float,
+    current_open_positions: int,
+    max_open_positions: int,
+    opposing_market_outcome_open: bool,
     current_open_exposure_usd: float,
     max_open_exposure_usd: float,
     daily_realized_pnl_usd: float,
@@ -70,6 +75,8 @@ def evaluate_live_order_preflight(
     max_book_age = _decimal(max_book_age_seconds)
     impact_bps = _decimal(max_price_impact_bps)
     max_order = _decimal(max_order_notional_usd)
+    collateral = _decimal(available_collateral_usd)
+    estimated_fees = _decimal(estimated_fees_usd)
     exposure = _decimal(current_open_exposure_usd)
     max_exposure = _decimal(max_open_exposure_usd)
     realized = _decimal(daily_realized_pnl_usd)
@@ -83,6 +90,7 @@ def evaluate_live_order_preflight(
         "tick_size": tick, "minimum_order_size": minimum,
         "book_age_seconds": book_age, "max_book_age_seconds": max_book_age,
         "max_price_impact_bps": impact_bps, "max_order_notional_usd": max_order,
+        "available_collateral_usd": collateral, "estimated_fees_usd": estimated_fees,
         "current_open_exposure_usd": exposure, "max_open_exposure_usd": max_exposure,
         "daily_realized_pnl_usd": realized, "open_unrealized_pnl_usd": unrealized,
         "daily_loss_limit_usd": daily_loss_limit, "current_drawdown_pct": drawdown,
@@ -118,6 +126,32 @@ def evaluate_live_order_preflight(
 
     if max_order is not None and max_order <= 0:
         blockers.append("invalid_max_order_notional")
+    if collateral is not None and collateral < 0:
+        blockers.append("invalid_available_collateral")
+    if estimated_fees is not None and estimated_fees < 0:
+        blockers.append("invalid_estimated_fees")
+    if (
+        price is not None and size_value is not None
+        and collateral is not None and estimated_fees is not None
+        and collateral >= 0 and estimated_fees >= 0
+        and price * size_value + estimated_fees > collateral
+    ):
+        blockers.append("insufficient_available_collateral_after_fees")
+    if (
+        isinstance(current_open_positions, bool)
+        or not isinstance(current_open_positions, int)
+        or isinstance(max_open_positions, bool)
+        or not isinstance(max_open_positions, int)
+        or current_open_positions < 0
+        or max_open_positions < 1
+    ):
+        blockers.append("invalid_open_position_count")
+    elif current_open_positions >= max_open_positions:
+        blockers.append("max_open_positions_reached")
+    if opposing_market_outcome_open is True:
+        blockers.append("opposing_market_outcome_already_open")
+    elif opposing_market_outcome_open is not False:
+        blockers.append("invalid_opposing_market_outcome_flag")
     if price is not None and size_value is not None and max_order is not None and max_order > 0:
         if price * size_value > max_order:
             blockers.append("max_order_notional_exceeded")

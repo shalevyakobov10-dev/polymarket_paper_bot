@@ -23,6 +23,7 @@ export default defineRailway(() => {
     },
     env: {
       DATA_DIR: "/app/data",
+      ENABLE_USER_ORDER_MONITOR: "false",
       POLL_SECONDS: "60",
       NEWS_POLL_SECONDS: "300",
       GDELT_TOPICS_PER_POLL: "4",

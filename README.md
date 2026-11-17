@@ -364,3 +364,38 @@ The read-only account monitor keeps one pending user-stream receive alive while 
 ## Process supervisor status
 
 When the service runs in Docker, the supervisor writes a sanitized atomic status record to `DATA_DIR/service_supervisor_status.json`. The read-only `/service-supervisor` endpoint shows whether the HTTP worker is starting/running/stopped, whether the authenticated monitor is enabled/running/restarting, the monitor restart count, last exit code and next restart time. The supervisor refreshes a heartbeat every 15 seconds, including while waiting to restart the monitor; `/service-supervisor` includes `status_fresh` and `status_age_seconds`, marking the record stale after 45 seconds. It deliberately excludes process arguments, environment variables, API credentials and wallet data. When running `app.py` directly without the supervisor, the endpoint reports `supervised=false` and `status_error=status_file_missing`; this is distinct from a healthy supervised account monitor. The endpoint does not prove that credentials are valid or that account data is current: use the account snapshot timestamps and monitor logs for that verification.
+
+## Offline news-driven paper research engine
+
+A separate local-only research runner adds fast English headline sentiment, publisher/time-decayed market matching, volatility-aware paper exits, fractional-equity risk sizing, a daily drawdown stop, and a conservative self-tuning loop. It writes entries, exits, sentiment scores, fees, and realized PnL to SQLite.
+
+**This runner does not connect to Polymarket or any CLOB.** It reads a manually supplied JSON market snapshot from disk and fetches third-party RSS headlines only. It has no wallet, private-key, signer, or order-submission code. Live execution is hard-disabled in the module; setting DRY_RUN=false or LIVE_EXECUTION_ENABLED=true causes startup to fail.
+
+Install and prepare a local snapshot:
+
+```bash
+python -m pip install -r requirements.txt
+cp .env.example .env
+mkdir -p data
+cp market_snapshots.example.json data/market_snapshots.json
+```
+
+Edit data/market_snapshots.json with locally sourced/replay market quotes and a fresh UTC observed_at timestamp. The example file is synthetic, not a current market quote. Run one cycle:
+
+```bash
+python -m dotenv run -- python offline_news_paper_bot.py --once
+```
+
+Run repeatedly using PAPER_POLL_SECONDS:
+
+```bash
+python -m dotenv run -- python offline_news_paper_bot.py
+```
+
+The engine buys the YES or NO outcome token in the simulation only based on an experimental publisher-weighted news sentiment feature. This is not a probability estimate: positive/negative prose sentiment is only a crude directional proxy and can be wrong for event questions. VADER is English-oriented; Hebrew/Arabic/non-English headlines are recorded as unscored instead of being misclassified.
+
+Dynamic stops use rolling absolute price-change volatility with bounded minimum/maximum distances. Position size is capped by a per-trade equity-risk budget, cash, and total paper exposure. New entries stop when daily or peak-to-trough drawdown gates are breached. Exits are simulated at the supplied best bid, entries at the supplied best ask, with a configurable two-sided fee assumption.
+
+The learning loop reviews closed losing trades and can only raise the sentiment entry threshold. It needs at least 60 closed paper trades, chooses a candidate on the first 70% of chronological data, and tests that single candidate on the final 30%. It applies the change to this offline simulator only when the holdout sample is large enough and mean net ROI improves by at least 0.1 percentage points. This is a small-sample heuristic, not proof of a predictive edge; the SQLite tuning_runs table keeps an audit record.
+
+The legacy py-clob-client repository was archived on 25 May 2026 and its maintainers state that it is no longer functional; the newer official SDK is polymarket-client. This offline runner intentionally does not use either SDK. See https://github.com/Polymarket/py-clob-client and https://github.com/Polymarket/py-sdk.

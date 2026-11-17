@@ -1,0 +1,16 @@
+[
+  {
+    "market_id": "local-example-market-1",
+    "question": "Will the example parliament pass the proposed energy bill by December?",
+    "yes_token_id": "local-example-market-1:YES",
+    "no_token_id": "local-example-market-1:NO",
+    "observed_at": "2026-11-06T12:00:00+00:00",
+    "yes_price": 0.46,
+    "no_price": 0.54,
+    "yes_bid": 0.45,
+    "yes_ask": 0.47,
+    "no_bid": 0.53,
+    "no_ask": 0.55,
+    "volume_24h": 12500
+  }
+]

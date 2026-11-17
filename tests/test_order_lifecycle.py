@@ -164,6 +164,17 @@ class OrderLifecycleTests(unittest.TestCase):
             reconcile_submission(
                 unknown, outcome="found_filled", filled_size=8, **common
             )
+        with self.assertRaisesRegex(ValueError, "unfilled remainder"):
+            reconcile_submission(
+                unknown, outcome="found_cancelled", filled_size=10, **common
+            )
+
+        cancelled = reconcile_submission(
+            unknown, outcome="found_cancelled", filled_size=4, **common
+        )
+        self.assertEqual(cancelled["status"], "cancelled")
+        self.assertEqual(cancelled["filled_size"], "4")
+        self.assertEqual(submission_policy(cancelled)["status"], "cancelled")
 
     def test_state_validation_rejects_inconsistent_persisted_states(self):
         pending = begin_submission(intent())

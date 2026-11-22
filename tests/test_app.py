@@ -407,6 +407,62 @@ class ParserTests(unittest.TestCase):
                 app.SUPERVISOR_STATUS_FILE = old_supervisor
                 app.EVENT_PAPER_WORKER_STATUS_FILE = old_worker
 
+    def test_perps_account_supervisor_endpoint_is_sanitized_and_never_authorizes_orders(self):
+        server = app.ThreadingHTTPServer(("127.0.0.1", 0), app.Handler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        old_path = app.PERPS_ACCOUNT_SUPERVISOR_STATUS_FILE
+        with tempfile.TemporaryDirectory() as directory:
+            try:
+                status_path = Path(directory) / "perps-account-supervisor.json"
+                status_path.write_text(json.dumps({
+                    "schema_version": 1,
+                    "mode": "PERPS_ACCOUNT_READ_ONLY_SUPERVISOR",
+                    "enabled": True,
+                    "worker_state": "degraded",
+                    "last_heartbeat_at": "2026-11-22T08:00:00+00:00",
+                    "last_preflight_at": "2026-11-22T08:00:00+00:00",
+                    "last_error_code": None,
+                    "consecutive_failures": 0,
+                    "recovery_completed": True,
+                    "recovered_interrupted_submissions": 1,
+                    "read_only_preflight_passed": False,
+                    "blocked_reasons": ["unmanaged_or_mismatched_remote_open_orders"],
+                    "observations": {
+                        "unknown_remote_open_orders": 1,
+                        "private_key": "must-not-leak",
+                    },
+                    "poll_interval_seconds": 30,
+                    "cycle_timeout_seconds": 60,
+                    "private_key": "must-not-leak",
+                }), encoding="utf-8")
+                app.PERPS_ACCOUNT_SUPERVISOR_STATUS_FILE = status_path
+                thread.start()
+                address = f"http://127.0.0.1:{server.server_port}/perps-account-supervisor"
+                with http_urlopen(address, timeout=3) as response:
+                    payload = json.loads(response.read().decode("utf-8"))
+
+                self.assertEqual(payload["mode"], "PERPS_ACCOUNT_READ_ONLY_SUPERVISOR")
+                self.assertEqual(payload["worker_state"], "degraded")
+                self.assertEqual(payload["recovered_interrupted_submissions"], 1)
+                self.assertEqual(
+                    payload["blocked_reasons"],
+                    ["unmanaged_or_mismatched_remote_open_orders"],
+                )
+                self.assertEqual(payload["observations"]["unknown_remote_open_orders"], 1)
+                self.assertNotIn("private_key", payload)
+                self.assertNotIn("private_key", payload["observations"])
+                self.assertTrue(payload["read_only"])
+                self.assertFalse(payload["order_submission_allowed"])
+                self.assertFalse(payload["order_signing_allowed"])
+                self.assertFalse(payload["new_order_permission"])
+                self.assertEqual(payload["execution"], "none")
+                self.assertNotIn("must-not-leak", json.dumps(payload))
+            finally:
+                server.shutdown()
+                server.server_close()
+                thread.join(timeout=2)
+                app.PERPS_ACCOUNT_SUPERVISOR_STATUS_FILE = old_path
+
     def test_perps_live_release_gate_endpoint_stays_closed_even_with_runtime_flags_set(self):
         server = app.ThreadingHTTPServer(("127.0.0.1", 0), app.Handler)
         thread = threading.Thread(target=server.serve_forever, daemon=True)

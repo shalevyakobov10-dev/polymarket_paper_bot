@@ -13,6 +13,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
+from backup_paper_data import create_paper_data_backups
 from perps_market_data import PerpsPublicMarketDataProvider
 from perps_market_history_store import PerpsMarketHistoryStore
 from perps_paper_engine import PerpsPaperEngine
@@ -149,6 +150,12 @@ def read_perps_worker_status(path: str | Path) -> dict[str, Any]:
                 "disabled", "starting", "healthy", "halted", "degraded"
             } else "unknown",
             "paper_engine": _sanitize_paper_summary(raw.get("paper_engine")),
+            "last_backup_at": raw.get("last_backup_at"),
+            "last_backup_manifest_name": str(raw.get("last_backup_manifest_name") or "")[:200] or None,
+            "backup_files_last_run": _status_count(raw.get("backup_files_last_run", 0), "backup_files_last_run"),
+            "backup_error_type": str(raw.get("backup_error_type") or "")[:80] or None,
+            "backup_consecutive_failures": _status_count(raw.get("backup_consecutive_failures", 0), "backup_consecutive_failures"),
+            "backup_retry_delay_seconds": _status_count(raw.get("backup_retry_delay_seconds", 0), "backup_retry_delay_seconds"),
             "research_only": True,
             "live_execution_enabled": False,
             "execution": "none",
@@ -187,6 +194,10 @@ def run_worker(
     history_retention_days: int | None = None,
     paper_engine: Any | None = None,
     paper_engine_enabled: bool | None = None,
+    backup_function: Any | None = create_paper_data_backups,
+    backup_interval_hours: int | None = None,
+    backup_directory: str | Path | None = None,
+    backup_retain: int | None = None,
     max_cycles: int | None = None,
 ) -> int:
     """Poll read-only Perps market data, archive it, and retry with bounded backoff."""
@@ -206,7 +217,25 @@ def run_worker(
         max_age_seconds=10.0,
         depth=10,
     )
-    database = Path(os.getenv("PERPS_MARKET_HISTORY_DB", "data/perps_market_history.sqlite3"))
+    database = Path(os.getenv("PERPS_MARKET_HISTORY_DB", "data/perps_market_history.sqlite3")).expanduser()
+    paper_database = Path(os.getenv(
+        "PERPS_PAPER_DB",
+        str(Path(os.getenv("DATA_DIR", "data")) / "perps_paper.sqlite3"),
+    )).expanduser()
+    backup_interval = backup_interval_hours or _positive_int_env(
+        "PERPS_BACKUP_INTERVAL_HOURS", 6, 1, 168
+    )
+    if not 1 <= backup_interval <= 168:
+        raise ValueError("backup_interval_hours must be between 1 and 168")
+    retain_backups = backup_retain or _positive_int_env(
+        "PERPS_BACKUP_RETAIN", 30, 1, 365
+    )
+    if not 1 <= retain_backups <= 365:
+        raise ValueError("backup_retain must be between 1 and 365")
+    chosen_backup_directory = Path(backup_directory or os.getenv(
+        "PERPS_BACKUP_DIRECTORY",
+        str(Path(os.getenv("DATA_DIR", "data")) / "backups"),
+    )).expanduser()
     current_store = store or PerpsMarketHistoryStore(database)
     status_file = Path(status_path or os.getenv(
         "PERPS_MARKET_WORKER_STATUS_FILE", "data/perps_market_worker_status.json"
@@ -261,10 +290,18 @@ def run_worker(
             else "healthy" if current_engine is not None else "disabled"
         ),
         "paper_engine": initial_paper_summary,
+        "last_backup_at": None,
+        "last_backup_manifest_name": None,
+        "backup_files_last_run": 0,
+        "backup_error_type": None,
+        "backup_consecutive_failures": 0,
+        "backup_retry_delay_seconds": 0,
         "research_only": True, "live_execution_enabled": False, "execution": "none",
     }
     cycles = 0
     last_prune_monotonic: float | None = None
+    last_backup_attempt_at: datetime | None = None
+    last_backup_monotonic: float | None = None
     try:
         _write_status(status_file, state)
         while not stopping.is_set():
@@ -323,6 +360,58 @@ def run_worker(
                 state["snapshots_inserted_total"] += int(recorded["inserted"])
                 state["history_rows"] = int(current_store.count())
                 state["last_heartbeat_at"] = _utc_now()
+
+                # Back up the position ledger and its matching market/funding
+                # history together after a successful paper-engine cycle.
+                if (
+                    current_engine is not None
+                    and backup_function is not None
+                    and paper_database.is_file()
+                    and database.is_file()
+                ):
+                    backup_now = datetime.now(timezone.utc)
+                    backup_due = (
+                        last_backup_monotonic is None
+                        or time.monotonic() - last_backup_monotonic >= backup_interval * 3600
+                    )
+                    retry_delay = int(state["backup_retry_delay_seconds"])
+                    retry_ready = (
+                        last_backup_attempt_at is None
+                        or (backup_now - last_backup_attempt_at).total_seconds() >= retry_delay
+                    )
+                    if backup_due and retry_ready:
+                        last_backup_attempt_at = backup_now
+                        try:
+                            backup_result = backup_function(
+                                [paper_database, database],
+                                chosen_backup_directory,
+                                retain=retain_backups,
+                            )
+                            files = backup_result.get("files") or []
+                            if backup_result.get("skipped_missing_sources") or len(files) != 2:
+                                raise RuntimeError("both Perps paper and market-history databases must be backed up")
+                            manifest_time = datetime.fromisoformat(
+                                str(backup_result.get("created_at") or "").replace("Z", "+00:00")
+                            )
+                            if manifest_time.tzinfo is None or manifest_time.utcoffset() is None:
+                                raise RuntimeError("Perps backup returned a timezone-naive timestamp")
+                            state.update({
+                                "last_backup_at": manifest_time.astimezone(timezone.utc).isoformat(),
+                                "last_backup_manifest_name": str(backup_result.get("manifest_name") or "")[:200] or None,
+                                "backup_files_last_run": 2,
+                                "backup_error_type": None,
+                                "backup_consecutive_failures": 0,
+                                "backup_retry_delay_seconds": 0,
+                            })
+                            last_backup_monotonic = time.monotonic()
+                        except Exception as backup_exc:
+                            failures = int(state["backup_consecutive_failures"]) + 1
+                            delay = min(3600, 60 * (2 ** min(failures - 1, 6)))
+                            state.update({
+                                "backup_error_type": type(backup_exc).__name__[:80],
+                                "backup_consecutive_failures": failures,
+                                "backup_retry_delay_seconds": delay,
+                            })
                 _write_status(status_file, state)
                 cycles += 1
                 if max_cycles is not None and cycles >= max_cycles:

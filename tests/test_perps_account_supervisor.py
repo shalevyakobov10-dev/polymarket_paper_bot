@@ -300,6 +300,39 @@ class PerpsAccountSupervisorTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(status["consecutive_failures"], 1)
         self.assertEqual(status["worker_state"], "degraded")
 
+    async def test_task_cancellation_releases_the_shared_gateway_submission_lock(self):
+        entered_preflight = asyncio.Event()
+
+        class HangingPreflight:
+            async def run(inner_self, *, now=None):
+                entered_preflight.set()
+                await asyncio.Event().wait()
+
+        supervisor = PerpsAccountSupervisor(
+            journal=self.journal,
+            account_preflight=HangingPreflight(),
+            status_path=self.status_path,
+            submission_lock_path=self.submission_lock_path,
+            now_provider=lambda: NOW,
+            cycle_timeout_seconds=60,
+        )
+        task = asyncio.create_task(supervisor.run())
+        try:
+            await asyncio.wait_for(entered_preflight.wait(), timeout=1)
+            self.assertTrue(self.submission_lock_path.exists())
+            task.cancel()
+            with self.assertRaises(asyncio.CancelledError):
+                await task
+            self.assertFalse(self.submission_lock_path.exists())
+        finally:
+            if not task.done():
+                task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
+        self.assertEqual(self.journal.calls, 1)
+
     async def test_repeated_preflight_errors_use_bounded_retry_and_startup_recovery_once(self):
         sleeps = []
 

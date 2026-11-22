@@ -222,6 +222,15 @@ class PerpsMarketDataTests(unittest.TestCase):
             ["/v1/info/instruments", "/v1/info/tickers", "/v1/info/fees", "/v1/info/book"],
         )
 
+    def test_provider_keeps_fresh_exit_quotes_when_fee_schedule_is_unavailable(self):
+        provider = FakePerpsProvider(
+            [instrument()], [ticker()], {7: book()}, fees_payload={}
+        )
+        result = provider.load(now=NOW)
+        self.assertEqual(len(result), 1)
+        self.assertEqual(result[0]["fees"], {})
+        self.assertEqual(result[0]["book"]["best_bid"], "65000.00")
+
     def test_provider_retains_close_only_for_exits_and_skips_stale_books(self):
         close_only = {**instrument(7, close_only=True)}
         stale = {**instrument(8), "symbol": "ETH-PERP"}

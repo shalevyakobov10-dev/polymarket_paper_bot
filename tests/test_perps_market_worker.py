@@ -18,6 +18,14 @@ class FakeStopEvent:
         return True
 
 
+class NeverStopEvent:
+    def is_set(self):
+        return False
+
+    def wait(self, _seconds):
+        return False
+
+
 class FakeProvider:
     def __init__(self, snapshots=None, error=None):
         self.snapshots = snapshots or [{
@@ -133,6 +141,25 @@ class PerpsMarketWorkerTests(unittest.TestCase):
             self.assertEqual(raw["history_retention_days"], 14)
             self.assertEqual(raw["expired_rows_pruned_total"], 2)
             self.assertEqual(raw["history_rows"], 1)
+
+    def test_worker_returns_nonzero_after_bounded_consecutive_failures_for_supervisor_restart(self):
+        with tempfile.TemporaryDirectory() as directory:
+            target = Path(directory) / "status.json"
+            store = FakeStore()
+            result = run_worker(
+                provider=FakeProvider(error=RuntimeError("synthetic public feed outage")),
+                store=store,
+                stop_event=NeverStopEvent(),
+                status_path=target,
+                poll_interval_seconds=15,
+                max_consecutive_failures=2,
+                backup_function=None,
+            )
+            self.assertEqual(result, 1)
+            raw = json.loads(target.read_text(encoding="utf-8"))
+            self.assertEqual(raw["worker_state"], "degraded")
+            self.assertEqual(raw["consecutive_failures"], 2)
+            self.assertIn("synthetic public feed outage", raw["last_error"])
 
     def test_status_reader_rejects_boolean_counts(self):
         with tempfile.TemporaryDirectory() as directory:

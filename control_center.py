@@ -112,7 +112,7 @@ function metricEntries(id,d){
  if(id==="release"){
   const gates=d.release_gates||{};return {status:d.all_release_gates_passed?"healthy":"blocked",rows:[["All source gates passed",d.all_release_gates_passed],["Runtime flags passed",d.runtime_flags_passed],["Eligible for separate review",d.eligible_for_separate_gateway_review],["Order submission allowed",d.order_submission_allowed]],extra:Object.entries(gates).map(([name,value])=>[name,value&&value.passed===true])};
  }
- if(id==="supervisor")return {status:d.service_state,rows:[["Supervised",d.supervised],["Status fresh",d.status_fresh],["Service state",d.service_state],["Monitor state",d.monitor_state],["Event Paper worker",d.event_paper_worker_state],["Perps worker",d.perps_market_worker_state],["Restart count",d.restart_count],["Execution",d.execution]]};
+ if(id==="supervisor")return {status:d.service_state,rows:[["Supervised",d.supervised],["Status fresh",d.status_fresh],["Service state",d.service_state],["Monitor state",d.monitor_state],["Event Paper worker",d.event_paper_worker_state],["Perps worker",d.perps_market_worker_state],["Perps account worker",d.perps_account_supervisor_state],["Perps account restarts",d.perps_account_supervisor_restart_count],["Restart count",d.restart_count],["Execution",d.execution]]};
  return {status:"unknown",rows:[]};
 }
 function draw(id,d){

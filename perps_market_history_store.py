@@ -485,11 +485,21 @@ class PerpsMarketHistoryStore:
         if isinstance(tolerance_ms, bool) or not isinstance(tolerance_ms, int) or not 0 <= tolerance_ms <= 5000:
             raise ValueError("tolerance_ms must be between 0 and 5000")
         as_of = _aware_iso(as_of_received_at, "as_of_received_at") if as_of_received_at is not None else None
+        conflict_query = """
+            SELECT 1 FROM perps_funding_conflicts
+            WHERE instrument_id=? AND funding_timestamp_ms BETWEEN ? AND ?
+        """
+        conflict_params: tuple[Any, ...] = (
+            instrument_id, timestamp_ms - tolerance_ms, timestamp_ms + tolerance_ms
+        )
+        if as_of is not None:
+            # A later correction must not retroactively alter an earlier replay
+            # decision; a conflict becomes visible only after first detection.
+            conflict_query += " AND first_detected_at <= ?"
+            conflict_params += (as_of,)
         conflict = self.db.execute(
-            """SELECT 1 FROM perps_funding_conflicts
-               WHERE instrument_id=? AND funding_timestamp_ms BETWEEN ? AND ?
-               LIMIT 1""",
-            (instrument_id, timestamp_ms - tolerance_ms, timestamp_ms + tolerance_ms),
+            conflict_query + " LIMIT 1",
+            conflict_params,
         ).fetchone()
         if conflict is not None:
             return None

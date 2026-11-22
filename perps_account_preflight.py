@@ -1,6 +1,8 @@
 """Read-only Perps account startup preflight; never authorizes order placement."""
 from __future__ import annotations
 
+import asyncio
+import math
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
 from typing import Any
@@ -52,6 +54,7 @@ class PerpsAccountPreflight:
         max_unresolved_orders_to_reconcile: int = 100,
         portfolio_max_age_seconds: int = 120,
         auto_cancel_min_remaining_seconds: int = 10,
+        account_read_timeout_seconds: float = 10.0,
     ) -> None:
         required = (
             "fetch_portfolio", "fetch_balances", "fetch_open_orders",
@@ -76,8 +79,16 @@ class PerpsAccountPreflight:
         self.max_open_positions = max_open_positions
         self.max_open_orders = max_open_orders
         self.max_unresolved_orders_to_reconcile = max_unresolved_orders_to_reconcile
+        if (
+            isinstance(account_read_timeout_seconds, bool)
+            or not isinstance(account_read_timeout_seconds, (int, float))
+            or not math.isfinite(float(account_read_timeout_seconds))
+            or not 0.05 <= float(account_read_timeout_seconds) <= 60.0
+        ):
+            raise ValueError("account_read_timeout_seconds must be between 0.05 and 60")
         self.portfolio_max_age_seconds = portfolio_max_age_seconds
         self.auto_cancel_min_remaining_seconds = auto_cancel_min_remaining_seconds
+        self.account_read_timeout_seconds = float(account_read_timeout_seconds)
         self.reconciler = PerpsSdkReconciler(journal=journal, session=session)
 
     async def run(self, *, now: datetime | None = None) -> dict[str, Any]:
@@ -112,7 +123,13 @@ class PerpsAccountPreflight:
             for intent in intents:
                 if intent["status"] in RECONCILABLE_STATUSES or intent["status"] == "submission_pending":
                     try:
-                        await self.reconciler.reconcile(intent["client_order_id"])
+                        await asyncio.wait_for(
+                            self.reconciler.reconcile(intent["client_order_id"]),
+                            timeout=self.account_read_timeout_seconds,
+                        )
+                    except asyncio.TimeoutError:
+                        reasons.append("local_order_reconciliation_timeout")
+                        break
                     except Exception:
                         reasons.append("local_order_reconciliation_failed")
                         break
@@ -128,11 +145,25 @@ class PerpsAccountPreflight:
             reasons.append("unresolved_or_unsubmitted_local_orders")
 
         try:
-            portfolio = await self.session.fetch_portfolio()
-            balances = await self.session.fetch_balances()
-            open_orders = await self.session.fetch_open_orders()
-            auto_cancel = await self.session.fetch_auto_cancel_status()
-            account_configs = await self.session.fetch_account_config()
+            (
+                portfolio,
+                balances,
+                open_orders,
+                auto_cancel,
+                account_configs,
+            ) = await asyncio.wait_for(
+                asyncio.gather(
+                    self.session.fetch_portfolio(),
+                    self.session.fetch_balances(),
+                    self.session.fetch_open_orders(),
+                    self.session.fetch_auto_cancel_status(),
+                    self.session.fetch_account_config(),
+                ),
+                timeout=self.account_read_timeout_seconds,
+            )
+        except asyncio.TimeoutError:
+            reasons.append("account_read_api_timeout")
+            return self._report(reasons, observations, current)
         except Exception:
             reasons.append("account_read_api_unavailable")
             return self._report(reasons, observations, current)

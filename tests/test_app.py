@@ -1039,6 +1039,8 @@ class ParserTests(unittest.TestCase):
             self.assertIn("Read-only monitoring", html)
             self.assertIn("/perps-paper", html)
             self.assertIn("/perps-live-gate", html)
+            self.assertIn("/perps-account-supervisor", html)
+            self.assertIn("Perps account supervision", html)
             self.assertIn("perps_order_journal_present", html)
             self.assertIn("perps_order_journal_backed_up", html)
             self.assertIn("backup_files_expected_last_run", html)

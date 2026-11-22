@@ -172,6 +172,7 @@ class PerpsLiveExecutionGatewayTests(unittest.IsolatedAsyncioTestCase):
     def risk_decision(self, **overrides):
         result = {
             "approved": True,
+            "captured_at": NOW.isoformat(),
             "max_notional_usd": "25",
             "required_initial_margin_usd": "12.5",
             "max_round_trip_fee_usd": "0.02",

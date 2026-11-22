@@ -142,6 +142,23 @@ class PerpsHistoricalReplayTests(unittest.TestCase):
                     "0.0002",
                 )
 
+    def test_future_funding_event_is_hidden_even_when_received_early(self):
+        with tempfile.TemporaryDirectory() as directory:
+            history_path = Path(directory) / "perps-history.sqlite3"
+            with PerpsMarketHistoryStore(history_path) as store:
+                future_ms = int((BASE + timedelta(hours=1)).timestamp() * 1000)
+                store.record_funding_history(
+                    7,
+                    [{
+                        "instrument_id": 7,
+                        "timestamp_ms": future_ms,
+                        "funding_rate": "0.0002",
+                    }],
+                    received_at=BASE,
+                )
+                history = PointInTimePerpsHistory(store, BASE)
+                self.assertIsNone(history.funding_rate_at(7, future_ms))
+
     def test_replay_rejects_naive_window_and_missing_data(self):
         with tempfile.TemporaryDirectory() as directory:
             history_path = Path(directory) / "perps-history.sqlite3"

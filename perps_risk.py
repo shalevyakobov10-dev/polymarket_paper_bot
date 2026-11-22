@@ -30,7 +30,7 @@ def _d(value: Any, field: str) -> Decimal:
 @dataclass(frozen=True)
 class PerpsRiskLimits:
     max_leverage: Decimal = Decimal("2")
-    max_position_notional: Decimal = Decimal("10")
+    max_position_notional: Decimal = Decimal("20")
     max_total_open_exposure: Decimal = Decimal("20")
     max_open_positions: int = 3
     risk_per_trade_pct: Decimal = Decimal("0.005")

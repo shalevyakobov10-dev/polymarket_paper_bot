@@ -400,6 +400,11 @@ class PerpsPaperEngine:
             "DELETE FROM perps_paper_snapshots WHERE observed_at < ?",
             (cutoff,),
         )
+        cutoff_ms = int(_parse_time(cutoff).timestamp() * 1000)
+        connection.execute(
+            "DELETE FROM perps_strategy_decisions WHERE bar_close_ms < ?",
+            (cutoff_ms,),
+        )
 
     def _update_mark_locked(
         self,

@@ -5,7 +5,11 @@ import unittest
 from datetime import datetime, timezone
 from pathlib import Path
 
-from backup_paper_data import create_paper_data_backups
+from backup_paper_data import (
+    create_paper_data_backups,
+    restore_paper_data_backup,
+    verify_paper_data_backup,
+)
 from perps_order_journal import PerpsOrderJournal
 
 
@@ -107,6 +111,126 @@ class PaperDataBackupTests(unittest.TestCase):
             self.assertTrue(restored.integrity_check()["integrity_ok"])
             self.assertEqual(perps_item["integrity_check"], "ok")
             self.assertEqual(len(perps_item["sha256"]), 64)
+
+    def test_manifest_verification_and_restore_to_new_path(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            paper = root / "paper.sqlite3"
+            history = root / "history.sqlite3"
+            self._database(paper, "trade")
+            self._database(history, "snapshot")
+            result = create_paper_data_backups(
+                [paper, history],
+                root / "backups",
+                now=datetime(2026, 11, 22, 12, 0, tzinfo=timezone.utc),
+            )
+            manifest = root / "backups" / result["manifest_name"]
+
+            verified = verify_paper_data_backup(manifest)
+            self.assertTrue(verified["complete"])
+            self.assertEqual(len(verified["files"]), 2)
+
+            restored_path = root / "restore-target" / "paper-restored.sqlite3"
+            restored = restore_paper_data_backup(
+                manifest, "paper.sqlite3", restored_path
+            )
+            self.assertEqual(restored["integrity_check"], "ok")
+            db = sqlite3.connect(restored_path)
+            try:
+                self.assertEqual(
+                    db.execute("SELECT value FROM sample").fetchone()[0],
+                    "trade",
+                )
+            finally:
+                db.close()
+
+            with self.assertRaisesRegex(FileExistsError, "already exists"):
+                restore_paper_data_backup(
+                    manifest, "paper.sqlite3", restored_path
+                )
+
+    def test_manifest_verification_detects_tampered_backup_before_restore(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            paper = root / "paper.sqlite3"
+            self._database(paper, "trade")
+            result = create_paper_data_backups(
+                [paper],
+                root / "backups",
+                now=datetime(2026, 11, 22, 12, 0, tzinfo=timezone.utc),
+            )
+            backup_dir = root / "backups"
+            manifest = backup_dir / result["manifest_name"]
+            backup = backup_dir / result["files"][0]["backup_name"]
+            with backup.open("ab") as handle:
+                handle.write(b"tamper")
+
+            with self.assertRaisesRegex(ValueError, "size mismatch|SHA-256 mismatch"):
+                verify_paper_data_backup(manifest)
+            with self.assertRaisesRegex(ValueError, "size mismatch|SHA-256 mismatch"):
+                restore_paper_data_backup(
+                    manifest, "paper.sqlite3", root / "restored.sqlite3"
+                )
+            self.assertFalse((root / "restored.sqlite3").exists())
+
+    def test_manifest_rejects_path_traversal_backup_names(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            paper = root / "paper.sqlite3"
+            self._database(paper, "trade")
+            result = create_paper_data_backups(
+                [paper],
+                root / "backups",
+                now=datetime(2026, 11, 22, 12, 0, tzinfo=timezone.utc),
+            )
+            manifest_path = root / "backups" / result["manifest_name"]
+            manifest = json.loads(manifest_path.read_text())
+            manifest["files"][0]["backup_name"] = "../outside.sqlite3"
+            manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "unsafe or duplicate filename"):
+                verify_paper_data_backup(manifest_path)
+
+    def test_failed_multi_database_backup_preserves_previous_verified_set(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            paper = root / "paper.sqlite3"
+            history = root / "history.sqlite3"
+            corrupt = root / "corrupt.sqlite3"
+            self._database(paper, "old-trade")
+            self._database(history, "old-history")
+            backup_dir = root / "backups"
+            first = create_paper_data_backups(
+                [paper, history],
+                backup_dir,
+                retain=1,
+                now=datetime(2026, 11, 20, 12, 0, tzinfo=timezone.utc),
+            )
+            first_manifest = backup_dir / first["manifest_name"]
+            before_paper = sorted(p.name for p in backup_dir.glob("paper-*.sqlite3"))
+            before_history = sorted(p.name for p in backup_dir.glob("history-*.sqlite3"))
+            self._database(paper, "new-trade")
+            corrupt.write_bytes(b"not sqlite")
+
+            with self.assertRaises(sqlite3.DatabaseError):
+                create_paper_data_backups(
+                    [paper, corrupt],
+                    backup_dir,
+                    retain=1,
+                    now=datetime(2026, 11, 21, 12, 0, tzinfo=timezone.utc),
+                )
+
+            self.assertEqual(
+                sorted(p.name for p in backup_dir.glob("paper-*.sqlite3")),
+                before_paper,
+            )
+            self.assertEqual(
+                sorted(p.name for p in backup_dir.glob("history-*.sqlite3")),
+                before_history,
+            )
+            self.assertTrue(first_manifest.is_file())
+            self.assertTrue(verify_paper_data_backup(first_manifest)["complete"])
+            self.assertEqual(list(backup_dir.glob("*.tmp")), [])
+            self.assertEqual(list(backup_dir.glob(".*.tmp")), [])
 
     def test_corrupt_database_is_not_published_as_backup(self):
         with tempfile.TemporaryDirectory() as directory:

@@ -37,8 +37,10 @@ class PaperDataBackupTests(unittest.TestCase):
             self.assertEqual(len(result["files"]), 2)
             self.assertTrue(all(item["integrity_check"] == "ok" for item in result["files"]))
             self.assertTrue(all(len(item["sha256"]) == 64 for item in result["files"]))
-            manifest = json.loads((root / "backups" / result["manifest_name"]).read_text())
+            manifest_path = root / "backups" / result["manifest_name"]
+            manifest = json.loads(manifest_path.read_text())
             self.assertEqual(len(manifest["files"]), 2)
+            self.assertTrue(verify_paper_data_backup(manifest_path)["complete"])
             for item in result["files"]:
                 db = sqlite3.connect(root / "backups" / item["backup_name"])
                 try:
@@ -67,8 +69,12 @@ class PaperDataBackupTests(unittest.TestCase):
                     [paper], root / "backups", retain=1,
                     now=datetime(2026, 11, day, tzinfo=timezone.utc),
                 )
-            backups = list((root / "backups").glob("paper-*.sqlite3"))
+            backup_dir = root / "backups"
+            backups = list(backup_dir.glob("paper-*.sqlite3"))
+            manifests = list(backup_dir.glob("paper-backup-manifest-*.json"))
             self.assertEqual(len(backups), 1)
+            self.assertEqual(len(manifests), 1)
+            self.assertTrue(verify_paper_data_backup(manifests[0])["complete"])
 
     def test_perps_order_journal_backup_can_be_reopened_and_reconciled(self):
         with tempfile.TemporaryDirectory() as directory:

@@ -775,9 +775,13 @@ class PerpsPaperEngine:
                 if hit_stop or hit_target:
                     reason = "stop_loss" if hit_stop else "take_profit"
                     result = self._close_locked(connection, row, snapshot, reason=reason, now=current)
-                    if funding_gap and result.get("status") == "PAPER_POSITION_CLOSED":
+                    if funding_gap:
                         result["funding_reconciliation"] = "incomplete"
-                        result["warning"] = "position_closed_despite_funding_gap"
+                        result["warning"] = (
+                            "position_closed_despite_funding_gap"
+                            if result.get("status") == "PAPER_POSITION_CLOSED"
+                            else "protective_exit_blocked_during_funding_gap"
+                        )
                     connection.commit()
                     return result
                 if funding_gap:

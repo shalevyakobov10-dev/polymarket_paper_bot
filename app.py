@@ -1597,6 +1597,14 @@ class Handler(BaseHTTPRequestHandler):
                     "mode": "POLYMARKET_PERPS_ISOLATED_MARGIN_PAPER",
                     "enabled": engine_enabled,
                     "worker_state": engine_state,
+                    "degraded_reason": worker_snapshot.get("paper_engine_degraded_reason"),
+                    "markets_in_last_snapshot": worker_snapshot.get("markets_in_last_snapshot", 0),
+                    "markets_with_verified_fee_schedule": worker_snapshot.get("markets_with_fee_schedule", 0),
+                    "new_entries_permitted": (
+                        engine_enabled
+                        and engine_state == "healthy"
+                        and worker_snapshot.get("markets_with_fee_schedule", 0) > 0
+                    ),
                     "portfolio": engine_summary,
                     "research_only": True,
                     "live_execution_enabled": False,

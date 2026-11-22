@@ -64,6 +64,8 @@ export default defineRailway(() => {
       PERPS_PAPER_MAXIMUM_DRAWDOWN_PCT: "0.10",
       PERPS_PAPER_MAX_ENTRY_IMPACT_BPS: "50",
       PERPS_PAPER_MAX_DATA_AGE_SECONDS: "15",
+      PERPS_PAPER_FUNDING_SCHEDULE_GRACE_SECONDS: "60",
+      PERPS_PAPER_MAX_POST_FUNDING_MARK_DELAY_SECONDS: "45",
       PAPER_MARKET_DATA_SOURCE: "live_clob",
       PAPER_DATABASE_PATH: "/app/data/offline_news_paper.sqlite3",
       MARKET_HISTORY_DATABASE_PATH: "/app/data/market_history.sqlite3",

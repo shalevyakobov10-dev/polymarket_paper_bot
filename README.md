@@ -510,3 +510,8 @@ The provider validates each instrument's market limits and risk tiers, instrumen
 Perps need a separate risk model. The official risk documentation defines initial margin as notional divided by leverage, maintenance margin as notional multiplied by the instrument maintenance-margin rate, and liquidation using account equity against maintenance margin at Mark Price. Funding is separately settled on the instrument's configured interval (commonly hourly). Therefore the event-market risk manager must not be reused for perpetuals. A future Perps paper engine must use exchange-reported instrument risk tiers, leverage limits, Mark Price, funding, fees, margin mode, position/order exposure and liquidation rules, and must fail closed when any required data is stale or missing.
 
 A scheduled GitHub Actions check (\`Perps public market-data smoke\`) fetches live public instruments, tickers and books and verifies at least one current, usable market. It is an integration check, not continuous hosting or an execution test.
+
+
+## Polymarket Perps Paper Engine
+
+The existing public Perps collector now feeds a separate, SQLite-backed Paper account with risk checks, visible-book fills, funding tracking, protective exits, retention, verified backups and a sanitized /perps-paper endpoint. See PERPS_PAPER_HE.md for design details and limitations. The Paper engine does not yet generate autonomous LONG/SHORT entries and cannot submit live orders.

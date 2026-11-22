@@ -124,6 +124,12 @@ def build_supervisor_config(
     if perps_enabled_raw not in {"true", "false"}:
         raise ValueError("ENABLE_PERPS_MARKET_DATA_WORKER must be exactly true or false")
     perps_worker_enabled = perps_enabled_raw == "true"
+    perps_paper_raw = str(source.get("ENABLE_PERPS_PAPER_ENGINE", "false")).strip().lower()
+    if perps_paper_raw not in {"true", "false"}:
+        raise ValueError("ENABLE_PERPS_PAPER_ENGINE must be exactly true or false")
+    perps_paper_enabled = perps_paper_raw == "true"
+    if perps_paper_enabled and not perps_worker_enabled:
+        raise ValueError("ENABLE_PERPS_PAPER_ENGINE requires ENABLE_PERPS_MARKET_DATA_WORKER=true")
     perps_worker_env = dict(app_env)
     perps_worker_env["DATA_DIR"] = str(data_dir)
     perps_worker_env["PERPS_MARKET_HISTORY_DB"] = str(
@@ -134,8 +140,15 @@ def build_supervisor_config(
     )
     perps_worker_env.setdefault("PERPS_POLL_INTERVAL_SECONDS", "30")
     perps_worker_env.setdefault("PERPS_MARKET_LIMIT", "10")
+    perps_worker_env["ENABLE_PERPS_PAPER_ENGINE"] = "true" if perps_paper_enabled else "false"
+    perps_worker_env["PERPS_PAPER_DB"] = str(
+        source.get("PERPS_PAPER_DB", str(data_dir / "perps_paper.sqlite3"))
+    )
     perps_worker_env["DRY_RUN"] = "true"
     perps_worker_env["LIVE_EXECUTION_ENABLED"] = "false"
+    perps_worker_env["LIVE_TRADING_ENABLED"] = "false"
+    perps_worker_env["LIVE_TRADING_ARMED"] = "false"
+    perps_worker_env["ENABLE_USER_ORDER_MONITOR"] = "false"
 
     executable = python_executable or sys.executable
     app_command = (executable, "app.py")

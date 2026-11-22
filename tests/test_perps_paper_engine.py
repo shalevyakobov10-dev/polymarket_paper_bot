@@ -192,6 +192,7 @@ class PerpsPaperEngineTests(unittest.TestCase):
         later = BASE_TIME + timedelta(minutes=1)
         downside = market_snapshot(
             now=later, mark="98.5", bid="98.45", ask="98.55",
+            next_funding_offset_ms=3_540_000,
         )
         result = self.engine.process_snapshot(downside, now=later)
         self.assertEqual(result["status"], "PAPER_POSITION_CLOSED")

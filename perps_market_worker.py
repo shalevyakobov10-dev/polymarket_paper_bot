@@ -114,6 +114,12 @@ def read_perps_worker_status(path: str | Path) -> dict[str, Any]:
             "markets_in_last_snapshot": 0, "snapshots_inserted_total": 0,
             "history_rows": 0, "poll_interval_seconds": None,
             "history_retention_days": None, "expired_rows_pruned_total": 0,
+            "paper_engine_enabled": False, "paper_worker_state": "disabled",
+            "paper_open_positions": 0, "paper_closed_trades": 0,
+            "paper_closed_last_cycle": 0, "paper_funding_gaps_last_cycle": 0,
+            "paper_snapshot_rejections_last_cycle": 0,
+            "paper_cash_balance": None, "paper_equity": None, "paper_daily_loss": None,
+            "backup_at": None, "backup_error_type": None,
             "research_only": True, "live_execution_enabled": False, "execution": "none",
         }
     except (OSError, UnicodeError, ValueError, TypeError, json.JSONDecodeError):
@@ -124,6 +130,12 @@ def read_perps_worker_status(path: str | Path) -> dict[str, Any]:
             "markets_in_last_snapshot": 0, "snapshots_inserted_total": 0,
             "history_rows": 0, "poll_interval_seconds": None,
             "history_retention_days": None, "expired_rows_pruned_total": 0,
+            "paper_engine_enabled": False, "paper_worker_state": "disabled",
+            "paper_open_positions": 0, "paper_closed_trades": 0,
+            "paper_closed_last_cycle": 0, "paper_funding_gaps_last_cycle": 0,
+            "paper_snapshot_rejections_last_cycle": 0,
+            "paper_cash_balance": None, "paper_equity": None, "paper_daily_loss": None,
+            "backup_at": None, "backup_error_type": None,
             "research_only": True, "live_execution_enabled": False, "execution": "none",
         }
 

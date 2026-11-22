@@ -8,7 +8,67 @@ from unittest.mock import patch
 
 from perps_market_history_store import PerpsMarketHistoryStore
 from perps_walk_forward_evaluation import evaluate_perps_walk_forward
-from tests.test_perps_historical_replay import BASE, market_snapshot
+
+BASE = datetime(2026, 11, 22, 8, 0, 0, tzinfo=timezone.utc)
+
+
+def market_snapshot(sequence, seconds, mark):
+    received = BASE + timedelta(seconds=seconds)
+    timestamp_ms = int(received.timestamp() * 1000)
+    price = float(mark)
+    bid, ask = f"{price - 0.01:.2f}", f"{price + 0.01:.2f}"
+    return {
+        "instrument": {
+            "instrument_id": 7,
+            "symbol": "BTC-PERP",
+            "category": "crypto",
+            "close_only": False,
+            "isolated_only": True,
+            "min_notional": "10",
+            "max_market_notional": "100000",
+            "max_leverage": "20",
+            "quantity_decimals": 4,
+            "price_decimals": 2,
+            "price_bounds": "0.2",
+            "liquidation_fee": "0.01",
+            "funding_interval": "1h",
+            "risk_tiers": [
+                {"lower_bound": "0", "max_leverage": "20"},
+                {"lower_bound": "100000", "max_leverage": "10"},
+            ],
+        },
+        "ticker": {
+            "instrument_id": 7,
+            "symbol": "BTC-PERP",
+            "index_price": str(mark),
+            "mark_price": str(mark),
+            "last_price": str(mark),
+            "mid_price": str(mark),
+            "open_interest": "100",
+            "funding_rate": "0.0001",
+            "next_funding_ms": timestamp_ms + 3_600_000,
+            "timestamp_ms": timestamp_ms,
+        },
+        "book": {
+            "instrument_id": 7,
+            "timestamp_ms": timestamp_ms,
+            "sequence": sequence,
+            "best_bid": bid,
+            "best_ask": ask,
+            "bids": [{"price": bid, "quantity": "10"}],
+            "asks": [{"price": ask, "quantity": "10"}],
+        },
+        "fees": {
+            "taker_fee_rate": "0.0004",
+            "maker_fee_rate": "0.0001",
+            "tier_assumption": "highest_published_rate_no_volume_discount",
+            "source": "public_perps_fee_schedule",
+            "retrieved_at": received.isoformat(),
+        },
+        "received_at": received.isoformat(),
+        "research_only": True,
+        "execution": "none",
+    }
 
 
 class PerpsWalkForwardEvaluationTests(unittest.TestCase):

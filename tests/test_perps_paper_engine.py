@@ -157,7 +157,7 @@ class PerpsPaperEngineTests(unittest.TestCase):
     def test_opens_short_on_negative_momentum(self):
         with tempfile.TemporaryDirectory() as directory:
             with self.make_engine(directory) as engine:
-                result = engine.process_snapshot(
+                result = process_snapshot_at_capture(engine, 
                     make_snapshot(mark="100.00", bid="99.99", ask="100.01"),
                     FakeHistory(["100.40", "100.20", "100.00"]),
                 )
@@ -170,7 +170,7 @@ class PerpsPaperEngineTests(unittest.TestCase):
     def test_requires_history_and_does_not_trade_on_insufficient_observations(self):
         with tempfile.TemporaryDirectory() as directory:
             with self.make_engine(directory) as engine:
-                result = engine.process_snapshot(
+                result = process_snapshot_at_capture(engine, 
                     make_snapshot(), FakeHistory(["100.00", "100.40"])
                 )
                 self.assertEqual(result["open_positions"], 0)
@@ -181,7 +181,7 @@ class PerpsPaperEngineTests(unittest.TestCase):
     def test_spread_guard_blocks_entry(self):
         with tempfile.TemporaryDirectory() as directory:
             with self.make_engine(directory) as engine:
-                result = engine.process_snapshot(
+                result = process_snapshot_at_capture(engine, 
                     make_snapshot(mark="100", bid="99.50", ask="100.50"),
                     FakeHistory(),
                 )
@@ -194,7 +194,7 @@ class PerpsPaperEngineTests(unittest.TestCase):
     def test_close_only_blocks_new_positions(self):
         with tempfile.TemporaryDirectory() as directory:
             with self.make_engine(directory) as engine:
-                result = engine.process_snapshot(
+                result = process_snapshot_at_capture(engine, 
                     make_snapshot(close_only=True), FakeHistory()
                 )
                 self.assertEqual(result["open_positions"], 0)
@@ -207,11 +207,11 @@ class PerpsPaperEngineTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             with self.make_engine(directory) as engine:
                 snapshot = make_snapshot()
-                first = engine.process_snapshot(snapshot, FakeHistory())
+                first = process_snapshot_at_capture(engine, snapshot, FakeHistory())
                 event_count = engine.db.execute(
                     "SELECT COUNT(*) FROM perps_paper_events"
                 ).fetchone()[0]
-                second = engine.process_snapshot(snapshot, FakeHistory())
+                second = process_snapshot_at_capture(engine, snapshot, FakeHistory())
                 self.assertEqual(first["open_positions"], 1)
                 self.assertEqual(second["open_positions"], 1)
                 self.assertEqual(
@@ -226,7 +226,7 @@ class PerpsPaperEngineTests(unittest.TestCase):
     def test_take_profit_closes_and_same_snapshot_does_not_reopen(self):
         with tempfile.TemporaryDirectory() as directory:
             with self.make_engine(directory) as engine:
-                engine.process_snapshot(make_snapshot(), FakeHistory())
+                process_snapshot_at_capture(engine, make_snapshot(), FakeHistory())
                 closed_snapshot = make_snapshot(
                     mark="102.00",
                     sequence=4,
@@ -234,7 +234,7 @@ class PerpsPaperEngineTests(unittest.TestCase):
                     bid="101.99",
                     ask="102.01",
                 )
-                result = engine.process_snapshot(closed_snapshot, FakeHistory())
+                result = process_snapshot_at_capture(engine, closed_snapshot, FakeHistory())
                 self.assertEqual(result["open_positions"], 0)
                 row = engine.db.execute(
                     "SELECT status,close_reason,net_pnl FROM perps_paper_positions"
@@ -246,7 +246,7 @@ class PerpsPaperEngineTests(unittest.TestCase):
     def test_stop_loss_closes_position_when_visible_bid_depth_is_sufficient(self):
         with tempfile.TemporaryDirectory() as directory:
             with self.make_engine(directory) as engine:
-                engine.process_snapshot(make_snapshot(), FakeHistory())
+                process_snapshot_at_capture(engine, make_snapshot(), FakeHistory())
                 snapshot = make_snapshot(
                     mark="99.50",
                     sequence=4,
@@ -254,7 +254,7 @@ class PerpsPaperEngineTests(unittest.TestCase):
                     bid="99.49",
                     ask="99.51",
                 )
-                result = engine.process_snapshot(snapshot, FakeHistory())
+                result = process_snapshot_at_capture(engine, snapshot, FakeHistory())
                 self.assertEqual(result["open_positions"], 0)
                 row = engine.db.execute(
                     "SELECT status,close_reason,net_pnl FROM perps_paper_positions"
@@ -266,7 +266,7 @@ class PerpsPaperEngineTests(unittest.TestCase):
     def test_insufficient_exit_depth_keeps_position_open_and_audited(self):
         with tempfile.TemporaryDirectory() as directory:
             with self.make_engine(directory) as engine:
-                engine.process_snapshot(make_snapshot(), FakeHistory())
+                process_snapshot_at_capture(engine, make_snapshot(), FakeHistory())
                 snapshot = make_snapshot(
                     mark="99.50",
                     sequence=4,
@@ -275,7 +275,7 @@ class PerpsPaperEngineTests(unittest.TestCase):
                     ask="99.51",
                     bid_quantity="0.0001",
                 )
-                result = engine.process_snapshot(snapshot, FakeHistory())
+                result = process_snapshot_at_capture(engine, snapshot, FakeHistory())
                 self.assertEqual(result["open_positions"], 1)
                 row = engine.db.execute(
                     "SELECT status FROM perps_paper_positions"
@@ -318,7 +318,7 @@ class PerpsPaperEngineTests(unittest.TestCase):
     def test_funding_uses_exact_published_settlement_not_previous_ticker_estimate(self):
         with tempfile.TemporaryDirectory() as directory:
             with self.make_engine(directory) as engine:
-                engine.process_snapshot(
+                process_snapshot_at_capture(engine, 
                     make_snapshot(funding_rate="0.001"),
                     FakeHistory(),
                 )
@@ -335,7 +335,7 @@ class PerpsPaperEngineTests(unittest.TestCase):
                     next_funding_ms=FUNDING_MS + 3_600_000,
                 )
                 history = FakeHistory(settled_rate="0.00025")
-                engine.process_snapshot(snapshot, history)
+                process_snapshot_at_capture(engine, snapshot, history)
                 after = engine.db.execute(
                     "SELECT margin_balance,funding_paid FROM perps_paper_positions"
                 ).fetchone()
@@ -360,7 +360,7 @@ class PerpsPaperEngineTests(unittest.TestCase):
     def test_funding_gap_halts_new_risk_instead_of_guessing_missing_rates(self):
         with tempfile.TemporaryDirectory() as directory:
             with self.make_engine(directory) as engine:
-                engine.process_snapshot(make_snapshot(), FakeHistory())
+                process_snapshot_at_capture(engine, make_snapshot(), FakeHistory())
                 snapshot = make_snapshot(
                     mark="100.50",
                     sequence=4,
@@ -369,7 +369,7 @@ class PerpsPaperEngineTests(unittest.TestCase):
                     ask="100.51",
                     next_funding_ms=FUNDING_MS + 7_200_000,
                 )
-                result = engine.process_snapshot(snapshot, FakeHistory())
+                result = process_snapshot_at_capture(engine, snapshot, FakeHistory())
                 self.assertTrue(result["halted"])
                 self.assertEqual(result["halt_reason"], "funding_history_gap")
                 event = engine.db.execute(
@@ -380,7 +380,7 @@ class PerpsPaperEngineTests(unittest.TestCase):
     def test_missing_exact_funding_settlement_halts_without_guessing_rate(self):
         with tempfile.TemporaryDirectory() as directory:
             with self.make_engine(directory) as engine:
-                engine.process_snapshot(make_snapshot(), FakeHistory())
+                process_snapshot_at_capture(engine, make_snapshot(), FakeHistory())
                 snapshot = make_snapshot(
                     mark="100.50",
                     sequence=4,
@@ -389,7 +389,7 @@ class PerpsPaperEngineTests(unittest.TestCase):
                     ask="100.51",
                     next_funding_ms=FUNDING_MS + 3_600_000,
                 )
-                result = engine.process_snapshot(snapshot, FakeHistory(settled_rate=None))
+                result = process_snapshot_at_capture(engine, snapshot, FakeHistory(settled_rate=None))
                 self.assertTrue(result["halted"])
                 self.assertEqual(result["halt_reason"], "published_funding_settlement_missing")
                 position = engine.db.execute(
@@ -401,7 +401,7 @@ class PerpsPaperEngineTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             with self.make_engine(directory) as engine:
                 missing_fee = make_snapshot(fees={})
-                result = engine.process_snapshot(missing_fee, FakeHistory())
+                result = process_snapshot_at_capture(engine, missing_fee, FakeHistory())
                 self.assertEqual(result["open_positions"], 0)
                 event = engine.db.execute(
                     "SELECT details_json FROM perps_paper_events WHERE event_type='ENTRY_BLOCKED'"
@@ -410,7 +410,7 @@ class PerpsPaperEngineTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as directory:
             with self.make_engine(directory) as engine:
-                engine.process_snapshot(make_snapshot(), FakeHistory())
+                process_snapshot_at_capture(engine, make_snapshot(), FakeHistory())
                 row = engine.db.execute(
                     "SELECT taker_fee_rate,liquidation_fee_rate FROM perps_paper_positions"
                 ).fetchone()
@@ -420,7 +420,7 @@ class PerpsPaperEngineTests(unittest.TestCase):
     def test_exit_uses_more_conservative_current_published_fee(self):
         with tempfile.TemporaryDirectory() as directory:
             with self.make_engine(directory) as engine:
-                engine.process_snapshot(make_snapshot(), FakeHistory())
+                process_snapshot_at_capture(engine, make_snapshot(), FakeHistory())
                 closing = make_snapshot(
                     mark="102.00", sequence=4,
                     timestamp_ms=NOW_MS + 90_000,
@@ -432,7 +432,7 @@ class PerpsPaperEngineTests(unittest.TestCase):
                         "retrieved_at": iso_ms(NOW_MS + 90_000),
                     },
                 )
-                engine.process_snapshot(closing, FakeHistory())
+                process_snapshot_at_capture(engine, closing, FakeHistory())
                 event = engine.db.execute(
                     "SELECT details_json FROM perps_paper_events WHERE event_type='CLOSED'"
                 ).fetchone()
@@ -446,7 +446,7 @@ class PerpsPaperEngineTests(unittest.TestCase):
                     {"lower_bound": "0", "max_leverage": "10"},
                     {"lower_bound": "100000", "max_leverage": "5"},
                 ]
-                engine.process_snapshot(snapshot, FakeHistory())
+                process_snapshot_at_capture(engine, snapshot, FakeHistory())
                 row = engine.db.execute(
                     "SELECT maintenance_leverage,margin_balance FROM perps_paper_positions"
                 ).fetchone()
@@ -460,14 +460,14 @@ class PerpsPaperEngineTests(unittest.TestCase):
                     sequence=4, timestamp_ms=NOW_MS + 90_000,
                     mark="100.40", bid="100.39", ask="100.41",
                 )
-                result = engine.process_snapshot(next_snapshot, FakeHistory())
+                result = process_snapshot_at_capture(engine, next_snapshot, FakeHistory())
                 self.assertEqual(result["open_positions"], 1)
                 self.assertFalse(result["halted"])
 
     def test_funding_requirements_report_exact_open_position_settlement_window(self):
         with tempfile.TemporaryDirectory() as directory:
             with self.make_engine(directory) as engine:
-                engine.process_snapshot(make_snapshot(), FakeHistory())
+                process_snapshot_at_capture(engine, make_snapshot(), FakeHistory())
                 result = engine.funding_requirements([make_snapshot(
                     sequence=4,
                     timestamp_ms=FUNDING_MS + 1_000,
@@ -482,7 +482,7 @@ class PerpsPaperEngineTests(unittest.TestCase):
     def test_mark_price_liquidation_closes_with_separate_liquidation_fee(self):
         with tempfile.TemporaryDirectory() as directory:
             with self.make_engine(directory) as engine:
-                engine.process_snapshot(make_snapshot(), FakeHistory())
+                process_snapshot_at_capture(engine, make_snapshot(), FakeHistory())
                 snapshot = make_snapshot(
                     mark="50.00",
                     sequence=4,
@@ -490,7 +490,7 @@ class PerpsPaperEngineTests(unittest.TestCase):
                     bid="49.99",
                     ask="50.01",
                 )
-                result = engine.process_snapshot(snapshot, FakeHistory())
+                result = process_snapshot_at_capture(engine, snapshot, FakeHistory())
                 self.assertEqual(result["open_positions"], 0)
                 row = engine.db.execute(
                     "SELECT status,close_reason,net_pnl FROM perps_paper_positions"

@@ -411,8 +411,20 @@ class ParserTests(unittest.TestCase):
         server = app.ThreadingHTTPServer(("127.0.0.1", 0), app.Handler)
         thread = threading.Thread(target=server.serve_forever, daemon=True)
         old_path = app.PERPS_ACCOUNT_SUPERVISOR_STATUS_FILE
+        old_supervisor_path = app.SUPERVISOR_STATUS_FILE
         with tempfile.TemporaryDirectory() as directory:
             try:
+                app.SUPERVISOR_STATUS_FILE = Path(directory) / "supervisor.json"
+                write_supervisor_status(
+                    app.SUPERVISOR_STATUS_FILE,
+                    build_supervisor_status(
+                        service_state="running",
+                        monitor_enabled=False,
+                        monitor_state="disabled",
+                        perps_account_supervisor_enabled=True,
+                        perps_account_supervisor_state="running",
+                    ),
+                )
                 status_path = Path(directory) / "perps-account-supervisor.json"
                 status_path.write_text(json.dumps({
                     "schema_version": 1,
@@ -443,6 +455,8 @@ class ParserTests(unittest.TestCase):
 
                 self.assertEqual(payload["mode"], "PERPS_ACCOUNT_READ_ONLY_SUPERVISOR")
                 self.assertEqual(payload["worker_state"], "degraded")
+                self.assertTrue(payload["process_supervisor_enabled"])
+                self.assertEqual(payload["process_supervisor_state"], "running")
                 self.assertTrue(payload["heartbeat_fresh"])
                 self.assertLessEqual(payload["heartbeat_age_seconds"], 2)
                 self.assertEqual(payload["recovered_interrupted_submissions"], 1)
@@ -464,6 +478,7 @@ class ParserTests(unittest.TestCase):
                 server.server_close()
                 thread.join(timeout=2)
                 app.PERPS_ACCOUNT_SUPERVISOR_STATUS_FILE = old_path
+                app.SUPERVISOR_STATUS_FILE = old_supervisor_path
 
     def test_perps_live_release_gate_endpoint_stays_closed_even_with_runtime_flags_set(self):
         server = app.ThreadingHTTPServer(("127.0.0.1", 0), app.Handler)

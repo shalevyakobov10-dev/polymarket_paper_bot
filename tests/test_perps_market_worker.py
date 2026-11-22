@@ -64,6 +64,39 @@ class FakeStore:
         self.closed = True
 
 
+class FakePaperEngine:
+    def __init__(self):
+        self.processed = []
+
+    def process_snapshot(self, snapshot, history_store):
+        self.processed.append(snapshot["instrument"]["instrument_id"])
+
+    def summary(self):
+        return {
+            "cash": "975",
+            "equity": "1000",
+            "peak_equity": "1000",
+            "isolated_margin_reserved": "25",
+            "unrealized_pnl": "0",
+            "open_positions": 1,
+            "closed_positions": 0,
+            "closed_net_pnl": "0",
+            "halted": False,
+            "halt_reason": None,
+            "max_leverage": "2",
+            "max_position_notional": "25",
+            "max_total_notional": "75",
+            "taker_fee_rate_assumption": "0.0005",
+            "liquidation_fee_rate_assumption": "0.01",
+            "event_counts": {"PAPER_POSITION_OPENED": 1},
+            "research_only": True,
+            "live_execution_enabled": False,
+            "order_submission_allowed": False,
+            "execution": "none",
+            "POLYMARKET_PRIVATE_KEY": "must-not-leak",
+        }
+
+
 class PerpsMarketWorkerTests(unittest.TestCase):
     def test_worker_records_market_data_and_publishes_healthy_status(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -85,6 +118,34 @@ class PerpsMarketWorkerTests(unittest.TestCase):
             self.assertFalse(raw["live_execution_enabled"])
             self.assertEqual(raw["execution"], "none")
             self.assertEqual(len(store.rows), 1)
+
+    def test_worker_runs_optional_perps_paper_engine_after_archiving_public_snapshots(self):
+        with tempfile.TemporaryDirectory() as directory:
+            target = Path(directory) / "status.json"
+            store = FakeStore()
+            engine = FakePaperEngine()
+            result = run_worker(
+                provider=FakeProvider(),
+                store=store,
+                paper_engine=engine,
+                paper_engine_enabled=True,
+                stop_event=FakeStopEvent(),
+                status_path=target,
+                poll_interval_seconds=15,
+                max_cycles=1,
+            )
+            self.assertEqual(result, 0)
+            self.assertEqual(engine.processed, [1])
+            raw = json.loads(target.read_text(encoding="utf-8"))
+            self.assertTrue(raw["paper_engine_enabled"])
+            self.assertEqual(raw["paper_engine_state"], "healthy")
+            self.assertEqual(raw["paper_engine"]["open_positions"], 1)
+            self.assertFalse(raw["paper_engine"]["live_execution_enabled"])
+            sanitized = read_perps_worker_status(target)
+            self.assertEqual(sanitized["paper_engine_state"], "healthy")
+            self.assertEqual(sanitized["paper_engine"]["equity"], "1000")
+            self.assertFalse(sanitized["paper_engine"]["order_submission_allowed"])
+            self.assertNotIn("POLYMARKET_PRIVATE_KEY", sanitized["paper_engine"])
 
     def test_worker_marks_degraded_and_returns_failure_when_data_is_unavailable(self):
         with tempfile.TemporaryDirectory() as directory:

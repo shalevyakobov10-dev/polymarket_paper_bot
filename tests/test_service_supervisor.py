@@ -518,7 +518,7 @@ class SupervisorTests(unittest.TestCase):
                 commands[3][1]["PERPS_SUBMISSION_LOCK_PATH"],
             )
             self.assertNotIn("POLYMARKET_PRIVATE_KEY", commands[2][1])
-            self.assertNotIn("LIVE_EXECUTION_ENABLED", commands[2][1])
+            self.assertEqual(commands[2][1]["LIVE_EXECUTION_ENABLED"], "false")
             self.assertTrue(restarted_account.terminated)
             status = read_supervisor_status(config.status_path)
             self.assertTrue(status["perps_account_supervisor_enabled"])

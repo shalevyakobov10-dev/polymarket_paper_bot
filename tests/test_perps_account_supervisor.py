@@ -147,6 +147,31 @@ class PerpsAccountSupervisorTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.journal.calls, 1)
         self.assertEqual(preflight.calls, 1)
 
+    async def test_account_supervisor_respects_the_gateway_lock_implementation(self):
+        from perps_live_execution_gateway import _ExclusiveSubmissionLock
+
+        gateway_lock = _ExclusiveSubmissionLock(self.submission_lock_path)
+        self.assertTrue(gateway_lock.acquire())
+        preflight = FakePreflight()
+        supervisor = PerpsAccountSupervisor(
+            journal=self.journal,
+            account_preflight=preflight,
+            status_path=self.status_path,
+            submission_lock_path=self.submission_lock_path,
+            now_provider=lambda: NOW,
+        )
+        try:
+            await supervisor.run(max_cycles=1)
+            status = read_perps_account_supervisor_status(self.status_path)
+            self.assertEqual(status["last_error_code"], "submission_lock_unavailable")
+            self.assertFalse(status["recovery_completed"])
+            self.assertEqual(self.journal.calls, 0)
+            self.assertEqual(preflight.calls, 0)
+            self.assertTrue(self.submission_lock_path.exists())
+        finally:
+            gateway_lock.release()
+        self.assertFalse(self.submission_lock_path.exists())
+
     async def test_existing_or_stale_submission_lock_prevents_preflight_and_recovery(self):
         self.submission_lock_path.write_text(
             json.dumps({"token": "operator-inspection-required"}),
@@ -233,6 +258,24 @@ class PerpsAccountSupervisorTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(status["worker_state"], "degraded")
         self.assertEqual(status["last_error_code"], "account_supervisor_cycle_failed")
         self.assertFalse(status["read_only_preflight_passed"])
+        self.assertEqual(status["blocked_reasons"], ["account_supervisor_cycle_unavailable"])
+
+    async def test_supervisor_rejects_a_preflight_report_with_execution_permission(self):
+        malicious = report()
+        malicious["order_placement_authorized"] = True
+        supervisor = PerpsAccountSupervisor(
+            journal=self.journal,
+            account_preflight=FakePreflight(reports=[malicious]),
+            status_path=self.status_path,
+            submission_lock_path=self.submission_lock_path,
+            now_provider=lambda: NOW,
+        )
+        await supervisor.run(max_cycles=1)
+
+        status = read_perps_account_supervisor_status(self.status_path)
+        self.assertEqual(status["worker_state"], "degraded")
+        self.assertFalse(status["read_only_preflight_passed"])
+        self.assertEqual(status["last_error_code"], "account_supervisor_cycle_failed")
         self.assertEqual(status["blocked_reasons"], ["account_supervisor_cycle_unavailable"])
 
     async def test_preflight_timeout_is_reported_as_degraded(self):

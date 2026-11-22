@@ -93,7 +93,9 @@ def _perps_worker_heartbeat_age(
     age = (current - stamp).total_seconds()
     # A materially future-dated heartbeat is corrupt and must fail closed.
     if age < -2:
-        return float("inf")
+        # Keep the restart timer anchored to process uptime so a corrupt clock
+        # value cannot trigger an endless immediate-restart loop.
+        return process_age
     return max(0.0, age)
 
 

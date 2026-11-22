@@ -117,6 +117,7 @@ class PerpsMarketWorkerTests(unittest.TestCase):
             raw = json.loads(target.read_text(encoding="utf-8"))
             self.assertEqual(raw["worker_state"], "healthy")
             self.assertEqual(raw["markets_in_last_snapshot"], 1)
+            self.assertEqual(raw["markets_with_fee_schedule"], 0)
             self.assertEqual(raw["history_rows"], 1)
             self.assertFalse(raw["live_execution_enabled"])
             self.assertEqual(raw["execution"], "none")
@@ -380,6 +381,34 @@ class PerpsMarketWorkerTests(unittest.TestCase):
             self.assertEqual(raw["worker_state"], "degraded")
             self.assertEqual(raw["consecutive_failures"], 2)
             self.assertIn("persistent upstream outage", raw["last_error"])
+
+    def test_worker_counts_only_snapshots_with_public_fee_schedule(self):
+        with tempfile.TemporaryDirectory() as directory:
+            provider = FakeProvider(snapshots=[
+                {
+                    **FakeProvider().snapshots[0],
+                    "fees": {
+                        "source": "public_perps_fee_schedule",
+                        "taker_fee_rate": "0.0004",
+                        "maker_fee_rate": "0.0001",
+                    },
+                },
+                {**FakeProvider().snapshots[0], "instrument": {
+                    "instrument_id": 2, "symbol": "ETH-PERP", "category": "crypto"
+                }},
+            ])
+            result = run_worker(
+                provider=provider,
+                store=FakeStore(),
+                stop_event=FakeStopEvent(),
+                status_path=Path(directory) / "status.json",
+                poll_interval_seconds=15,
+                max_cycles=1,
+            )
+            self.assertEqual(result, 0)
+            status = read_perps_worker_status(Path(directory) / "status.json")
+            self.assertEqual(status["markets_in_last_snapshot"], 2)
+            self.assertEqual(status["markets_with_fee_schedule"], 1)
 
     def test_worker_marks_degraded_and_returns_failure_when_data_is_unavailable(self):
         with tempfile.TemporaryDirectory() as directory:

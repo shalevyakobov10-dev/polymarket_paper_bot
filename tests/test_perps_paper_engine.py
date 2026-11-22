@@ -549,6 +549,11 @@ class PerpsPaperEngineTests(unittest.TestCase):
                                 instrument_id, timestamp_ms, tolerance_ms=tolerance_ms
                             )
 
+                        def funding_conflict_at(self, instrument_id, timestamp_ms, *, tolerance_ms=1000):
+                            return history_store.funding_conflict_at(
+                                instrument_id, timestamp_ms, tolerance_ms=tolerance_ms
+                            )
+
                     snapshot = make_snapshot(
                         sequence=4,
                         timestamp_ms=FUNDING_MS + 1_000,
@@ -560,7 +565,7 @@ class PerpsPaperEngineTests(unittest.TestCase):
                     self.assertTrue(result["halted"])
                     self.assertEqual(
                         result["halt_reason"],
-                        "published_funding_settlement_missing",
+                        "published_funding_settlement_conflict",
                     )
                     position = engine.db.execute(
                         "SELECT funding_paid FROM perps_paper_positions"
@@ -570,8 +575,9 @@ class PerpsPaperEngineTests(unittest.TestCase):
                         "SELECT details_json FROM perps_paper_events "
                         "WHERE event_type='FUNDING_RECONCILIATION_REQUIRED'"
                     ).fetchone()
-                    self.assertIn("conflicting", event["details_json"])
+                    self.assertIn("conflicting published rates", event["details_json"])
                     self.assertIn("no ticker-rate estimate applied", event["details_json"])
+                    self.assertIn('"observed_funding_rates":["0.00025","0.0005"]', event["details_json"])
 
     def test_missing_exact_funding_settlement_halts_without_guessing_rate(self):
         with tempfile.TemporaryDirectory() as directory:

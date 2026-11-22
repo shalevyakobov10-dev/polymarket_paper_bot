@@ -38,9 +38,10 @@ class PerpsEmaMomentumStrategyTests(unittest.TestCase):
         self.strategy = PerpsEmaMomentumStrategy()
 
     def test_bullish_crossover_requires_completed_bars_and_positive_momentum(self):
-        prices = [Decimal("100")] * 45
-        for _ in range(15):
-            prices.append(prices[-1] * Decimal("1.002"))
+        prices = [Decimal("100")] * 55 + [
+            Decimal("99.9"), Decimal("99.8"), Decimal("99.7"),
+            Decimal("99.6"), Decimal("100.5"),
+        ]
         now = BASE + timedelta(minutes=60, seconds=20)
         result = self.strategy.evaluate(
             snapshots_for_prices(prices),
@@ -58,9 +59,10 @@ class PerpsEmaMomentumStrategyTests(unittest.TestCase):
         self.assertFalse(result["live_execution_eligible"])
 
     def test_bearish_crossover_requires_negative_momentum(self):
-        prices = [Decimal("100")] * 45
-        for _ in range(15):
-            prices.append(prices[-1] * Decimal("0.998"))
+        prices = [Decimal("100")] * 55 + [
+            Decimal("100.1"), Decimal("100.2"), Decimal("100.3"),
+            Decimal("100.4"), Decimal("99.5"),
+        ]
         now = BASE + timedelta(minutes=60, seconds=20)
         result = self.strategy.evaluate(snapshots_for_prices(prices), now=now)
         self.assertTrue(result["signal"], result)

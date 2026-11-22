@@ -198,6 +198,8 @@ def read_perps_worker_status(path: str | Path) -> dict[str, Any]:
             "history_rows": 0, "poll_interval_seconds": None,
             "heartbeat_timeout_seconds": 180,
             "history_retention_days": None, "expired_rows_pruned_total": 0,
+            "paper_engine_enabled": False, "paper_engine_state": "unknown",
+            "paper_engine_degraded_reason": None, "paper_engine": None,
             "research_only": True, "live_execution_enabled": False, "execution": "none",
         }
 

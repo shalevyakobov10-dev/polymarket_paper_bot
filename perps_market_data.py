@@ -313,8 +313,10 @@ class PerpsPublicMarketDataProvider:
 
         instruments: list[dict[str, Any]] = []
         for raw in raw_instruments:
+            # Keep close-only instruments visible so an existing paper position
+            # can still be marked and exited. The paper engine blocks new entries.
             instrument = _normalize_instrument(raw)
-            if instrument is not None and not instrument["close_only"]:
+            if instrument is not None:
                 instruments.append(instrument)
         ticker_rows = {}
         for row in raw_tickers:

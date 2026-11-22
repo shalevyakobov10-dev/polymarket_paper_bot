@@ -255,11 +255,18 @@ class PerpsAccountSupervisorWorkerTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaisesRegex(PerpsAccountSecretsError, "schema_invalid"):
             load_perps_account_secrets(path)
 
+    def test_rejects_executable_secret_file_modes(self):
+        path = self._write_secrets(self._secret_document(), mode=0o700)
+        with self.assertRaisesRegex(
+            PerpsAccountSecretsError, "permissions_invalid"
+        ):
+            load_perps_account_secrets(path)
+
     def test_rejects_expired_or_naive_delegated_credentials(self):
         expired = self._secret_document(expiry=NOW - timedelta(seconds=1))
         path = self._write_secrets(expired)
         with self.assertRaisesRegex(
-            PerpsAccountSecretsError, "expired_or_invalid"
+            PerpsAccountSecretsError, "credentials_expired"
         ):
             load_perps_account_secrets(path)
 

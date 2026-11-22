@@ -22,6 +22,7 @@ RELEASE_GATES: tuple[tuple[str, bool], ...] = (
     ("strategy_out_of_sample_validation", False),
     ("historical_stress_and_failure_testing", False),
     ("perps_auto_cancel_supervisor_verified", False),
+    ("account_fee_tier_and_current_fee_schedule_verified", False),
     ("live_account_integration_verified", False),
     ("geoblock_and_jurisdiction_review", False),
     ("managed_secrets_and_deployment_review", False),

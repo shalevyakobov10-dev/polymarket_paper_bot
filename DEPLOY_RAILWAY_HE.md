@@ -119,6 +119,6 @@ python backtest.py --markets 20 --days 30 --fidelity 5 --train-ratio 0.7 --sensi
 
 ## איסוף נתוני Perps
 
-הוגדר worker נפרד לאיסוף נתוני החוזים התמידיים של Polymarket, ללא התחברות לחשבון וללא הרשאת מסחר. ב־Railway IaC הוא מופעל באמצעות \`ENABLE_PERPS_MARKET_DATA_WORKER=true\`, שומר היסטוריה ב־\`/app/data/perps_market_history.sqlite3\`, כותב heartbeat אל \`/app/data/perps_market_worker_status.json\`, ומבקש עד 10 מכשירים במחזור של 30 שניות. מצב האיסוף זמין ב־\`/perps-market\`; כשה־worker מופעל הוא גם רכיב חובה בבדיקת \`/health\`.
+הוגדר worker נפרד לאיסוף נתוני החוזים התמידיים של Polymarket, ללא התחברות לחשבון וללא הרשאת מסחר. ב־Railway IaC הוא מופעל באמצעות `ENABLE_PERPS_MARKET_DATA_WORKER=true`, שומר היסטוריה ב־`/app/data/perps_market_history.sqlite3`, כותב heartbeat אל `/app/data/perps_market_worker_status.json`, ומבקש עד 10 מכשירים במחזור של 30 שניות. מצב האיסוף זמין ב־`/perps-market`; כשה־worker מופעל הוא גם רכיב חובה בבדיקת `/health`.
 
-ה־worker משתמש רק במידע ציבורי, מקבל \`DRY_RUN=true\` ו־\`LIVE_EXECUTION_ENABLED=false\`, ואינו מקבל מפתחות פרטיים או משתני \`LIVE_*\`. כרגע הוא אוסף מחירים, Mark/Index, Funding וספרי פקודות בלבד — עדיין אין מנוע Paper ל־Long/Short ואין ביצוע פקודות Perps. אין להפעיל מסחר חי לפני מודל מרג'ין/חיסול/Funding ועמלות נפרד, אימות אסטרטגיה מחוץ למדגם, ובדיקת אבטחה וזכאות.
+ה־worker משתמש רק במידע ציבורי, מקבל `DRY_RUN=true` ו־`LIVE_EXECUTION_ENABLED=false`, ואינו מקבל מפתחות פרטיים או משתני `LIVE_*`. כרגע הוא אוסף מחירים, Mark/Index, Funding וספרי פקודות בלבד — עדיין אין מנוע Paper ל־Long/Short ואין ביצוע פקודות Perps. אין להפעיל מסחר חי לפני מודל מרג'ין/חיסול/Funding ועמלות נפרד, אימות אסטרטגיה מחוץ למדגם, ובדיקת אבטחה וזכאות.

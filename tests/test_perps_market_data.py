@@ -72,11 +72,7 @@ def book(instrument_id=7, *, timestamp=None):
 
 class FakePerpsProvider(PerpsPublicMarketDataProvider):
     def __init__(self, instruments, tickers, books, **kwargs):
-        super().__init__(**kwargs)
-        self.instruments_payload = instruments
-        self.tickers_payload = tickers
-        self.books_payload = books
-        self.fees_payload = kwargs.pop("fees_payload", {
+        fees_payload = kwargs.pop("fees_payload", {
             "fee_schedule": [{
                 "instrument_type": "perpetual", "category": "crypto",
                 "taker_fee_rate": "0.0004", "maker_fee_rate": "0.000125",
@@ -86,6 +82,11 @@ class FakePerpsProvider(PerpsPublicMarketDataProvider):
                 ],
             }]
         })
+        super().__init__(**kwargs)
+        self.instruments_payload = instruments
+        self.tickers_payload = tickers
+        self.books_payload = books
+        self.fees_payload = fees_payload
         self.calls = []
 
     def _get_json(self, path, params=None):

@@ -2,9 +2,9 @@ name: Perps public market-data smoke
 
 on:
   push:
-    branches: [research/event-aware-news-signals]
+    branches: [main, research/event-aware-news-signals]
   pull_request:
-    branches: [research/live-execution-gateway]
+    branches: [main, research/live-execution-gateway, research/event-aware-news-signals]
   schedule:
     - cron: "17,47 * * * *"
   workflow_dispatch:

@@ -72,12 +72,17 @@ def _sanitize_paper_summary(value: Any) -> dict[str, Any] | None:
         "live_execution_enabled": False,
         "order_submission_allowed": False,
         "execution": "none",
+        "margin_mode": "isolated",
+        "cross_margin_supported": False,
+        "maintenance_margin_rule": "0.5 / instrument_max_leverage",
+        "liquidation_is_venue_exact": False,
+        "liquidation_model_limitations": "no insurance-fund backstop or auto-deleveraging simulation",
     }
     amount_fields = (
         "cash", "equity", "peak_equity", "isolated_margin_reserved",
         "unrealized_pnl", "closed_net_pnl", "daily_start_equity",
         "max_leverage", "max_position_notional", "max_total_notional",
-        "taker_fee_rate_assumption", "liquidation_fee_rate_assumption",
+        "max_entry_impact_bps", "taker_fee_rate_assumption", "liquidation_fee_rate_assumption",
     )
     for field in amount_fields:
         raw = value.get(field)
@@ -237,6 +242,7 @@ def run_worker(
             daily_drawdown_pct=os.getenv("PERPS_PAPER_DAILY_DRAWDOWN_PCT", "0.03"),
             maximum_drawdown_pct=os.getenv("PERPS_PAPER_MAXIMUM_DRAWDOWN_PCT", "0.10"),
             max_data_age_seconds=_positive_int_env("PERPS_PAPER_MAX_DATA_AGE_SECONDS", 15, 1, 60),
+            max_entry_impact_bps=os.getenv("PERPS_PAPER_MAX_ENTRY_IMPACT_BPS", "50"),
         )
         engine_created = True
     if current_engine is not None and not engine_enabled:

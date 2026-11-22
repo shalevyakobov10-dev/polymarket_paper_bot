@@ -377,12 +377,17 @@ class PerpsPublicMarketDataProvider:
 
         raw_instruments = self._get_json("/v1/info/instruments")
         raw_tickers = self._get_json("/v1/info/tickers")
-        raw_fees = self._get_json("/v1/info/fees")
         if not isinstance(raw_instruments, list) or not isinstance(raw_tickers, list):
             raise PerpsAPIError("Perps instruments and tickers responses must be arrays")
-        fee_schedule = _normalize_fee_schedule(
-            raw_fees, current if fixed_time else datetime.now(timezone.utc)
-        )
+        try:
+            raw_fees = self._get_json("/v1/info/fees")
+            fee_schedule = _normalize_fee_schedule(
+                raw_fees, current if fixed_time else datetime.now(timezone.utc)
+            )
+        except (PerpsAPIError, ValueError, InvalidOperation):
+            # Preserve quote/exit data during fee endpoint outages. The paper
+            # engine independently blocks fresh entries without a current fee.
+            fee_schedule = {}
 
         instruments: list[dict[str, Any]] = []
         for raw in raw_instruments:
@@ -426,9 +431,7 @@ class PerpsPublicMarketDataProvider:
                 )
                 if ticker["symbol"] != instrument["symbol"]:
                     raise ValueError("ticker symbol does not match instrument metadata")
-                market_fees = fee_schedule.get(instrument["category"])
-                if market_fees is None:
-                    raise ValueError("no current fee schedule for instrument category")
+                market_fees = fee_schedule.get(instrument["category"], {})
                 snapshots.append({
                     "instrument": instrument,
                     "ticker": ticker,
@@ -443,6 +446,7 @@ class PerpsPublicMarketDataProvider:
         if not snapshots:
             detail = "; ".join(failures[:3]) if failures else "no active instrument had a fresh ticker"
             raise PerpsNoUsableMarkets(f"No fresh Perps market snapshots: {detail}")
+        return snapshots
 
     def load_funding_history(
         self,

@@ -130,6 +130,16 @@ def read_perps_worker_status(path: str | Path) -> dict[str, Any]:
             or raw.get("schema_version") != 1
         ):
             raise ValueError("invalid Perps worker status schema")
+        missing_open_ids = raw.get("open_position_instruments_missing", [])
+        if (
+            not isinstance(missing_open_ids, list)
+            or len(missing_open_ids) > 10
+            or any(
+                isinstance(value, bool) or not isinstance(value, int) or value < 0
+                for value in missing_open_ids
+            )
+        ):
+            raise ValueError("invalid missing open-position instrument IDs")
         status = {
             "schema_version": 1,
             "enabled": raw.get("enabled") is True,
@@ -161,6 +171,7 @@ def read_perps_worker_status(path: str | Path) -> dict[str, Any]:
                 if isinstance(raw.get("paper_engine_degraded_reason"), str)
                 else None
             ),
+            "open_position_instruments_missing": sorted(set(missing_open_ids)),
             "paper_engine": _sanitize_paper_summary(raw.get("paper_engine")),
             "last_backup_at": raw.get("last_backup_at"),
             "last_backup_manifest_name": str(raw.get("last_backup_manifest_name") or "")[:200] or None,
@@ -185,7 +196,8 @@ def read_perps_worker_status(path: str | Path) -> dict[str, Any]:
             "heartbeat_timeout_seconds": 180,
             "history_retention_days": None, "expired_rows_pruned_total": 0,
             "paper_engine_enabled": False, "paper_engine_state": "unknown",
-            "paper_engine_degraded_reason": None, "paper_engine": None,
+            "paper_engine_degraded_reason": None, "open_position_instruments_missing": [],
+            "paper_engine": None,
             "research_only": True, "live_execution_enabled": False, "execution": "none",
         }
     except (OSError, UnicodeError, ValueError, TypeError, json.JSONDecodeError):
@@ -199,7 +211,8 @@ def read_perps_worker_status(path: str | Path) -> dict[str, Any]:
             "heartbeat_timeout_seconds": 180,
             "history_retention_days": None, "expired_rows_pruned_total": 0,
             "paper_engine_enabled": False, "paper_engine_state": "unknown",
-            "paper_engine_degraded_reason": None, "paper_engine": None,
+            "paper_engine_degraded_reason": None, "open_position_instruments_missing": [],
+            "paper_engine": None,
             "research_only": True, "live_execution_enabled": False, "execution": "none",
         }
 
@@ -331,9 +344,36 @@ def run_worker(
         while not stopping.is_set():
             state["last_heartbeat_at"] = _utc_now()
             try:
-                snapshots = current_provider.load()
+                open_position_ids: list[int] = []
+                if current_engine is not None:
+                    get_open_ids = getattr(current_engine, "open_instrument_ids", None)
+                    if callable(get_open_ids):
+                        raw_open_ids = get_open_ids()
+                        if not isinstance(raw_open_ids, (list, tuple, set)):
+                            raise RuntimeError("paper engine returned an invalid open-position ID list")
+                        if len(raw_open_ids) > 10 or any(
+                            isinstance(value, bool) or not isinstance(value, int) or value < 0
+                            for value in raw_open_ids
+                        ):
+                            raise RuntimeError("paper engine returned invalid open-position instrument IDs")
+                        open_position_ids = sorted(set(raw_open_ids))
+                if open_position_ids:
+                    snapshots = current_provider.load(
+                        priority_instrument_ids=open_position_ids
+                    )
+                else:
+                    snapshots = current_provider.load()
                 if not snapshots:
                     raise RuntimeError("provider returned zero usable Perps snapshots")
+                snapshot_instrument_ids = {
+                    row.get("instrument", {}).get("instrument_id")
+                    for row in snapshots
+                    if isinstance(row, dict) and isinstance(row.get("instrument"), dict)
+                }
+                missing_open_ids = sorted(
+                    set(open_position_ids) - snapshot_instrument_ids
+                )
+                state["open_position_instruments_missing"] = missing_open_ids
                 recorded = current_store.record_snapshots(snapshots)
                 if int(recorded["inserted"]) < 0:
                     raise RuntimeError("history store returned an invalid insert count")
@@ -364,7 +404,11 @@ def run_worker(
                             # settlements and halts new entries; exits still run.
                             continue
                     for market_snapshot in snapshots:
-                        current_engine.process_snapshot(market_snapshot, current_store)
+                        current_engine.process_snapshot(
+                            market_snapshot,
+                            current_store,
+                            allow_new_entries=not bool(missing_open_ids),
+                        )
                     paper_summary = current_engine.summary()
                     state["paper_engine"] = paper_summary
                     state["paper_engine_state"] = (
@@ -400,6 +444,12 @@ def run_worker(
                     if paper_summary.get("halted"):
                         state["paper_engine_state"] = "halted"
                         state["paper_engine_degraded_reason"] = paper_summary.get("halt_reason")
+                    elif missing_open_ids:
+                        # Continue managing any available positions, but do not
+                        # create fresh exposure while even one open instrument
+                        # is missing a fresh, usable snapshot.
+                        state["paper_engine_state"] = "degraded"
+                        state["paper_engine_degraded_reason"] = "open_position_market_data_missing"
                     elif fee_market_count == 0:
                         # Market data ingestion remains healthy, but the paper
                         # engine cannot open new risk without verified fees.

@@ -209,6 +209,20 @@ class PerpsPaperEngine:
             );
             CREATE INDEX IF NOT EXISTS idx_perps_paper_events_time
                 ON perps_paper_events(event_at, event_id);
+            CREATE TABLE IF NOT EXISTS perps_ema_shadow_decisions (
+                instrument_id INTEGER NOT NULL,
+                strategy_name TEXT NOT NULL,
+                bar_close_ms INTEGER NOT NULL,
+                decision_status TEXT NOT NULL CHECK(decision_status IN ('SIGNAL','NO_SIGNAL')),
+                side TEXT CHECK(side IS NULL OR side IN ('LONG','SHORT')),
+                reason TEXT NOT NULL,
+                completed_bars INTEGER NOT NULL,
+                metrics_json TEXT NOT NULL,
+                evaluated_at TEXT NOT NULL,
+                PRIMARY KEY(instrument_id, strategy_name, bar_close_ms)
+            );
+            CREATE INDEX IF NOT EXISTS idx_perps_ema_shadow_decisions_time
+                ON perps_ema_shadow_decisions(evaluated_at, instrument_id);
             """
         )
         position_columns = {
@@ -966,6 +980,106 @@ class PerpsPaperEngine:
                     })
         return required
 
+    def record_ema_shadow_decision(
+        self,
+        instrument_id: int,
+        decision: dict[str, Any],
+        *,
+        evaluated_at: datetime,
+    ) -> bool:
+        """Persist one research-only decision per instrument, strategy and closed minute."""
+        if isinstance(instrument_id, bool) or not isinstance(instrument_id, int) or instrument_id < 0:
+            raise ValueError("instrument_id must be a nonnegative integer")
+        if not isinstance(decision, dict):
+            raise ValueError("decision must be a dictionary")
+        bar_close_ms = decision.get("bar_close_ms")
+        if isinstance(bar_close_ms, bool) or not isinstance(bar_close_ms, int) or bar_close_ms <= 0:
+            raise ValueError("decision must include a valid completed bar_close_ms")
+        completed_bars = decision.get("completed_bars")
+        if isinstance(completed_bars, bool) or not isinstance(completed_bars, int) or completed_bars < 1:
+            raise ValueError("decision must include a positive completed_bars count")
+        if decision.get("research_only") is not True or decision.get("execution") != "none":
+            raise ValueError("shadow decision must be explicitly research-only")
+        signal = decision.get("signal")
+        if not isinstance(signal, bool):
+            raise ValueError("shadow decision signal must be boolean")
+        side = decision.get("side")
+        if side not in (None, "LONG", "SHORT") or (signal and side not in {"LONG", "SHORT"}):
+            raise ValueError("shadow decision side is invalid")
+        strategy_name = str(decision.get("strategy") or "").strip()
+        reason = str(decision.get("reason") or "").strip()
+        if not strategy_name or len(strategy_name) > 80 or not reason:
+            raise ValueError("shadow strategy name and reason are required")
+
+        metric_keys = (
+            "fast_ema", "slow_ema", "momentum_pct",
+            "mean_abs_1m_return_pct", "stop_loss_distance_pct",
+            "reward_risk_multiple", "entry_notional_usd",
+        )
+        metrics = {
+            key: decision[key]
+            for key in metric_keys
+            if key in decision and isinstance(decision[key], (str, int, float, bool))
+        }
+        if completed_bars:
+            metrics["completed_bars"] = completed_bars
+        metrics_json = json.dumps(
+            metrics, ensure_ascii=False, sort_keys=True, allow_nan=False,
+        )
+        if evaluated_at.tzinfo is None or evaluated_at.utcoffset() is None:
+            raise ValueError("evaluated_at must be timezone-aware")
+        evaluated_iso = evaluated_at.astimezone(timezone.utc).isoformat()
+        status = "SIGNAL" if signal else "NO_SIGNAL"
+
+        with self._lock:
+            cursor = self.db.execute(
+                """
+                INSERT OR IGNORE INTO perps_ema_shadow_decisions (
+                    instrument_id, strategy_name, bar_close_ms, decision_status,
+                    side, reason, completed_bars, metrics_json, evaluated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    instrument_id, strategy_name, bar_close_ms, status,
+                    side, reason[:120], completed_bars, metrics_json, evaluated_iso,
+                ),
+            )
+            self.db.execute(
+                "DELETE FROM perps_ema_shadow_decisions WHERE bar_close_ms < ?",
+                (int(evaluated_at.timestamp() * 1000) - 30 * 24 * 60 * 60 * 1000,),
+            )
+            self.db.commit()
+            return cursor.rowcount == 1
+
+    def ema_shadow_summary(self) -> dict[str, Any]:
+        with self._lock:
+            rows = self.db.execute(
+                """
+                SELECT decision_status, COUNT(*) AS count
+                FROM perps_ema_shadow_decisions
+                GROUP BY decision_status
+                """
+            ).fetchall()
+            latest = self.db.execute(
+                """
+                SELECT instrument_id, strategy_name, bar_close_ms, decision_status,
+                       side, reason, completed_bars, evaluated_at
+                FROM perps_ema_shadow_decisions
+                ORDER BY evaluated_at DESC, bar_close_ms DESC
+                LIMIT 1
+                """
+            ).fetchone()
+        counts = {str(row["decision_status"]): int(row["count"]) for row in rows}
+        return {
+            "decisions_total": sum(counts.values()),
+            "signals": counts.get("SIGNAL", 0),
+            "no_signal": counts.get("NO_SIGNAL", 0),
+            "latest": dict(latest) if latest else None,
+            "strategy": "ema_8_21_momentum_volatility_v1",
+            "mode": "shadow_only",
+            "order_submission_allowed": False,
+        }
+
     def summary(self) -> dict[str, Any]:
         with self._lock:
             account = self._account()
@@ -1018,6 +1132,7 @@ class PerpsPaperEngine:
                 "fee_rate_source": "public_perps_fee_schedule_highest_published_category_rate",
                 "liquidation_fee_source": "instrument_liquidation_fee_rate",
                 "event_counts": {row["event_type"]: int(row["count"]) for row in events},
+                "ema_shadow": self.ema_shadow_summary(),
                 "research_only": True,
                 "live_execution_enabled": False,
                 "order_submission_allowed": False,

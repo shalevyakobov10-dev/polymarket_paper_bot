@@ -223,12 +223,19 @@ class PerpsAccountSupervisorWorkerTests(unittest.IsolatedAsyncioTestCase):
             "0x" + "3" * 40,
         )
 
+    def test_loads_owner_read_only_secret_file(self):
+        path = self._write_secrets(self._secret_document(), mode=0o400)
+        secrets = load_perps_account_secrets(path)
+        self.assertEqual(secrets["deposit_wallet"], "0x" + "2" * 40)
+
     def test_rejects_group_or_world_accessible_secret_file(self):
-        path = self._write_secrets(self._secret_document(), mode=0o644)
-        with self.assertRaisesRegex(
-            PerpsAccountSecretsError, "permissions_invalid"
-        ):
-            load_perps_account_secrets(path)
+        for mode in (0o640, 0o644, 0o660):
+            with self.subTest(mode=oct(mode)):
+                path = self._write_secrets(self._secret_document(), mode=mode)
+                with self.assertRaisesRegex(
+                    PerpsAccountSecretsError, "permissions_invalid"
+                ):
+                    load_perps_account_secrets(path)
 
     def test_rejects_secret_json_with_duplicate_keys(self):
         path = self.directory / "duplicate-secrets.json"

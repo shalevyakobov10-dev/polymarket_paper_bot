@@ -244,8 +244,11 @@ def _normalize_fee_schedule(raw: Any, retrieved_at: datetime) -> dict[str, dict[
             raise PerpsAPIError("Perps fee schedule category is missing")
         base_taker = _decimal(entry.get("taker_fee_rate"), "fee_schedule.taker_fee_rate")
         base_maker = _decimal(entry.get("maker_fee_rate"), "fee_schedule.maker_fee_rate")
-        if not ZERO <= base_taker < 1 or not ZERO <= base_maker < 1:
-            raise PerpsAPIError("Perps fee schedule rates must be in [0, 1)")
+        # Maker rebates are represented by negative rates at the top volume tier.
+        # Taker rates must remain nonnegative because the paper engine assumes
+        # market-taking execution and never books a taker rebate.
+        if not ZERO <= base_taker < 1 or not Decimal("-1") < base_maker < 1:
+            raise PerpsAPIError("Perps base taker rate must be in [0, 1) and maker rate in (-1, 1)")
         taker_rates = [base_taker]
         maker_rates = [base_maker]
         tiers = entry.get("tiers", [])
@@ -260,8 +263,8 @@ def _normalize_fee_schedule(raw: Any, retrieved_at: datetime) -> dict[str, dict[
             maker_rate = _decimal(tier.get("maker_fee_rate"), "fee_tier.maker_fee_rate")
             if volume < 0 or volume <= prior_volume:
                 raise PerpsAPIError("Perps fee tier volume thresholds must be strictly increasing")
-            if not ZERO <= taker_rate < 1 or not ZERO <= maker_rate < 1:
-                raise PerpsAPIError("Perps fee tier rates must be in [0, 1)")
+            if not ZERO <= taker_rate < 1 or not Decimal("-1") < maker_rate < 1:
+                raise PerpsAPIError("Perps tier taker rate must be in [0, 1) and maker rate in (-1, 1)")
             prior_volume = volume
             taker_rates.append(taker_rate)
             maker_rates.append(maker_rate)

@@ -30,6 +30,7 @@ from resilience import exponential_backoff_seconds, parse_retry_after
 from supervisor_status import read_supervisor_status
 from event_paper_worker import read_event_paper_worker_status
 from perps_market_worker import read_perps_worker_status
+from perps_live_release_gate import evaluate_perps_live_release_gate
 
 GAMMA_URL = "https://gamma-api.polymarket.com/markets"
 POLL_SECONDS = max(15, int(os.getenv("POLL_SECONDS", "60")))
@@ -1427,7 +1428,7 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def do_GET(self):
-        if self.path in ("/", "/status", "/health", "/paper", "/news", "/matches", "/market-stream", "/resolutions", "/forecast-evaluation", "/research-features", "/independent-model-evaluation", "/model-forecasts", "/learning", "/execution-readiness", "/service-supervisor", "/event-paper", "/perps-market", "/perps-paper"):
+        if self.path in ("/", "/status", "/health", "/paper", "/news", "/matches", "/market-stream", "/resolutions", "/forecast-evaluation", "/research-features", "/independent-model-evaluation", "/model-forecasts", "/learning", "/execution-readiness", "/service-supervisor", "/event-paper", "/perps-market", "/perps-paper", "/perps-live-gate"):
             with _lock:
                 snapshot = dict(_state)
             if self.path == "/health":
@@ -1701,6 +1702,14 @@ class Handler(BaseHTTPRequestHandler):
                     "order_submission_allowed": False,
                     "execution": "none",
                 })
+            elif self.path == "/perps-live-gate":
+                payload = evaluate_perps_live_release_gate()
+                payload.update({
+                    "read_only": True,
+                    "private_credentials_loaded": False,
+                    "order_signing_allowed": False,
+                })
+                self._send(200, payload)
             elif self.path == "/service-supervisor":
                 payload = read_supervisor_status(SUPERVISOR_STATUS_FILE)
                 payload["event_paper_worker"] = read_event_paper_worker_status(EVENT_PAPER_WORKER_STATUS_FILE)

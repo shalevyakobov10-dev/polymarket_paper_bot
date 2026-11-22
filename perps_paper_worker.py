@@ -1,9 +1,9 @@
 """Supervised public-data Perps paper worker.
 
-This worker refreshes public market data, maintains paper marks/funding, and
-manages protective exits. It does not generate autonomous entries yet: entry
-generation is deliberately kept behind a separately validated strategy module.
-No authenticated SDK client or order-submission capability is imported here.
+This worker refreshes public market data, maintains paper marks/funding,
+manages protective exits, and can optionally generate experimental Paper-only
+entries when PERPS_AUTO_ENTRY_ENABLED=true. It has no authenticated SDK client,
+signer, wallet, or order-submission capability.
 """
 from __future__ import annotations
 
@@ -139,6 +139,8 @@ def read_perps_worker_status(
             "snapshots_processed_last_cycle": max(0, int(raw.get("snapshots_processed_last_cycle", 0))),
             "positions_closed_last_cycle": max(0, int(raw.get("positions_closed_last_cycle", 0))),
             "funding_gaps_last_cycle": max(0, int(raw.get("funding_gaps_last_cycle", 0))),
+            "exit_blocks_last_cycle": max(0, int(raw.get("exit_blocks_last_cycle", 0))),
+            "last_exit_block_reason": str(raw.get("last_exit_block_reason") or "")[:120] or None,
             "last_error_type": str(raw.get("last_error_type") or "")[:80] or None,
             "last_cycle_warning": str(raw.get("last_cycle_warning") or "")[:120] or None,
             "last_backup_at": _parse_utc(raw.get("last_backup_at")).isoformat()
@@ -237,6 +239,8 @@ def run_worker(
         "snapshots_processed_last_cycle": 0,
         "positions_closed_last_cycle": 0,
         "funding_gaps_last_cycle": 0,
+        "exit_blocks_last_cycle": 0,
+        "last_exit_block_reason": None,
         "last_error_type": None,
         "last_cycle_warning": None,
         "last_backup_at": None,
@@ -291,6 +295,8 @@ def run_worker(
                     raise RuntimeError("no_perps_market_snapshots")
                 closed = 0
                 funding_gaps = 0
+                exit_blocks = 0
+                last_exit_block_reason = None
                 processed = 0
                 strategy_decisions = 0
                 signals_seen = 0
@@ -303,8 +309,13 @@ def run_worker(
                     processed += 1
                     if outcome.get("status") == "PAPER_POSITION_CLOSED":
                         closed += 1
+                        if outcome.get("funding_reconciliation") == "incomplete":
+                            funding_gaps += 1
                     elif outcome.get("status") == "PAPER_POSITION_FUNDING_GAP":
                         funding_gaps += 1
+                    elif outcome.get("status") == "PAPER_EXIT_BLOCKED":
+                        exit_blocks += 1
+                        last_exit_block_reason = str(outcome.get("reason") or "exit_fill_blocked")[:120]
 
                     if strategy is not None:
                         instrument_id = int(snapshot["instrument_id"])
@@ -383,7 +394,11 @@ def run_worker(
                                         now=strategy_now,
                                     )
                 metrics = engine.account_metrics()
-                warning = "open_position_funding_gap" if funding_gaps else None
+                warning = (
+                    "protective_exit_blocked" if exit_blocks
+                    else "funding_reconciliation_incomplete" if funding_gaps
+                    else None
+                )
                 status.update({
                     "worker_state": "degraded" if warning or status.get("backup_error_type") else "running",
                     "last_cycle_at": cycle_started,
@@ -394,6 +409,8 @@ def run_worker(
                     "snapshots_processed_last_cycle": processed,
                     "positions_closed_last_cycle": closed,
                     "funding_gaps_last_cycle": funding_gaps,
+                    "exit_blocks_last_cycle": exit_blocks,
+                    "last_exit_block_reason": last_exit_block_reason,
                     "strategy_status": strategy_cycle_status,
                     "strategy_decisions_last_cycle": strategy_decisions,
                     "signals_last_cycle": signals_seen,

@@ -270,6 +270,26 @@ class PerpsPaperEngineTests(unittest.TestCase):
                 self.assertEqual(row["status"], "CLOSED")
                 self.assertEqual(row["close_reason"], "take_profit")
                 self.assertGreater(Decimal(row["net_pnl"]), 0)
+                performance = engine.summary()["performance"]
+                self.assertEqual(performance["closed_trades"], 1)
+                self.assertEqual(performance["winning_trades"], 1)
+                self.assertEqual(performance["losing_trades"], 0)
+                self.assertEqual(performance["breakeven_trades"], 0)
+                self.assertEqual(performance["win_rate_pct"], "100.00")
+                self.assertEqual(performance["profit_factor"], None)
+                self.assertEqual(
+                    performance["profit_factor_status"],
+                    "undefined_without_closed_losses",
+                )
+                self.assertGreater(Decimal(performance["gross_closed_pnl"]), 0)
+                self.assertGreater(
+                    Decimal(performance["net_closed_pnl_after_fees_and_funding"]), 0
+                )
+                self.assertGreater(Decimal(performance["entry_fees_paid"]), 0)
+                self.assertGreater(Decimal(performance["exit_fees_paid"]), 0)
+                self.assertEqual(performance["funding_paid"], "0")
+                self.assertFalse(performance["out_of_sample_validated"])
+                self.assertFalse(performance["live_execution_eligible"])
 
     def test_stop_loss_closes_position_when_visible_bid_depth_is_sufficient(self):
         with tempfile.TemporaryDirectory() as directory:

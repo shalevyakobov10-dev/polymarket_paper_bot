@@ -438,6 +438,16 @@ class SupervisorTests(unittest.TestCase):
                     "PERPS_ACCOUNT_SUPERVISOR_SECRETS_FILE": str(secret_path),
                 })
 
+    def test_perps_account_supervisor_rejects_executable_secret_file(self):
+        with tempfile.TemporaryDirectory() as directory:
+            secret_path = self._account_supervisor_secret_file(directory, mode=0o700)
+            with self.assertRaisesRegex(ValueError, "permissions are unsafe"):
+                build_supervisor_config({
+                    "ENABLE_PERPS_ACCOUNT_SUPERVISOR": "true",
+                    "ENABLE_PERPS_MARKET_DATA_WORKER": "true",
+                    "PERPS_ACCOUNT_SUPERVISOR_SECRETS_FILE": str(secret_path),
+                })
+
     def test_perps_account_supervisor_heartbeat_timeout_cannot_be_too_short(self):
         with tempfile.TemporaryDirectory() as directory:
             secret_path = self._account_supervisor_secret_file(directory)

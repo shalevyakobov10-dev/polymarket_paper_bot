@@ -150,6 +150,62 @@ class PerpsMarketWorkerTests(unittest.TestCase):
             self.assertFalse(sanitized["paper_engine"]["order_submission_allowed"])
             self.assertNotIn("POLYMARKET_PRIVATE_KEY", sanitized["paper_engine"])
 
+    def test_worker_backups_perps_position_ledger_and_funding_history_together(self):
+        import os
+        from unittest.mock import patch
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            target = root / "status.json"
+            paper_db = root / "perps_paper.sqlite3"
+            market_db = root / "perps_market_history.sqlite3"
+            paper_db.write_bytes(b"paper database placeholder")
+            market_db.write_bytes(b"market history placeholder")
+            store = FakeStore()
+            engine = FakePaperEngine()
+            calls = []
+
+            def fake_backup(paths, backup_directory, *, retain):
+                calls.append((list(paths), Path(backup_directory), retain))
+                return {
+                    "created_at": "2026-11-22T08:00:00+00:00",
+                    "manifest_name": "perps-backup-manifest.json",
+                    "files": [{"backup_name": "paper.sqlite3"}, {"backup_name": "history.sqlite3"}],
+                    "skipped_missing_sources": [],
+                }
+
+            with patch.dict(os.environ, {
+                "PERPS_PAPER_DB": str(paper_db),
+                "PERPS_MARKET_HISTORY_DB": str(market_db),
+                "PERPS_BACKUP_DIRECTORY": str(root / "backups"),
+            }, clear=False):
+                result = run_worker(
+                    provider=FakeProvider(),
+                    store=store,
+                    paper_engine=engine,
+                    paper_engine_enabled=True,
+                    backup_function=fake_backup,
+                    stop_event=FakeStopEvent(),
+                    status_path=target,
+                    poll_interval_seconds=15,
+                    backup_interval_hours=6,
+                    backup_retain=7,
+                    max_cycles=1,
+                )
+
+            self.assertEqual(result, 0)
+            self.assertEqual(len(calls), 1)
+            self.assertEqual(calls[0][0], [paper_db, market_db])
+            self.assertEqual(calls[0][1], root / "backups")
+            self.assertEqual(calls[0][2], 7)
+            raw = json.loads(target.read_text(encoding="utf-8"))
+            self.assertEqual(raw["backup_files_last_run"], 2)
+            self.assertEqual(raw["last_backup_manifest_name"], "perps-backup-manifest.json")
+            self.assertIsNone(raw["backup_error_type"])
+            safe = read_perps_worker_status(target)
+            self.assertEqual(safe["backup_files_last_run"], 2)
+            self.assertEqual(safe["backup_consecutive_failures"], 0)
+
     def test_worker_marks_degraded_and_returns_failure_when_data_is_unavailable(self):
         with tempfile.TemporaryDirectory() as directory:
             target = Path(directory) / "status.json"

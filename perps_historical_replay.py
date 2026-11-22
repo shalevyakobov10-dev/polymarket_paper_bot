@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Any
 
 from perps_market_history_store import PerpsMarketHistoryStore
+from perps_paper_config import perps_engine_options_from_env
 from perps_paper_engine import PerpsPaperEngine
 
 
@@ -115,8 +116,10 @@ def replay_perps_history(
 
         with tempfile.TemporaryDirectory(prefix="perps-paper-replay-") as scratch:
             engine_path = Path(scratch) / "isolated-paper-replay.sqlite3"
-            options = dict(engine_options or {})
-            options.setdefault("max_data_age_seconds", 15)
+            # Use the same risk and signal settings as the supervised Paper
+            # worker by default; explicit engine_options are research overrides.
+            options = perps_engine_options_from_env()
+            options.update(engine_options or {})
             with PerpsPaperEngine(engine_path, **options) as engine:
                 instrument_ids: set[int] = set()
                 for row in rows:

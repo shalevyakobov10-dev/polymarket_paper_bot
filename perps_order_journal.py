@@ -161,8 +161,10 @@ def _validate_state(state: dict[str, Any]) -> dict[str, Any]:
         raise ValueError("filled status requires the complete requested quantity")
     if state["status"] == "open" and filled != 0:
         raise ValueError("open status must have zero filled quantity")
-    if state["status"] == "rejected" and (venue_id is not None or filled != 0):
-        raise ValueError("rejected status cannot contain a venue order or fill")
+    if state["status"] == "rejected" and filled != 0:
+        raise ValueError("rejected status cannot contain a fill")
+    if state["status"] == "cancelled" and filled >= quantity:
+        raise ValueError("cancelled status cannot have the entire order filled")
     if state["status"] == "prepared" and (
         venue_id is not None or filled != 0 or reconciliations != 0
     ):
@@ -188,6 +190,7 @@ class PerpsOrderJournal:
         self.database_path = str(Path(database_path).expanduser())
         Path(self.database_path).parent.mkdir(parents=True, exist_ok=True)
         self._initialize()
+        self.recover_interrupted_submissions()
 
     def _connect(self) -> sqlite3.Connection:
         connection = sqlite3.connect(
@@ -251,10 +254,36 @@ class PerpsOrderJournal:
             )
             connection.execute(
                 "CREATE INDEX IF NOT EXISTS idx_perps_order_intents_status "
-                "ON perps_order_intents(status)"
-            ) if False else None
+                "ON perps_order_intents(json_extract(state_json,'$.status'))"
+            )
         finally:
             connection.close()
+
+    def recover_interrupted_submissions(self) -> int:
+        """Turn any crash-interrupted submission into an ambiguous, no-retry state."""
+        recovered = 0
+        with self._transaction() as connection:
+            rows = connection.execute(
+                "SELECT client_order_id,state_json FROM perps_order_intents "
+                "WHERE json_extract(state_json,'$.status')='submission_pending'"
+            ).fetchall()
+            for row in rows:
+                state = _validate_state(json.loads(row["state_json"]))
+                state["status"] = "submission_unknown"
+                state["last_reason_code"] = "process_restart_during_submission"
+                state["updated_at"] = _timestamp()
+                state = _validate_state(state)
+                connection.execute(
+                    "UPDATE perps_order_intents SET state_json=?,updated_at=? "
+                    "WHERE client_order_id=?",
+                    (_json(state), state["updated_at"], row["client_order_id"]),
+                )
+                self._append_event(
+                    connection, row["client_order_id"],
+                    "RECOVERED_INTERRUPTED_SUBMISSION", state, state["updated_at"]
+                )
+                recovered += 1
+        return recovered
 
     def create_intent(
         self,
@@ -507,7 +536,7 @@ class PerpsOrderJournal:
                     if observed_quantity != Decimal(state["quantity"]):
                         mismatch = "order_quantity_mismatch"
                     observed_filled = _decimal(filled_quantity, "venue_filled_quantity")
-                    if observed_filled > observed_quantity:
+                        if observed_filled > observed_quantity:
                         mismatch = "venue_filled_quantity_exceeds_order"
                     previous_filled = Decimal(state["filled_quantity"])
                     if observed_filled < previous_filled:
@@ -538,11 +567,13 @@ class PerpsOrderJournal:
                 state["last_reason_code"] = "venue_order_id_mismatch"
                 state["last_conflicting_venue_order_id"] = external_id
                 return state
+            requested = Decimal(state["quantity"])
             if status in REMOTE_REJECTED_STATUSES:
                 if observed_filled != 0:
                     state["status"] = "manual_review"
                     state["last_reason_code"] = "rejected_order_has_fill"
                     return state
+                state["venue_order_id"] = external_id
                 state["status"] = "rejected"
                 state["last_reason_code"] = "venue_rejected"
                 return state
@@ -557,15 +588,31 @@ class PerpsOrderJournal:
                 str(observed_average) if observed_average is not None else None
             )
             state["last_reason_code"] = None
-            requested = Decimal(state["quantity"])
-            if status in REMOTE_CANCELLED_STATUSES:
-                state["status"] = "cancelled"
-            elif status == "filled" or observed_filled == requested:
+            was_cancel_pending = state["status"] == "cancel_pending"
+            if status == "filled":
+                if observed_filled != requested:
+                    state["status"] = "manual_review"
+                    state["last_reason_code"] = "filled_status_quantity_mismatch"
+                    return state
                 state["status"] = "filled"
-            elif status == "partially_filled" or observed_filled > 0:
+            elif status in REMOTE_CANCELLED_STATUSES:
+                if observed_filled >= requested:
+                    state["status"] = "manual_review"
+                    state["last_reason_code"] = "cancelled_status_quantity_mismatch"
+                    return state
+                state["status"] = "cancelled"
+            elif status == "partially_filled":
+                if not Decimal("0") < observed_filled < requested:
+                    state["status"] = "manual_review"
+                    state["last_reason_code"] = "partial_status_quantity_mismatch"
+                    return state
+                state["status"] = "partially_filled"
+            elif observed_filled == requested:
+                state["status"] = "filled"
+            elif observed_filled > 0:
                 state["status"] = "partially_filled"
             elif status in REMOTE_OPEN_STATUSES:
-                state["status"] = "cancel_pending" if state["status"] == "cancel_pending" else "open"
+                state["status"] = "cancel_pending" if was_cancel_pending else "open"
             return state
         return self._transition(
             client_order_id,

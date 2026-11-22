@@ -183,7 +183,7 @@ class PerpsSdkReconciler:
         if remote_status is None:
             # Unknown SDK/venue states are deliberately sent through the
             # journal's strict status validator, which moves them to manual review.
-            remote_status = "__unrecognized_sdk_order_status__"
+            remote_status = "unknown_sdk_status"
 
         try:
             requested_quantity = _decimal(_field(order, "quantity"), "order_quantity")

@@ -195,6 +195,10 @@ class SupervisorTests(unittest.TestCase):
             "/persist/data/perps_market_history.sqlite3",
         )
         self.assertEqual(
+            config.perps_worker_env["PERPS_ORDER_JOURNAL_DB"],
+            "/persist/data/perps_order_journal.sqlite3",
+        )
+        self.assertEqual(
             config.perps_worker_env["PERPS_MARKET_WORKER_STATUS_FILE"],
             "/persist/data/perps_market_worker_status.json",
         )

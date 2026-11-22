@@ -49,8 +49,9 @@ export default defineRailway(() => {
       PERPS_PAPER_RISK_PER_TRADE_PCT: "0.0025",
       PERPS_PAPER_STOP_LOSS_PCT: "0.0075",
       PERPS_PAPER_TAKE_PROFIT_PCT: "0.015",
-      PERPS_PAPER_TAKER_FEE_RATE: "0.0005",
-      PERPS_PAPER_LIQUIDATION_FEE_RATE: "0.01",
+      // Used only to migrate legacy Perps paper positions; new positions use public fee data.
+      PERPS_PAPER_LEGACY_TAKER_FEE_RATE: "0.0005",
+      PERPS_PAPER_LEGACY_LIQUIDATION_FEE_RATE: "0.01",
       PERPS_PAPER_MAX_SPREAD_BPS: "20",
       PERPS_PAPER_LOOKBACK_OBSERVATIONS: "10",
       PERPS_PAPER_MOMENTUM_THRESHOLD_BPS: "20",

@@ -407,6 +407,42 @@ class ParserTests(unittest.TestCase):
                 app.SUPERVISOR_STATUS_FILE = old_supervisor
                 app.EVENT_PAPER_WORKER_STATUS_FILE = old_worker
 
+    def test_perps_live_release_gate_endpoint_stays_closed_even_with_runtime_flags_set(self):
+        server = app.ThreadingHTTPServer(("127.0.0.1", 0), app.Handler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        environment = {
+            "DRY_RUN": "false",
+            "PERPS_LIVE_EXECUTION_ENABLED": "true",
+            "PERPS_LIVE_TRADING_ARMED": "true",
+            "PERPS_LIVE_CONFIRMATION": "I_ACCEPT_REAL_MONEY_RISK",
+            "POLYMARKET_PRIVATE_KEY": "must-not-be-read",
+        }
+        try:
+            with patch.dict(os.environ, environment):
+                thread.start()
+                address = f"http://127.0.0.1:{server.server_port}/perps-live-gate"
+                with http_urlopen(address, timeout=3) as response:
+                    payload = json.loads(response.read().decode("utf-8"))
+            self.assertEqual(payload["mode"], "PERPS_LIVE_RELEASE_GATE_ONLY")
+            self.assertFalse(payload["all_release_gates_passed"])
+            self.assertTrue(payload["runtime_flags_passed"])
+            self.assertFalse(payload["eligible_for_separate_gateway_review"])
+            self.assertFalse(payload["order_submission_allowed"])
+            self.assertFalse(payload["live_execution_enabled"])
+            self.assertFalse(payload["private_credentials_loaded"])
+            self.assertFalse(payload["order_signing_allowed"])
+            self.assertEqual(payload["execution"], "none")
+            self.assertNotIn("must-not-be-read", json.dumps(payload))
+            self.assertTrue(all(
+                item["passed"] is False
+                for item in payload["release_gates"].values()
+            ))
+        finally:
+            server.shutdown()
+            server.server_close()
+            if thread.is_alive():
+                thread.join(timeout=2)
+
     def test_perps_paper_endpoint_reports_disabled_state_without_worker_status(self):
         server = app.ThreadingHTTPServer(("127.0.0.1", 0), app.Handler)
         thread = threading.Thread(target=server.serve_forever, daemon=True)

@@ -230,7 +230,7 @@ class PerpsOrderJournalTests(unittest.TestCase):
         self.assertEqual(filled["average_fill_price"], "2500.75")
         self.assertEqual(
             [event["event_type"] for event in self.journal.list_events("a" * 32)],
-            ["INTENT_PREPARED", "SUBMISSION_STARTED",
+            ["INTENT_PREPARED", "SUBMISSION_STARTED", "SUBMISSION_ACKNOWLEDGED",
              "RECONCILIATION_FOUND", "RECONCILIATION_FOUND"],
         )
 

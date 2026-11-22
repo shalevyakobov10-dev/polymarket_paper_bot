@@ -424,7 +424,7 @@ class SupervisorTests(unittest.TestCase):
             config.perps_account_supervisor_status_path,
             Path(directory) / "perps_account_supervisor_status.json",
         )
-        self.assertEqual(config.perps_account_supervisor_heartbeat_timeout_seconds, 210.0)
+        self.assertEqual(config.perps_account_supervisor_heartbeat_timeout_seconds, 240.0)
         self.assertNotIn("PERPS_ACCOUNT_SUPERVISOR_SECRETS_FILE", config.app_env)
         self.assertNotIn("PERPS_ACCOUNT_SUPERVISOR_SECRETS_FILE", config.perps_worker_env)
 

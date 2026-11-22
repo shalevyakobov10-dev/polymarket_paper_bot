@@ -52,6 +52,56 @@ def _decimal(value: Any, name: str, *, positive: bool = False) -> Decimal:
     return result
 
 
+def _risk_approval_order_binding_error(
+    decision: dict[str, Any],
+    *,
+    instrument_id: int,
+    side: str,
+    position_intent: str,
+    time_in_force: str,
+    quantity: Decimal,
+    limit_price: Decimal,
+    order_notional: Decimal,
+) -> str | None:
+    """Require a risk approval to describe this exact order, not a reusable cap.
+
+    This prevents accidental approval reuse across instruments, directions,
+    sizes, prices, or open/close intents. It is an integrity binding, not a
+    cryptographic signature or proof of an independent signer.
+    """
+    approval_id = decision.get("risk_approval_id")
+    if not isinstance(approval_id, str) or not approval_id.strip():
+        return "risk_approval_id_missing"
+
+    approved_instrument = decision.get("instrument_id")
+    if (
+        isinstance(approved_instrument, bool)
+        or not isinstance(approved_instrument, int)
+        or approved_instrument != instrument_id
+    ):
+        return "risk_approval_instrument_mismatch"
+
+    if decision.get("side") != side.lower():
+        return "risk_approval_side_mismatch"
+    if decision.get("position_intent") != position_intent:
+        return "risk_approval_position_intent_mismatch"
+    if decision.get("time_in_force") != time_in_force:
+        return "risk_approval_time_in_force_mismatch"
+
+    for field, expected, reason in (
+        ("quantity", quantity, "risk_approval_quantity_mismatch"),
+        ("limit_price", limit_price, "risk_approval_limit_price_mismatch"),
+        ("order_notional_usd", order_notional, "risk_approval_notional_mismatch"),
+    ):
+        try:
+            observed = _decimal(decision.get(field), f"risk_approval_{field}", positive=True)
+        except ValueError:
+            return "risk_approval_order_binding_invalid"
+        if observed != expected:
+            return reason
+    return None
+
+
 class _ExclusiveSubmissionLock:
     """Crash-conservative per-account lock; stale files require manual review."""
 
@@ -246,6 +296,18 @@ class PerpsLiveExecutionGateway:
 
         if not isinstance(risk_decision, dict) or risk_decision.get("approved") is not True:
             return self._blocked("independent_risk_decision_not_approved")
+        binding_error = _risk_approval_order_binding_error(
+            risk_decision,
+            instrument_id=instrument_id,
+            side=side,
+            position_intent=intent,
+            time_in_force=tif,
+            quantity=qty,
+            limit_price=price,
+            order_notional=order_notional,
+        )
+        if binding_error is not None:
+            return self._blocked(binding_error)
         captured_raw = risk_decision.get("captured_at")
         if isinstance(captured_raw, datetime):
             captured_at = captured_raw

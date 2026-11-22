@@ -230,6 +230,17 @@ class PerpsAccountSupervisorWorkerTests(unittest.IsolatedAsyncioTestCase):
         ):
             load_perps_account_secrets(path)
 
+    def test_rejects_secret_json_with_duplicate_keys(self):
+        path = self.directory / "duplicate-secrets.json"
+        path.write_text(
+            '{"owner_private_key":"0x' + "1" * 64
+            + '","owner_private_key":"0x' + "2" * 64 + '"}',
+            encoding="utf-8",
+        )
+        path.chmod(0o600)
+        with self.assertRaisesRegex(PerpsAccountSecretsError, "unavailable_or_invalid"):
+            load_perps_account_secrets(path)
+
     def test_rejects_symlink_secret_file(self):
         path = self._write_secrets(self._secret_document())
         link = self.directory / "secret-link.json"
@@ -390,6 +401,20 @@ class PerpsAccountSupervisorWorkerTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(raw.closed)
         self.assertFalse(lock_path.exists())
         self.assertEqual(raw.write_calls, [])
+
+    async def test_worker_closes_secure_client_when_journal_initialization_fails(self):
+        client = FakeSecureClient(FakeRawPerpsSession())
+        with self.assertRaises(Exception):
+            await run_perps_account_supervisor_worker(
+                secure_client=client,
+                credentials=object(),
+                database_path=self.directory,
+                status_path=self.directory / "status.json",
+                submission_lock_path=self.directory / "lock",
+                max_cycles=1,
+            )
+        self.assertTrue(client.closed)
+        self.assertEqual(client.open_calls, [])
 
     async def test_worker_rejects_missing_delegated_credentials_before_client_use(self):
         client = FakeSecureClient(FakeRawPerpsSession())

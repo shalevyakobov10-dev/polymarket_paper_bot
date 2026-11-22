@@ -567,6 +567,33 @@ class PerpsMarketWorkerTests(unittest.TestCase):
                 "snapshots_inserted_total": 4,
                 "history_rows": 4,
                 "poll_interval_seconds": 30,
+                "paper_engine_enabled": True,
+                "paper_engine_state": "healthy",
+                "paper_engine": {
+                    "cash": "950.00",
+                    "closed_positions": 4,
+                    "performance": {
+                        "closed_trades": 4,
+                        "winning_trades": 3,
+                        "losing_trades": 1,
+                        "breakeven_trades": 0,
+                        "win_rate_pct": "75.00",
+                        "gross_closed_pnl": "20.0",
+                        "net_closed_pnl_after_fees_and_funding": "18.5",
+                        "net_expectancy_per_closed_trade": "4.625",
+                        "profit_factor": "3.25",
+                        "profit_factor_status": "calculated",
+                        "entry_fees_paid": "0.4",
+                        "exit_fees_paid": "0.5",
+                        "liquidation_fees_paid": "0",
+                        "total_fees_paid": "0.9",
+                        "funding_paid": "0.6",
+                        "descriptive_only": False,
+                        "out_of_sample_validated": True,
+                        "live_execution_eligible": True,
+                        "private_key": "must-never-pass",
+                    },
+                },
                 "POLYMARKET_PRIVATE_KEY": "never-expose",
                 "unknown_field": "discard",
             }), encoding="utf-8")
@@ -575,6 +602,16 @@ class PerpsMarketWorkerTests(unittest.TestCase):
             self.assertEqual(result["markets_in_last_snapshot"], 3)
             self.assertEqual(result["heartbeat_timeout_seconds"], 180)
             self.assertFalse(result["live_execution_enabled"])
+            performance = result["paper_engine"]["performance"]
+            self.assertEqual(performance["closed_trades"], 4)
+            self.assertEqual(performance["winning_trades"], 3)
+            self.assertEqual(performance["win_rate_pct"], "75.00")
+            self.assertEqual(performance["net_closed_pnl_after_fees_and_funding"], "18.5")
+            self.assertEqual(performance["profit_factor"], "3.25")
+            self.assertTrue(performance["descriptive_only"])
+            self.assertFalse(performance["out_of_sample_validated"])
+            self.assertFalse(performance["live_execution_eligible"])
+            self.assertNotIn("private_key", performance)
             self.assertNotIn("POLYMARKET_PRIVATE_KEY", result)
             self.assertNotIn("unknown_field", result)
 

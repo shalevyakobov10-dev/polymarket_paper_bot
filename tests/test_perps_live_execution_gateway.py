@@ -165,6 +165,7 @@ class PerpsLiveExecutionGatewayTests(unittest.IsolatedAsyncioTestCase):
             "submission_lock_path": self.lock_file,
             "max_order_notional_usd": "25",
             "max_leverage": 2,
+            "now_provider": lambda: NOW,
         }
         options.update(overrides)
         return PerpsLiveExecutionGateway(**options)
@@ -249,6 +250,18 @@ class PerpsLiveExecutionGatewayTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(denied["reason_code"], "independent_risk_decision_not_approved")
         invalid = await self.submit(risk_decision=self.risk_decision(required_initial_margin_usd=None))
         self.assertEqual(invalid["reason_code"], "risk_snapshot_missing_or_invalid")
+
+    async def test_risk_snapshot_is_rechecked_after_account_network_reads(self):
+        gateway = self.gateway(
+            now_provider=lambda: NOW + timedelta(seconds=6),
+        )
+        result = await self.submit(gateway)
+        self.assertEqual(
+            result["reason_code"],
+            "risk_decision_stale_before_submission",
+        )
+        self.assertEqual(self.session.place_calls, [])
+        self.assertIsNone(self.journal.get_intent("a" * 32))
 
     async def test_risk_snapshot_must_have_a_fresh_timestamp(self):
         missing = await self.submit(risk_decision=self.risk_decision(captured_at=None))

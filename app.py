@@ -1131,6 +1131,7 @@ def health_payload(
     gdelt_snapshot: dict | None = None,
     learning_snapshot: dict | None = None,
     paper_worker_snapshot: dict | None = None,
+    perps_account_supervisor_snapshot: dict | None = None,
 ) -> tuple[bool, dict]:
     """Report core market readiness and separately expose optional collector degradation."""
     current = now or datetime.now(timezone.utc)
@@ -1251,6 +1252,50 @@ def health_payload(
             paper_component["status"] = "failed"
         components["event_paper_worker"] = paper_component
 
+    if perps_account_supervisor_snapshot is not None:
+        account_worker = perps_account_supervisor_snapshot
+        process_state = str(account_worker.get("process_supervisor_state") or "unknown")
+        worker_state = str(account_worker.get("worker_state") or "unknown")
+        heartbeat_fresh = account_worker.get("heartbeat_fresh") is True
+        if process_state != "running":
+            account_status = (
+                process_state
+                if process_state in {"starting", "restarting", "stopped", "failed"}
+                else "unknown"
+            )
+        elif not heartbeat_fresh:
+            account_status = "stale"
+        elif (
+            worker_state == "healthy"
+            and account_worker.get("read_only_preflight_passed") is True
+        ):
+            account_status = "healthy"
+        else:
+            account_status = "degraded"
+        observations = account_worker.get("observations") or {}
+        components["perps_account_supervisor"] = {
+            "name": "perps_account_supervisor",
+            "status": account_status,
+            "process_supervisor_state": process_state,
+            "worker_state": worker_state,
+            "heartbeat_fresh": heartbeat_fresh,
+            "heartbeat_age_seconds": account_worker.get("heartbeat_age_seconds"),
+            "read_only_preflight_passed": (
+                account_worker.get("read_only_preflight_passed") is True
+            ),
+            "blocked_reasons": account_worker.get("blocked_reasons", []),
+            "recovered_interrupted_submissions": account_worker.get(
+                "recovered_interrupted_submissions", 0
+            ),
+            "unresolved_order_count": observations.get("unresolved_order_count", 0),
+            "unknown_remote_open_orders": observations.get("unknown_remote_open_orders", 0),
+            "missing_remote_open_orders": observations.get("missing_remote_open_orders", 0),
+            "last_error_code": account_worker.get("last_error_code"),
+            "restart_count": account_worker.get("process_restart_count", 0),
+            "live_execution_enabled": False,
+            "order_submission_allowed": False,
+        }
+
     if stream_snapshot is not None:
         stream_worker_running = bool(stream_snapshot.get("worker_running"))
         stream_last_connect = stream_snapshot.get("last_connect_at")
@@ -1270,6 +1315,8 @@ def health_payload(
     required_components = ["market_data"]
     if paper_worker_snapshot is not None:
         required_components.append("event_paper_worker")
+    if perps_account_supervisor_snapshot is not None:
+        required_components.append("perps_account_supervisor")
     healthy = all(components[name]["status"] == "healthy" for name in required_components)
     degraded = [
         name for name, component in components.items()
@@ -1295,7 +1342,11 @@ def health_payload(
         "next_retry_at": snapshot.get("next_retry_at"),
         "components": components,
         "degraded_components": degraded,
-        "health_policy": "market_data_is_required; event_paper_worker_is_required_when_enabled; news_gdelt_resolution_stream_and_model_learning_are_optional",
+        "health_policy": (
+            "market_data_is_required; event_paper_worker_is_required_when_enabled; "
+            "perps_account_supervisor_is_required_when_enabled; "
+            "news_gdelt_resolution_stream_and_model_learning_are_optional"
+        ),
     }
     if not healthy and not payload["last_error"]:
         payload["last_error"] = "No recent successful market poll"
@@ -1481,6 +1532,19 @@ class Handler(BaseHTTPRequestHandler):
                 with _learning_lock:
                     learning_snapshot = dict(_learning_state)
                 supervisor_snapshot = read_supervisor_status(SUPERVISOR_STATUS_FILE)
+                perps_account_supervisor_snapshot = None
+                if supervisor_snapshot.get("perps_account_supervisor_enabled") is True:
+                    perps_account_supervisor_snapshot = perps_account_supervisor_freshness(
+                        read_perps_account_supervisor_status(
+                            PERPS_ACCOUNT_SUPERVISOR_STATUS_FILE
+                        )
+                    )
+                    perps_account_supervisor_snapshot["process_supervisor_state"] = (
+                        supervisor_snapshot.get("perps_account_supervisor_state") or "unknown"
+                    )
+                    perps_account_supervisor_snapshot["process_restart_count"] = (
+                        supervisor_snapshot.get("perps_account_supervisor_restart_count", 0)
+                    )
                 paper_worker_snapshot = (
                     read_event_paper_worker_status(EVENT_PAPER_WORKER_STATUS_FILE)
                     if supervisor_snapshot.get("event_paper_worker_enabled") is True
@@ -1494,6 +1558,7 @@ class Handler(BaseHTTPRequestHandler):
                     gdelt_snapshot=gdelt_snapshot,
                     learning_snapshot=learning_snapshot,
                     paper_worker_snapshot=paper_worker_snapshot,
+                    perps_account_supervisor_snapshot=perps_account_supervisor_snapshot,
                 )
                 if supervisor_snapshot.get("perps_market_worker_enabled") is True:
                     perps_snapshot = read_perps_worker_status(PERPS_MARKET_WORKER_STATUS_FILE)
@@ -1743,10 +1808,38 @@ class Handler(BaseHTTPRequestHandler):
                     "execution": "none",
                 })
             elif self.path == "/perps-account-supervisor":
+                supervisor_snapshot = read_supervisor_status(SUPERVISOR_STATUS_FILE)
                 payload = read_perps_account_supervisor_status(
                     PERPS_ACCOUNT_SUPERVISOR_STATUS_FILE
                 )
                 payload = perps_account_supervisor_freshness(payload)
+                process_enabled = (
+                    supervisor_snapshot.get("perps_account_supervisor_enabled") is True
+                )
+                process_state = (
+                    supervisor_snapshot.get("perps_account_supervisor_state") or "unknown"
+                )
+                payload["process_supervisor_enabled"] = process_enabled
+                payload["process_supervisor_state"] = process_state
+                payload["process_restart_count"] = supervisor_snapshot.get(
+                    "perps_account_supervisor_restart_count", 0
+                )
+                if not process_enabled:
+                    payload.update({
+                        "enabled": False,
+                        "worker_state": "disabled",
+                        "heartbeat_fresh": False,
+                        "heartbeat_age_seconds": None,
+                        "read_only_preflight_passed": False,
+                        "last_error_code": "account_supervisor_disabled",
+                    })
+                elif process_state != "running":
+                    payload["worker_state"] = (
+                        process_state
+                        if process_state in {"starting", "restarting", "stopped"}
+                        else "unknown"
+                    )
+                    payload["read_only_preflight_passed"] = False
                 payload.update({
                     "read_only": True,
                     "order_submission_allowed": False,

@@ -295,6 +295,30 @@ class PerpsMarketDataTests(unittest.TestCase):
             sum(1 for path, _ in provider.calls if path == "/v1/info/book"), 2
         )
 
+    def test_provider_exposes_full_public_fee_tier_snapshot_for_account_preflight(self):
+        provider = FakePerpsProvider([instrument()], [ticker()], {7: book()})
+        snapshot = provider.load_fee_schedule_snapshot(retrieved_at=NOW)
+        self.assertEqual(snapshot["retrieved_at"], NOW.isoformat())
+        self.assertEqual(snapshot["source"], "public_perps_fee_schedule")
+        self.assertEqual(snapshot["execution"], "none")
+        self.assertEqual(snapshot["fee_schedule"][0]["instrument_type"], "perpetual")
+        self.assertEqual(
+            snapshot["fee_schedule"][0]["tiers"][1]["taker_fee_rate"],
+            "0.0003",
+        )
+        self.assertEqual(
+            [call[0] for call in provider.calls],
+            ["/v1/info/fees"],
+        )
+
+    def test_provider_rejects_missing_or_malformed_full_fee_tier_snapshot(self):
+        provider = FakePerpsProvider([], [], {}, fees_payload={})
+        with self.assertRaisesRegex(Exception, "missing fee_schedule"):
+            provider.load_fee_schedule_snapshot(retrieved_at=NOW)
+        provider = FakePerpsProvider([], [], {}, fees_payload={"fee_schedule": []})
+        with self.assertRaisesRegex(Exception, "no perpetual entries"):
+            provider.load_fee_schedule_snapshot(retrieved_at=NOW)
+
     def test_fee_schedule_uses_highest_published_taker_rate(self):
         fees = _normalize_fee_schedule({
             "fee_schedule": [{

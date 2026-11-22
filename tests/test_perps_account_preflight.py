@@ -20,7 +20,15 @@ class FakePreflightSession:
             timestamp=NOW - timedelta(seconds=1),
             in_liquidation=False,
             positions=(),
-            margin=SimpleNamespace(available_order_margin="100"),
+            margin=SimpleNamespace(
+                total_account_value="100",
+                available_order_margin="100",
+                total_initial_margin="0",
+                total_maintenance_margin="0",
+                total_position_value="0",
+            ),
+            withdrawable="100",
+            fee_tier=0,
         )
         self.balances = (SimpleNamespace(asset="USDC", balance="100", value="100"),)
         self.open_orders = ()
@@ -104,7 +112,12 @@ class PerpsAccountPreflightTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_cross_margin_or_leverage_above_policy_is_blocked(self):
         self.session.portfolio.positions = (
-            SimpleNamespace(cross=True, leverage=5),
+            SimpleNamespace(
+                instrument_id=17, symbol="BTC", size="1", entry_price="50000",
+                cross=True, leverage=5, initial_margin="100", maintenance_margin="50",
+                position_value="50000", liquidation_price="25000",
+                adl_index=0,
+            ),
         )
         self.session.account_configs = (
             SimpleNamespace(cross=True, leverage=5, instrument_id=17),
@@ -114,9 +127,33 @@ class PerpsAccountPreflightTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("position_leverage_exceeds_policy", report["blocked_reasons"])
         self.assertIn("cross_margin_account_config_detected", report["blocked_reasons"])
 
+    async def test_invalid_portfolio_margin_totals_block_readiness(self):
+        self.session.portfolio.margin.total_account_value = "100"
+        self.session.portfolio.margin.total_maintenance_margin = "101"
+        report = await self.preflight.run(now=NOW)
+        self.assertIn("account_maintenance_margin_exceeds_equity", report["blocked_reasons"])
+
+    async def test_duplicate_or_invalid_position_data_blocks_readiness(self):
+        position = SimpleNamespace(
+            instrument_id=17, symbol="BTC", size="1", entry_price="50000",
+            cross=False, leverage=2, initial_margin="100", maintenance_margin="50",
+            position_value="50000", liquidation_price="25000", adl_index=3,
+        )
+        self.session.portfolio.positions = (position, position)
+        report = await self.preflight.run(now=NOW)
+        self.assertIn("account_position_data_invalid", report["blocked_reasons"])
+        self.assertIn("position_adl_risk_elevated", report["blocked_reasons"])
+        self.assertEqual(report["observations"]["position_integrity_errors"], 1)
+        self.assertEqual(report["observations"]["high_adl_risk_positions"], 2)
+
     async def test_open_position_and_order_count_limits_are_enforced(self):
         self.session.portfolio.positions = tuple(
-            SimpleNamespace(cross=False, leverage=2) for _ in range(4)
+            SimpleNamespace(
+                instrument_id=i + 1, symbol=f"COIN{i}", size="1", entry_price="100",
+                cross=False, leverage=2, initial_margin="50", maintenance_margin="20",
+                position_value="100", liquidation_price="50", adl_index=0,
+            )
+            for i in range(4)
         )
         self.session.open_orders = tuple(
             SimpleNamespace(

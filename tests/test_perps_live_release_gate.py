@@ -23,6 +23,24 @@ class PerpsLiveReleaseGateTests(unittest.TestCase):
             len(RELEASE_GATES) + 4,
         )
 
+    def test_account_fee_tier_gate_is_source_controlled_and_stays_closed(self):
+        report = evaluate_perps_live_release_gate({
+            "DRY_RUN": "false",
+            "PERPS_LIVE_EXECUTION_ENABLED": "true",
+            "PERPS_LIVE_TRADING_ARMED": "true",
+            "PERPS_LIVE_CONFIRMATION": CONFIRMATION_PHRASE,
+            "ACCOUNT_FEE_TIER_AND_CURRENT_FEE_SCHEDULE_VERIFIED": "true",
+        })
+        gate = report["release_gates"]["account_fee_tier_and_current_fee_schedule_verified"]
+        self.assertFalse(gate["passed"])
+        self.assertTrue(gate["source_controlled"])
+        self.assertIn(
+            "release_gate:account_fee_tier_and_current_fee_schedule_verified",
+            report["blocked_reasons"],
+        )
+        self.assertFalse(report["eligible_for_separate_gateway_review"])
+        self.assertFalse(report["order_submission_allowed"])
+
     def test_runtime_flags_and_confirmation_cannot_override_source_release_gates(self):
         report = evaluate_perps_live_release_gate({
             "DRY_RUN": "false",

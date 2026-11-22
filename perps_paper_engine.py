@@ -766,14 +766,7 @@ class PerpsPaperEngine:
                     connection.commit()
                     return {"status": "PAPER_MARK_RECORDED", "open_position": False, "execution": "none"}
                 row = open_rows[0]
-                if row["funding_status"] == "gap":
-                    connection.commit()
-                    return {
-                        "status": "PAPER_POSITION_FUNDING_GAP",
-                        "trade_id": row["trade_id"],
-                        "new_entries_blocked": True,
-                        "execution": "none",
-                    }
+                funding_gap = row["funding_status"] == "gap"
                 mark = _d(snapshot["mark_price"], "mark_price")
                 stop = _d(row["stop_price"], "stop_price")
                 target = _d(row["take_profit_price"], "take_profit_price")
@@ -782,8 +775,20 @@ class PerpsPaperEngine:
                 if hit_stop or hit_target:
                     reason = "stop_loss" if hit_stop else "take_profit"
                     result = self._close_locked(connection, row, snapshot, reason=reason, now=current)
+                    if funding_gap and result.get("status") == "PAPER_POSITION_CLOSED":
+                        result["funding_reconciliation"] = "incomplete"
+                        result["warning"] = "position_closed_despite_funding_gap"
                     connection.commit()
                     return result
+                if funding_gap:
+                    connection.commit()
+                    return {
+                        "status": "PAPER_POSITION_FUNDING_GAP",
+                        "trade_id": row["trade_id"],
+                        "new_entries_blocked": True,
+                        "protective_exit_checks_active": True,
+                        "execution": "none",
+                    }
                 connection.commit()
                 return {
                     "status": "PAPER_MARK_RECORDED",

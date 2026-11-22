@@ -274,6 +274,25 @@ class PerpsMarketDataTests(unittest.TestCase):
         self.assertEqual(fees["crypto"]["maker_fee_rate"], "0.0001")
         self.assertIn("highest_published_rate", fees["crypto"]["tier_assumption"])
 
+    def test_fee_schedule_accepts_negative_top_tier_maker_rebate(self):
+        fees = _normalize_fee_schedule({
+            "fee_schedule": [{
+                "instrument_type": "perpetual",
+                "category": "crypto",
+                "taker_fee_rate": "0.0004",
+                "maker_fee_rate": "0.000125",
+                "tiers": [
+                    {"min_volume_30d": "0", "taker_fee_rate": "0.0004", "maker_fee_rate": "0.000125"},
+                    {"min_volume_30d": "1000000000", "taker_fee_rate": "0.0002", "maker_fee_rate": "-0.00005"},
+                ],
+            }]
+        }, NOW)
+        # Conservative market-taking assumption remains the $0-tier taker rate.
+        self.assertEqual(fees["crypto"]["taker_fee_rate"], "0.0004")
+        # We preserve the least favorable published maker rate but do not use it
+        # for the engine's taker executions.
+        self.assertEqual(fees["crypto"]["maker_fee_rate"], "0.000125")
+
     def test_fee_schedule_rejects_missing_or_invalid_rates(self):
         with self.assertRaisesRegex(Exception, "missing fee_schedule"):
             _normalize_fee_schedule({}, NOW)

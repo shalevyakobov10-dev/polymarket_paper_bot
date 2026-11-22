@@ -51,6 +51,37 @@ def _prune_backups(directory: Path, prefix: str, retain: int) -> int:
     return removed
 
 
+def _prune_orphaned_manifests(directory: Path) -> int:
+    """Remove manifests whose retained backup set is no longer complete."""
+    removed = 0
+    for manifest_path in directory.glob("paper-backup-manifest-*.json"):
+        try:
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeError, ValueError, TypeError):
+            # Keep malformed manifests for operator inspection.
+            continue
+        entries = manifest.get("files") if isinstance(manifest, dict) else None
+        if not isinstance(entries, list) or not entries:
+            continue
+        names = [
+            entry.get("backup_name")
+            for entry in entries
+            if isinstance(entry, dict) and isinstance(entry.get("backup_name"), str)
+        ]
+        if len(names) != len(entries) or not names:
+            continue
+        if any(
+            not name
+            or Path(name).name != name
+            or "\\" in name
+            or not (directory / name).is_file()
+            for name in names
+        ):
+            manifest_path.unlink(missing_ok=True)
+            removed += 1
+    return removed
+
+
 def _stage_json(directory: Path, payload: dict[str, Any]) -> Path:
     with tempfile.NamedTemporaryFile(
         mode="w", encoding="utf-8", dir=str(directory),
@@ -195,8 +226,14 @@ def create_paper_data_backups(
         removed = 0
         for prefix in seen_prefixes:
             removed += _prune_backups(directory, prefix, retain)
+        manifests_removed = _prune_orphaned_manifests(directory)
 
-        return {**manifest, "old_backups_removed": removed, "manifest_name": manifest_path.name}
+        return {
+            **manifest,
+            "old_backups_removed": removed,
+            "orphaned_manifests_removed": manifests_removed,
+            "manifest_name": manifest_path.name,
+        }
     except Exception:
         # If the manifest was not committed, roll back all visible files from
         # this attempt and preserve the prior verified backup set.
@@ -245,7 +282,9 @@ def verify_paper_data_backup(manifest_path: str | Path) -> dict[str, Any]:
             or Path(source_name).name != source_name
             or not isinstance(backup_name, str) or not backup_name
             or Path(backup_name).name != backup_name
+            or "/" in backup_name or "\\" in backup_name
             or backup_name in {".", ".."}
+            or "/" in source_name or "\\" in source_name
             or not backup_name.endswith(".sqlite3")
             or source_name in seen_sources
             or backup_name in seen_backups

@@ -1767,8 +1767,8 @@ class Handler(BaseHTTPRequestHandler):
                 payload = read_supervisor_status(SUPERVISOR_STATUS_FILE)
                 payload["event_paper_worker"] = read_event_paper_worker_status(EVENT_PAPER_WORKER_STATUS_FILE)
                 payload["perps_market_worker"] = read_perps_worker_status(PERPS_MARKET_WORKER_STATUS_FILE)
-                payload["perps_account_supervisor"] = read_perps_account_supervisor_status(
-                    PERPS_ACCOUNT_SUPERVISOR_STATUS_FILE
+                payload["perps_account_supervisor"] = perps_account_supervisor_freshness(
+                    read_perps_account_supervisor_status(PERPS_ACCOUNT_SUPERVISOR_STATUS_FILE)
                 )
                 payload.update({
                     "read_only": True,

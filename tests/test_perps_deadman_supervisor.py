@@ -5,6 +5,7 @@ import json
 import tempfile
 import unittest
 from datetime import datetime, timedelta, timezone
+from unittest.mock import patch
 from pathlib import Path
 
 from perps_deadman_supervisor import PerpsDeadmanSwitchSupervisor
@@ -18,6 +19,7 @@ class FakeDeadmanSession:
         self.arm_calls = []
         self.fetch_calls = 0
         self.arm_error = None
+        self.arm_hangs = False
         self.fetch_error = None
         self.deadline_override = None
         self.triggered = 0
@@ -25,6 +27,8 @@ class FakeDeadmanSession:
 
     async def arm_auto_cancel(self, *, cancel_at):
         self.arm_calls.append(cancel_at)
+        if self.arm_hangs:
+            await asyncio.Event().wait()
         if self.arm_error:
             raise self.arm_error
 
@@ -78,7 +82,11 @@ class PerpsDeadmanSupervisorTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_stopped_before_start_does_not_arm_auto_cancel(self):
         self.stop_event.set()
-        report = await self.build().run()
+        with patch(
+            "perps_deadman_supervisor.evaluate_perps_live_release_gate",
+            return_value={"eligible_for_separate_gateway_review": True},
+        ):
+            report = await self.build().run()
         self.assertEqual(report["state"], "stopped")
         self.assertEqual(self.session.arm_calls, [])
         self.assertEqual(self.session.fetch_calls, 0)
@@ -94,17 +102,20 @@ class PerpsDeadmanSupervisorTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(report["order_submission_allowed"])
 
     async def test_arm_timeout_or_api_failure_fails_closed(self):
-        self.session.arm_error = RuntimeError("transport unavailable")
+        self.session.arm_hangs = True
         supervisor = self.build(command_timeout_seconds=0.05)
-        report = await supervisor.run()
+        with patch(
+            "perps_deadman_supervisor.evaluate_perps_live_release_gate",
+            return_value={"eligible_for_separate_gateway_review": True},
+        ):
+            report = await supervisor.run()
         self.assertEqual(report["state"], "degraded_deadman_left_armed")
         self.assertEqual(report["reason_code"], "deadman_refresh_failed")
         self.assertTrue(self.halt_event.is_set())
+        self.assertEqual(self.session.fetch_calls, 0)
 
     async def test_near_expiry_or_exhausted_daily_limit_is_rejected(self):
         self.session.deadline_override = NOW + timedelta(seconds=4)
-        report = await self.build()._arm_and_verify_once()
-        self.assertEqual(report["state"], "degraded_deadman_left_armed") if False else None
         with self.assertRaisesRegex(ValueError, "auto_cancel_deadline_too_close"):
             await self.build()._arm_and_verify_once()
 
@@ -114,14 +125,26 @@ class PerpsDeadmanSupervisorTests(unittest.IsolatedAsyncioTestCase):
             await self.build()._arm_and_verify_once()
 
     async def test_shutdown_leaves_last_deadman_lease_armed(self):
-        self.stop_event.set()
+        class StopAfterOneRenewal(asyncio.Event):
+            async def wait(self):
+                self.set()
+                return True
+
+        self.stop_event = StopAfterOneRenewal()
         supervisor = self.build()
-        report = await supervisor.run()
-        # The source-controlled release gate is closed, so no signed account
-        # mutation occurs in this build. No disarm action exists in this class.
-        self.assertEqual(report["state"], "blocked")
-        self.assertEqual(self.session.arm_calls, [])
+        with patch(
+            "perps_deadman_supervisor.evaluate_perps_live_release_gate",
+            return_value={"eligible_for_separate_gateway_review": True},
+        ):
+            report = await supervisor.run()
+        self.assertEqual(report["state"], "stopped_deadman_left_armed")
+        self.assertEqual(report["reason_code"], "shutdown_requested")
+        self.assertEqual(len(self.session.arm_calls), 1)
+        self.assertEqual(self.session.fetch_calls, 1)
+        self.assertEqual(report["seconds_remaining"], 60.0)
         self.assertTrue(self.halt_event.is_set())
+        self.assertFalse(report["disarm_on_shutdown"])
+        self.assertFalse(hasattr(self.session, "disarm_auto_cancel"))
 
 
 if __name__ == "__main__":

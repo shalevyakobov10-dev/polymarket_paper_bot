@@ -326,6 +326,43 @@ class PerpsMarketHistoryStoreTests(unittest.TestCase):
                 self.assertEqual(repeated["conflicts"], 1)
                 self.assertIsNone(store.funding_rate_at(11, timestamp_ms))
 
+    def test_funding_conflict_becomes_visible_only_after_first_detection(self):
+        with tempfile.TemporaryDirectory() as directory:
+            with PerpsMarketHistoryStore(Path(directory) / "perps.sqlite3") as store:
+                timestamp_ms = 1795334400000
+                store.record_funding_history(
+                    11,
+                    [{
+                        "instrument_id": 11,
+                        "timestamp_ms": timestamp_ms,
+                        "funding_rate": "0.000125",
+                    }],
+                    received_at="2026-11-22T08:00:10+00:00",
+                )
+                store.record_funding_history(
+                    11,
+                    [{
+                        "instrument_id": 11,
+                        "timestamp_ms": timestamp_ms,
+                        "funding_rate": "0.0002",
+                    }],
+                    received_at="2026-11-22T08:00:30+00:00",
+                )
+
+                # A strategy at 08:00:20 had not yet observed the correction.
+                point_in_time_old = store.funding_rate_at(
+                    11,
+                    timestamp_ms,
+                    as_of_received_at="2026-11-22T08:00:20+00:00",
+                )
+                self.assertEqual(point_in_time_old["funding_rate"], "0.000125")
+                # The same settlement is quarantined for decisions after 08:00:30.
+                self.assertIsNone(store.funding_rate_at(
+                    11,
+                    timestamp_ms,
+                    as_of_received_at="2026-11-22T08:00:30+00:00",
+                ))
+
     def test_rejects_mismatched_or_duplicate_funding_settlement_rows(self):
         with tempfile.TemporaryDirectory() as directory:
             with PerpsMarketHistoryStore(Path(directory) / "perps.sqlite3") as store:

@@ -419,8 +419,8 @@ class ParserTests(unittest.TestCase):
                     "mode": "PERPS_ACCOUNT_READ_ONLY_SUPERVISOR",
                     "enabled": True,
                     "worker_state": "degraded",
-                    "last_heartbeat_at": "2026-11-22T08:00:00+00:00",
-                    "last_preflight_at": "2026-11-22T08:00:00+00:00",
+                    "last_heartbeat_at": datetime.now(timezone.utc).isoformat(),
+                    "last_preflight_at": datetime.now(timezone.utc).isoformat(),
                     "last_error_code": None,
                     "consecutive_failures": 0,
                     "recovery_completed": True,
@@ -443,6 +443,8 @@ class ParserTests(unittest.TestCase):
 
                 self.assertEqual(payload["mode"], "PERPS_ACCOUNT_READ_ONLY_SUPERVISOR")
                 self.assertEqual(payload["worker_state"], "degraded")
+                self.assertTrue(payload["heartbeat_fresh"])
+                self.assertLessEqual(payload["heartbeat_age_seconds"], 2)
                 self.assertEqual(payload["recovered_interrupted_submissions"], 1)
                 self.assertEqual(
                     payload["blocked_reasons"],

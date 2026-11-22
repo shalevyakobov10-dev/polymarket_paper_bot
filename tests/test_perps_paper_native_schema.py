@@ -140,6 +140,71 @@ class NativePerpsSnapshotTests(unittest.TestCase):
             self.assertEqual(closed["status"], "PAPER_POSITION_CLOSED")
             self.assertEqual(closed["close_reason"], "stop_loss")
 
+    def test_strategy_decision_ledger_is_idempotent_and_records_results(self):
+        with tempfile.TemporaryDirectory() as directory:
+            engine = PerpsPaperEngine(Path(directory) / "perps.sqlite3")
+            self.assertTrue(engine.claim_strategy_decision(7, 1_800_000_060_000, now=BASE))
+            self.assertFalse(engine.claim_strategy_decision(7, 1_800_000_060_000, now=BASE + timedelta(seconds=10)))
+            engine.record_strategy_decision(
+                7, 1_800_000_060_000,
+                decision_status="signal_logged",
+                reason="bullish_ema_crossover_confirmed",
+                metrics={"momentum_pct": "0.12", "volatility_pct": "0.3"},
+                side="LONG",
+                now=BASE + timedelta(seconds=11),
+            )
+            self.assertFalse(engine.claim_strategy_decision(7, 1_800_000_060_000, now=BASE + timedelta(minutes=2)))
+            summary = engine.strategy_decision_summary()
+            self.assertEqual(summary["decisions_total"], 1)
+            self.assertEqual(summary["signals_logged"], 1)
+            self.assertEqual(summary["entries_opened"], 0)
+            self.assertEqual(summary["latest"]["decision_status"], "signal_logged")
+            self.assertEqual(summary["latest"]["side"], "LONG")
+
+    def test_stale_evaluating_decision_claim_can_be_recovered_after_worker_crash(self):
+        with tempfile.TemporaryDirectory() as directory:
+            engine = PerpsPaperEngine(Path(directory) / "perps.sqlite3")
+            self.assertTrue(engine.claim_strategy_decision(7, 1_800_000_060_000, now=BASE))
+            self.assertFalse(engine.claim_strategy_decision(7, 1_800_000_060_000, now=BASE + timedelta(minutes=2)))
+            self.assertTrue(engine.claim_strategy_decision(7, 1_800_000_060_000, now=BASE + timedelta(minutes=6)))
+            engine.record_strategy_decision(
+                7, 1_800_000_060_000,
+                decision_status="no_signal",
+                reason="no_confirmed_crossover",
+                now=BASE + timedelta(minutes=6, seconds=1),
+            )
+            self.assertEqual(engine.strategy_decision_summary()["no_signal"], 1)
+
+    def test_dynamic_strategy_stop_and_target_are_applied_to_paper_position(self):
+        with tempfile.TemporaryDirectory() as directory:
+            engine = PerpsPaperEngine(Path(directory) / "perps.sqlite3")
+            result = engine.open_position(
+                nested_snapshot(), side="LONG",
+                requested_notional="10.5",
+                stop_loss_distance_pct="0.005",
+                reward_risk_multiple="2",
+                now=BASE,
+            )
+            self.assertEqual(result["status"], "PAPER_POSITION_OPEN")
+            entry = float(result["entry_price"])
+            self.assertAlmostEqual(float(result["stop_price"]), entry * 0.995, places=6)
+            self.assertAlmostEqual(float(result["take_profit_price"]), entry * 1.01, places=6)
+            self.assertEqual(result["stop_loss_distance_pct"], "0.005")
+            self.assertEqual(result["reward_risk_multiple"], "2")
+
+    def test_unsafe_strategy_stop_distance_is_rejected(self):
+        with tempfile.TemporaryDirectory() as directory:
+            engine = PerpsPaperEngine(Path(directory) / "perps.sqlite3")
+            result = engine.open_position(
+                nested_snapshot(), side="LONG",
+                requested_notional="10.5",
+                stop_loss_distance_pct="0.03",
+                reward_risk_multiple="2",
+                now=BASE,
+            )
+            self.assertEqual(result["status"], "PAPER_ENTRY_BLOCKED")
+            self.assertEqual(result["reason"], "stop_loss_distance_out_of_research_bounds")
+
     def test_retention_prunes_snapshots_older_than_configured_window(self):
         with tempfile.TemporaryDirectory() as directory:
             engine = PerpsPaperEngine(

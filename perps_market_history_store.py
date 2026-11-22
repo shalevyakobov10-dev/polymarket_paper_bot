@@ -442,11 +442,22 @@ class PerpsMarketHistoryStore:
             raise ValueError("cutoff must be timezone-aware")
         normalized = parsed.astimezone(timezone.utc).isoformat()
         with self.db:
-            cursor = self.db.execute(
+            snapshot_cursor = self.db.execute(
                 "DELETE FROM perps_market_snapshots WHERE received_at < ?",
                 (normalized,),
             )
-        return {"deleted": max(0, int(cursor.rowcount)), "remaining": self.count()}
+            funding_cursor = self.db.execute(
+                "DELETE FROM perps_funding_history WHERE received_at < ?",
+                (normalized,),
+            )
+        snapshot_deleted = max(0, int(snapshot_cursor.rowcount))
+        funding_deleted = max(0, int(funding_cursor.rowcount))
+        return {
+            "deleted": snapshot_deleted + funding_deleted,
+            "snapshot_rows_deleted": snapshot_deleted,
+            "funding_rows_deleted": funding_deleted,
+            "remaining": self.count(),
+        }
 
     def close(self) -> None:
         self.db.close()

@@ -269,6 +269,93 @@ class PerpsMarketWorkerTests(unittest.TestCase):
             self.assertEqual(order, ["fetch_funding", "persist_funding", "process_snapshot"])
             self.assertEqual(store.funding_rows[0]["funding_rate"], "0.00025")
 
+    def test_worker_deduplicates_exact_funding_requirements_per_cycle(self):
+        class CountingProvider(FakeProvider):
+            def __init__(self):
+                super().__init__()
+                self.funding_calls = []
+
+            def load_funding_history(self, instrument_id, *, start_timestamp_ms, end_timestamp_ms):
+                self.funding_calls.append((instrument_id, start_timestamp_ms, end_timestamp_ms))
+                return [{
+                    "instrument_id": instrument_id,
+                    "timestamp_ms": start_timestamp_ms,
+                    "funding_rate": "0.00025",
+                }]
+
+        class DuplicateRequirementEngine(FakePaperEngine):
+            def funding_requirements(self, snapshots):
+                request = {
+                    "instrument_id": 1,
+                    "start_timestamp_ms": 1795334400000,
+                    "end_timestamp_ms": 1795338000000,
+                }
+                return [request, dict(request)]
+
+        with tempfile.TemporaryDirectory() as directory:
+            provider = CountingProvider()
+            store = FakeStore()
+
+            def persist(instrument_id, entries, *, received_at=None):
+                store.persisted_funding = list(entries)
+                return {"received": len(entries), "inserted": len(entries), "duplicates": 0}
+
+            store.record_funding_history = persist
+            result = run_worker(
+                provider=provider,
+                store=store,
+                paper_engine=DuplicateRequirementEngine(),
+                paper_engine_enabled=True,
+                backup_function=None,
+                stop_event=FakeStopEvent(),
+                status_path=Path(directory) / "status.json",
+                poll_interval_seconds=15,
+                max_cycles=1,
+            )
+            self.assertEqual(result, 0)
+            self.assertEqual(len(provider.funding_calls), 1)
+            self.assertEqual(len(store.persisted_funding), 1)
+
+    def test_perps_backup_failure_is_reported_with_bounded_retry(self):
+        import os
+        from unittest.mock import patch
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            paper_db = root / "perps_paper.sqlite3"
+            market_db = root / "perps_market_history.sqlite3"
+            paper_db.write_bytes(b"paper")
+            market_db.write_bytes(b"history")
+            status_file = root / "status.json"
+
+            def failed_backup(*args, **kwargs):
+                raise OSError("simulated disk full")
+
+            with patch.dict(os.environ, {
+                "PERPS_PAPER_DB": str(paper_db),
+                "PERPS_MARKET_HISTORY_DB": str(market_db),
+            }, clear=False):
+                result = run_worker(
+                    provider=FakeProvider(),
+                    store=FakeStore(),
+                    paper_engine=FakePaperEngine(),
+                    paper_engine_enabled=True,
+                    backup_function=failed_backup,
+                    stop_event=FakeStopEvent(),
+                    status_path=status_file,
+                    poll_interval_seconds=15,
+                    max_cycles=1,
+                )
+
+            self.assertEqual(result, 0)
+            raw = json.loads(status_file.read_text(encoding="utf-8"))
+            self.assertEqual(raw["backup_error_type"], "OSError")
+            self.assertEqual(raw["backup_consecutive_failures"], 1)
+            self.assertEqual(raw["backup_retry_delay_seconds"], 60)
+            safe = read_perps_worker_status(status_file)
+            self.assertEqual(safe["backup_error_type"], "OSError")
+            self.assertEqual(safe["backup_retry_delay_seconds"], 60)
+
     def test_worker_marks_degraded_and_returns_failure_when_data_is_unavailable(self):
         with tempfile.TemporaryDirectory() as directory:
             target = Path(directory) / "status.json"

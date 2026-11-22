@@ -22,6 +22,8 @@ ASYNC_SECURE_METHODS: dict[str, set[str]] = {
 PERPS_SESSION_METHODS: dict[str, set[str]] = {
     "fetch_balances": set(),
     "fetch_portfolio": set(),
+    "fetch_auto_cancel_status": set(),
+    "fetch_account_config": {"instrument_id"},
     "fetch_open_orders": {"instrument_id"},
     "fetch_orders": {"client_order_id"},
     "list_fills": {"instrument_id", "start", "end", "sort"},

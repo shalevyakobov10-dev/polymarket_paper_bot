@@ -289,6 +289,8 @@ class PerpsLiveExecutionGateway:
             if not isinstance(configs, (tuple, list)) or len(configs) != 1:
                 return self._blocked("target_instrument_config_missing_or_ambiguous", client_order_id=identifier)
             config = configs[0]
+            if config is None:
+                return self._blocked("target_instrument_config_missing_or_ambiguous", client_order_id=identifier)
             configured_instrument_id = _field(config, "instrument_id")
             if (
                 isinstance(configured_instrument_id, bool)

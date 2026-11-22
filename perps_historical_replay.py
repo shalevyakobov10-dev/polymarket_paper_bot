@@ -258,6 +258,7 @@ def replay_perps_history(
                 "market_history_filtered_by_received_at": True,
                 "funding_history_filtered_by_received_at": True,
                 "query_filters_applied_before_limit": True,
+                "pre_entry_snapshots_are_warmup_only": entry_start is not None,
             },
             "funding_policy": (
                 "Only settlements captured by the simulated decision time are visible; "

@@ -1,0 +1,67 @@
+name: Public Polymarket Perps smoke check
+on:
+  push:
+    branches: [research/polymarket-perps-paper-engine]
+    paths:
+      - "perps_market_data.py"
+      - "requirements.txt"
+      - ".github/workflows/perps-public-smoke.yml"
+  pull_request:
+    branches: [research/event-aware-news-signals]
+    paths:
+      - "perps_market_data.py"
+      - "requirements.txt"
+      - ".github/workflows/perps-public-smoke.yml"
+  workflow_dispatch:
+  schedule:
+    - cron: "37 7 * * *"
+permissions:
+  contents: read
+jobs:
+  public-perps-read:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install public market-data dependencies
+        run: python -m pip install -r requirements.txt
+      - name: Check public Perps instruments, tickers and order books
+        env:
+          PERPS_MARKET_LIMIT: "5"
+          PERPS_MAX_MARKET_AGE_SECONDS: "10"
+          PERPS_MAX_SPREAD_BPS: "250"
+          PERPS_BOOK_DEPTH: "10"
+          PERPS_HTTP_TIMEOUT_SECONDS: "12"
+        run: |
+          python - <<'PY'
+          from datetime import datetime, timezone
+          from perps_market_data import PerpsMarketDataProvider
+
+          provider = PerpsMarketDataProvider(
+              market_limit=5,
+              max_age_seconds=10,
+              max_spread_bps=250,
+              book_depth=10,
+              timeout_seconds=12,
+          )
+          rows = provider.load_snapshots(now=datetime.now(timezone.utc))
+          if not rows:
+              raise SystemExit("No fresh, usable public Perps markets were returned.")
+
+          for row in rows:
+              assert row["research_only"] is True
+              assert row["execution"] == "none"
+              assert row["mark_price"] and row["index_price"]
+              assert row["ticker_age_seconds"] <= 10
+              assert row["book_age_seconds"] <= 10
+              assert row["bids"] and row["asks"]
+              assert float(row["best_bid"]) < float(row["best_ask"])
+              assert row["next_funding_ms"] > 0
+
+          symbols = ", ".join(row["symbol"] for row in rows)
+          print(f"OK: {len(rows)} fresh public Perps market(s): {symbols}")
+          print("Read-only REST only; no account credentials, signing or order submission.")
+          PY

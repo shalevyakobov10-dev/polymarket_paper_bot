@@ -148,6 +148,26 @@ class PerpsAccountPreflightTests(unittest.IsolatedAsyncioTestCase):
             report["blocked_reasons"],
         )
 
+    async def test_large_terminal_journal_history_does_not_exhaust_active_reconciliation_limit(self):
+        for index in range(105):
+            client_id = f"{index + 1:032x}"
+            self.journal.create_intent(
+                client_order_id=client_id,
+                instrument_id=17,
+                side="buy",
+                quantity="1",
+                position_intent="open_long",
+                time_in_force="ioc",
+            )
+            self.journal.begin_submission(client_id)
+            self.journal.record_submission_rejection(client_id, reason_code="test_terminal")
+
+        report = await self.preflight.run(now=NOW)
+
+        self.assertTrue(report["read_only_preflight_passed"])
+        self.assertEqual(report["observations"]["local_order_count"], 0)
+        self.assertEqual(report["observations"]["unresolved_order_count"], 0)
+
     async def test_unknown_remote_open_order_blocks_account_readiness(self):
         self.session.open_orders = (
             SimpleNamespace(
@@ -160,6 +180,55 @@ class PerpsAccountPreflightTests(unittest.IsolatedAsyncioTestCase):
         report = await self.preflight.run(now=NOW)
         self.assertIn(
             "unmanaged_or_mismatched_remote_open_orders",
+            report["blocked_reasons"],
+        )
+
+    async def test_open_order_must_match_exact_venue_id_and_immutable_terms(self):
+        client_id = "d" * 32
+        self.journal.create_intent(
+            client_order_id=client_id,
+            instrument_id=17,
+            side="buy",
+            quantity="2",
+            position_intent="open_long",
+            time_in_force="gtc",
+            limit_price="2500",
+        )
+        self.journal.begin_submission(client_id)
+        self.journal.record_submission_acknowledgement(client_id, venue_order_id="123")
+        self.journal.record_reconciliation(
+            client_id,
+            outcome="found",
+            matched_client_order_id=client_id,
+            venue_order_id="123",
+            instrument_id=17,
+            side="buy",
+            quantity="2",
+            remote_status="open",
+            filled_quantity="0",
+        )
+        self.session.open_orders = (
+            SimpleNamespace(
+                id=124,
+                client_order_id=client_id,
+                instrument_id=17,
+                side="BUY",
+                quantity="2",
+                price="2500",
+                filled_quantity="0",
+                reduce_only=False,
+                status="open",
+            ),
+        )
+
+        report = await self.preflight.run(now=NOW)
+
+        self.assertIn(
+            "unmanaged_or_mismatched_remote_open_orders",
+            report["blocked_reasons"],
+        )
+        self.assertIn(
+            "local_open_orders_missing_from_venue_open_order_list",
             report["blocked_reasons"],
         )
 

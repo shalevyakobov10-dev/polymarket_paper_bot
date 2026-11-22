@@ -84,8 +84,8 @@ class PerpsWalkForwardEvaluationTests(unittest.TestCase):
 
     @staticmethod
     def _profitable_fold_report(*args, **kwargs):
-        entry_start = kwargs.get("entry_start_received_at")
-        end = kwargs.get("end_received_at")
+        entry_start = kwargs.get("entry_start_received_at") or BASE
+        end = kwargs.get("end_received_at") or (BASE + timedelta(minutes=10))
         return {
             "paper_entry_events": 3,
             "snapshots_replayed": 20,

@@ -403,7 +403,18 @@ class PerpsPaperEngine:
             (day_start,),
         ).fetchone()
         closed_daily_pnl = _d(closed["pnl"], "closed_daily_pnl")
-        daily_pnl = closed_daily_pnl + min(Decimal("0"), unrealized)
+        # For open trades, include mark-to-entry PnL, entry fees, and all
+        # funding already settled. Funding is deducted from cash immediately,
+        # but must also count toward the same-day loss circuit breaker.
+        open_costs = sum(
+            (
+                _d(row["entry_fee"], "entry_fee")
+                + _d(row["funding_paid"], "funding_paid")
+                for row in rows
+            ),
+            Decimal("0"),
+        )
+        daily_pnl = closed_daily_pnl + unrealized - open_costs
         daily_loss = max(Decimal("0"), -daily_pnl)
         stale_open_position = False
         for row in rows:

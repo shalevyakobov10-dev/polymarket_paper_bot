@@ -304,6 +304,11 @@ class PerpsMarketHistoryStoreTests(unittest.TestCase):
                 # Never continue with the old value once the same settlement
                 # timestamp has conflicting public observations.
                 self.assertIsNone(store.funding_rate_at(11, timestamp_ms))
+                conflict_status = store.funding_conflict_at(11, timestamp_ms)
+                self.assertEqual(
+                    conflict_status["observed_rates"],
+                    ["0.000125", "0.0002"],
+                )
                 conflict = store.db.execute(
                     "SELECT observed_rates_json FROM perps_funding_conflicts "
                     "WHERE instrument_id=? AND funding_timestamp_ms=?",
@@ -356,12 +361,25 @@ class PerpsMarketHistoryStoreTests(unittest.TestCase):
                     as_of_received_at="2026-11-22T08:00:20+00:00",
                 )
                 self.assertEqual(point_in_time_old["funding_rate"], "0.000125")
+                self.assertIsNone(store.funding_conflict_at(
+                    11,
+                    timestamp_ms,
+                    as_of_received_at="2026-11-22T08:00:20+00:00",
+                ))
                 # The same settlement is quarantined for decisions after 08:00:30.
                 self.assertIsNone(store.funding_rate_at(
                     11,
                     timestamp_ms,
                     as_of_received_at="2026-11-22T08:00:30+00:00",
                 ))
+                self.assertEqual(
+                    store.funding_conflict_at(
+                        11,
+                        timestamp_ms,
+                        as_of_received_at="2026-11-22T08:00:30+00:00",
+                    )["observed_rates"],
+                    ["0.000125", "0.0002"],
+                )
 
     def test_rejects_mismatched_or_duplicate_funding_settlement_rows(self):
         with tempfile.TemporaryDirectory() as directory:

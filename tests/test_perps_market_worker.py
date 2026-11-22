@@ -39,8 +39,10 @@ class FakeProvider:
             "received_at": "2026-11-22T08:00:00+00:00",
         }]
         self.error = error
+        self.last_priority_instrument_ids = []
 
-    def load(self):
+    def load(self, *, priority_instrument_ids=None):
+        self.last_priority_instrument_ids = list(priority_instrument_ids or [])
         if self.error:
             raise self.error
         return self.snapshots
@@ -65,14 +67,20 @@ class FakeStore:
 
 
 class FakePaperEngine:
-    def __init__(self):
+    def __init__(self, open_ids=None):
         self.processed = []
+        self.entry_permissions = []
+        self.open_ids = list(open_ids or [])
+
+    def open_instrument_ids(self):
+        return list(self.open_ids)
 
     def funding_requirements(self, snapshots):
         return []
 
-    def process_snapshot(self, snapshot, history_store):
+    def process_snapshot(self, snapshot, history_store, *, allow_new_entries=True):
         self.processed.append(snapshot["instrument"]["instrument_id"])
+        self.entry_permissions.append(allow_new_entries)
 
     def summary(self):
         return {
@@ -158,6 +166,46 @@ class PerpsMarketWorkerTests(unittest.TestCase):
             self.assertEqual(sanitized["paper_engine"]["equity"], "1000")
             self.assertFalse(sanitized["paper_engine"]["order_submission_allowed"])
             self.assertNotIn("POLYMARKET_PRIVATE_KEY", sanitized["paper_engine"])
+
+    def test_worker_prioritizes_open_positions_and_blocks_all_new_entries_if_one_is_missing(self):
+        with tempfile.TemporaryDirectory() as directory:
+            target = Path(directory) / "status.json"
+            snapshot = {
+                **FakeProvider().snapshots[0],
+                "fees": {
+                    "taker_fee_rate": "0.0004",
+                    "maker_fee_rate": "0.0001",
+                    "source": "public_perps_fee_schedule",
+                },
+            }
+            provider = FakeProvider(snapshots=[snapshot])
+            engine = FakePaperEngine(open_ids=[2])
+            result = run_worker(
+                provider=provider,
+                store=FakeStore(),
+                paper_engine=engine,
+                paper_engine_enabled=True,
+                stop_event=FakeStopEvent(),
+                status_path=target,
+                poll_interval_seconds=15,
+                max_cycles=1,
+                backup_function=None,
+            )
+
+            self.assertEqual(result, 0)
+            self.assertEqual(provider.last_priority_instrument_ids, [2])
+            self.assertEqual(engine.processed, [1])
+            self.assertEqual(engine.entry_permissions, [False])
+            raw = json.loads(target.read_text(encoding="utf-8"))
+            self.assertEqual(raw["paper_engine_state"], "degraded")
+            self.assertEqual(
+                raw["paper_engine_degraded_reason"],
+                "open_position_market_data_missing",
+            )
+            self.assertEqual(raw["open_position_instruments_missing"], [2])
+            safe = read_perps_worker_status(target)
+            self.assertEqual(safe["open_position_instruments_missing"], [2])
+            self.assertEqual(safe["paper_engine_state"], "degraded")
 
     def test_enabled_paper_engine_degrades_when_no_verified_fee_schedule_is_available(self):
         with tempfile.TemporaryDirectory() as directory:

@@ -982,6 +982,67 @@ def _health_component(
     }
 
 
+def perps_worker_supervision_health(
+    supervisor_worker_state: object,
+    worker_snapshot: dict,
+    now: datetime | None = None,
+) -> dict:
+    """Do not trust a child heartbeat while the supervisor says it is restarting."""
+    current = now or datetime.now(timezone.utc)
+    if current.tzinfo is None or current.utcoffset() is None:
+        raise ValueError("now must be timezone-aware")
+    current = current.astimezone(timezone.utc)
+    heartbeat_age = None
+    try:
+        stamp = datetime.fromisoformat(
+            str(worker_snapshot.get("last_heartbeat_at") or "").replace("Z", "+00:00")
+        )
+        if stamp.tzinfo is not None and stamp.utcoffset() is not None:
+            heartbeat_age = (current - stamp.astimezone(timezone.utc)).total_seconds()
+    except (TypeError, ValueError, OverflowError):
+        heartbeat_age = None
+    try:
+        timeout = int(worker_snapshot.get("heartbeat_timeout_seconds") or 180)
+        if isinstance(worker_snapshot.get("heartbeat_timeout_seconds"), bool) or timeout < 60:
+            raise ValueError("invalid heartbeat timeout")
+    except (TypeError, ValueError, OverflowError):
+        timeout = 180
+    stale_after = max(90, timeout)
+
+    if supervisor_worker_state != "running":
+        status = {
+            "starting": "starting",
+            "restarting": "restarting",
+            "stopped": "stopped",
+            "disabled": "disabled",
+        }.get(str(supervisor_worker_state), "supervisor_unavailable")
+    else:
+        worker_state = worker_snapshot.get("worker_state")
+        if worker_state == "healthy":
+            if heartbeat_age is None:
+                status = "invalid_timestamp"
+            elif heartbeat_age < -2:
+                status = "future_dated"
+            elif heartbeat_age > stale_after:
+                status = "stale"
+            else:
+                status = "healthy"
+        elif worker_state == "degraded":
+            status = "degraded"
+        elif worker_state == "stopped":
+            status = "stopped"
+        else:
+            status = "starting"
+    return {
+        "status": status,
+        "supervisor_worker_state": str(supervisor_worker_state or "unknown"),
+        "heartbeat_age_seconds": (
+            round(max(0.0, heartbeat_age), 1) if heartbeat_age is not None else None
+        ),
+        "stale_after_seconds": stale_after,
+    }
+
+
 def perps_backup_health_component(
     snapshot: dict,
     now: datetime | None = None,
@@ -1395,36 +1456,19 @@ class Handler(BaseHTTPRequestHandler):
                 )
                 if supervisor_snapshot.get("perps_market_worker_enabled") is True:
                     perps_snapshot = read_perps_worker_status(PERPS_MARKET_WORKER_STATUS_FILE)
-                    perps_age = None
-                    perps_status = "starting"
-                    try:
-                        perps_stamp = datetime.fromisoformat(
-                            str(perps_snapshot.get("last_heartbeat_at") or "").replace("Z", "+00:00")
-                        )
-                        if perps_stamp.tzinfo is not None and perps_stamp.utcoffset() is not None:
-                            raw_perps_age = (
-                                datetime.now(timezone.utc) - perps_stamp.astimezone(timezone.utc)
-                            ).total_seconds()
-                            if raw_perps_age < -2:
-                                perps_status = "future_dated"
-                            else:
-                                perps_age = max(0.0, raw_perps_age)
-                    except (TypeError, ValueError, OverflowError):
-                        perps_age = None
-                    stale_after = max(
-                        90,
-                        int(perps_snapshot.get("heartbeat_timeout_seconds") or 180),
+                    perps_supervision = perps_worker_supervision_health(
+                        supervisor_snapshot.get("perps_market_worker_state"),
+                        perps_snapshot,
                     )
-                    if perps_snapshot.get("worker_state") == "healthy" and perps_age is not None:
-                        perps_status = "healthy" if perps_age <= stale_after else "stale"
-                    elif perps_snapshot.get("worker_state") == "degraded":
-                        perps_status = "degraded"
-                    elif perps_snapshot.get("worker_state") == "stopped":
-                        perps_status = "stopped"
+                    perps_status = perps_supervision["status"]
                     perps_component = {
                         "name": "perps_market_data",
                         "status": perps_status,
-                        "worker_running": perps_snapshot.get("worker_state") in {"healthy", "degraded"},
+                        "supervisor_worker_state": perps_supervision["supervisor_worker_state"],
+                        "worker_running": (
+                            perps_supervision["supervisor_worker_state"] == "running"
+                            and perps_snapshot.get("worker_state") in {"healthy", "degraded"}
+                        ),
                         "markets_in_last_snapshot": perps_snapshot.get("markets_in_last_snapshot", 0),
                         "markets_with_verified_fee_schedule": perps_snapshot.get("markets_with_fee_schedule", 0),
                         "fee_coverage_status": (
@@ -1435,8 +1479,8 @@ class Handler(BaseHTTPRequestHandler):
                         ),
                         "last_success_at": perps_snapshot.get("last_success_at"),
                         "last_heartbeat_at": perps_snapshot.get("last_heartbeat_at"),
-                        "seconds_since_heartbeat": round(perps_age, 1) if perps_age is not None else None,
-                        "stale_after_seconds": stale_after,
+                        "seconds_since_heartbeat": perps_supervision["heartbeat_age_seconds"],
+                        "stale_after_seconds": perps_supervision["stale_after_seconds"],
                         "last_error": perps_snapshot.get("last_error"),
                     }
                     payload["components"]["perps_market_data"] = perps_component
@@ -1452,14 +1496,15 @@ class Handler(BaseHTTPRequestHandler):
                         engine_summary = perps_snapshot.get("paper_engine") or {}
                         engine_status = (
                             "halted" if engine_state == "halted"
-                            else "healthy" if engine_state == "healthy"
-                            else "starting" if engine_state == "starting"
+                            else "healthy" if engine_state == "healthy" and perps_status == "healthy"
+                            else perps_status if perps_status in {"starting", "restarting", "stopped"}
                             else "degraded"
                         )
                         payload["components"]["perps_paper_engine"] = {
                             "name": "perps_paper_engine",
                             "status": engine_status,
                             "worker_state": engine_state,
+                            "supervisor_worker_state": perps_supervision["supervisor_worker_state"],
                             "halt_reason": engine_summary.get("halt_reason"),
                             "degraded_reason": perps_snapshot.get("paper_engine_degraded_reason"),
                             "verified_fee_markets": perps_snapshot.get("markets_with_fee_schedule", 0),
@@ -1575,6 +1620,13 @@ class Handler(BaseHTTPRequestHandler):
                 supervisor_snapshot = read_supervisor_status(SUPERVISOR_STATUS_FILE)
                 if supervisor_snapshot.get("perps_market_worker_enabled") is True:
                     worker_snapshot = read_perps_worker_status(PERPS_MARKET_WORKER_STATUS_FILE)
+                    perps_supervision = perps_worker_supervision_health(
+                        supervisor_snapshot.get("perps_market_worker_state"),
+                        worker_snapshot,
+                    )
+                    worker_snapshot["worker_state"] = perps_supervision["status"]
+                    worker_snapshot["supervisor_worker_state"] = perps_supervision["supervisor_worker_state"]
+                    worker_snapshot["seconds_since_heartbeat"] = perps_supervision["heartbeat_age_seconds"]
                 else:
                     worker_snapshot = {
                         "enabled": False,
@@ -1601,6 +1653,14 @@ class Handler(BaseHTTPRequestHandler):
                     engine_summary = worker_snapshot.get("paper_engine") or {}
                     engine_enabled = worker_snapshot.get("paper_engine_enabled") is True
                     engine_state = worker_snapshot.get("paper_engine_state", "unknown")
+                    supervisor_worker_state = supervisor_snapshot.get("perps_market_worker_state")
+                    if supervisor_worker_state != "running":
+                        engine_state = perps_worker_supervision_health(
+                            supervisor_worker_state, worker_snapshot
+                        )["status"]
+                        worker_snapshot["paper_engine_degraded_reason"] = (
+                            "supervisor_worker_" + str(supervisor_worker_state or "unavailable")
+                        )
                 else:
                     worker_snapshot = {
                         "paper_engine_degraded_reason": None,

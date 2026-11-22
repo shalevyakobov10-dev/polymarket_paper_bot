@@ -88,7 +88,7 @@ class PerpsPaperEngine:
         max_data_age_seconds: int = 15,
         max_entry_impact_bps: Any = "50",
         funding_schedule_grace_seconds: int = 60,
-        max_post_funding_mark_delay_seconds: int = 45,
+        max_post_funding_mark_delay_seconds: int = 90,
     ) -> None:
         self.initial_equity = _decimal(initial_equity, "initial_equity", positive=True)
         self.max_position_notional = _decimal(max_position_notional, "max_position_notional", positive=True)

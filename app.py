@@ -1409,7 +1409,7 @@ class Handler(BaseHTTPRequestHandler):
                         perps_age = None
                     stale_after = max(
                         90,
-                        int(perps_snapshot.get("poll_interval_seconds") or 30) * 3,
+                        int(perps_snapshot.get("heartbeat_timeout_seconds") or 180),
                     )
                     if perps_snapshot.get("worker_state") == "healthy" and perps_age is not None:
                         perps_status = "healthy" if perps_age <= stale_after else "stale"

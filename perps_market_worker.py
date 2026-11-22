@@ -140,6 +140,7 @@ def read_perps_worker_status(path: str | Path) -> dict[str, Any]:
             "last_error": str(raw.get("last_error"))[:240] if raw.get("last_error") else None,
             "consecutive_failures": _status_count(raw.get("consecutive_failures", 0), "consecutive_failures"),
             "markets_in_last_snapshot": _status_count(raw.get("markets_in_last_snapshot", 0), "markets_in_last_snapshot"),
+            "markets_with_fee_schedule": _status_count(raw.get("markets_with_fee_schedule", 0), "markets_with_fee_schedule"),
             "snapshots_inserted_total": _status_count(raw.get("snapshots_inserted_total", 0), "snapshots_inserted_total"),
             "history_rows": _status_count(raw.get("history_rows", 0), "history_rows"),
             "poll_interval_seconds": _status_count(raw.get("poll_interval_seconds", 30), "poll_interval_seconds", minimum=1),
@@ -167,7 +168,8 @@ def read_perps_worker_status(path: str | Path) -> dict[str, Any]:
             "schema_version": 1, "enabled": False, "worker_state": "unknown",
             "last_heartbeat_at": None, "last_success_at": None,
             "last_error": "status_file_missing", "consecutive_failures": 0,
-            "markets_in_last_snapshot": 0, "snapshots_inserted_total": 0,
+            "markets_in_last_snapshot": 0, "markets_with_fee_schedule": 0,
+            "snapshots_inserted_total": 0,
             "history_rows": 0, "poll_interval_seconds": None,
             "history_retention_days": None, "expired_rows_pruned_total": 0,
             "paper_engine_enabled": False, "paper_engine_state": "unknown", "paper_engine": None,
@@ -384,6 +386,11 @@ def run_worker(
                 state["last_error"] = None
                 state["consecutive_failures"] = 0
                 state["markets_in_last_snapshot"] = len(snapshots)
+                state["markets_with_fee_schedule"] = sum(
+                    1 for row in snapshots
+                    if isinstance(row.get("fees"), dict)
+                    and row["fees"].get("source") == "public_perps_fee_schedule"
+                )
                 state["snapshots_inserted_total"] += int(recorded["inserted"])
                 state["history_rows"] = int(current_store.count())
                 state["last_heartbeat_at"] = _utc_now()

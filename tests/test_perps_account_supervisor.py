@@ -93,6 +93,7 @@ class PerpsAccountSupervisorTests(unittest.IsolatedAsyncioTestCase):
         self.temp_dir = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp_dir.cleanup)
         self.status_path = Path(self.temp_dir.name) / "account-supervisor.json"
+        self.submission_lock_path = Path(self.temp_dir.name) / "perps-submission.lock"
         self.journal = FakeJournal()
 
     async def test_clean_read_only_preflight_publishes_healthy_status(self):
@@ -101,6 +102,7 @@ class PerpsAccountSupervisorTests(unittest.IsolatedAsyncioTestCase):
             journal=self.journal,
             account_preflight=preflight,
             status_path=self.status_path,
+            submission_lock_path=self.submission_lock_path,
             now_provider=lambda: NOW,
         )
         result = await supervisor.run(max_cycles=1)
@@ -121,6 +123,70 @@ class PerpsAccountSupervisorTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(status["order_submission_allowed"])
         self.assertEqual(status["execution"], "none")
 
+    async def test_account_preflight_runs_inside_the_gateway_exclusive_submission_lock(self):
+        lock_observed = []
+
+        class LockCheckingPreflight(FakePreflight):
+            async def run(inner_self, *, now=None):
+                lock_observed.append(self.submission_lock_path.exists())
+                return await super(LockCheckingPreflight, inner_self).run(now=now)
+
+        preflight = LockCheckingPreflight()
+        supervisor = PerpsAccountSupervisor(
+            journal=self.journal,
+            account_preflight=preflight,
+            status_path=self.status_path,
+            submission_lock_path=self.submission_lock_path,
+            now_provider=lambda: NOW,
+        )
+        await supervisor.run(max_cycles=1)
+
+        self.assertEqual(lock_observed, [True])
+        self.assertFalse(self.submission_lock_path.exists())
+        self.assertEqual(self.journal.calls, 1)
+        self.assertEqual(preflight.calls, 1)
+
+    async def test_existing_or_stale_submission_lock_prevents_preflight_and_recovery(self):
+        self.submission_lock_path.write_text(
+            json.dumps({"token": "operator-inspection-required"}),
+            encoding="utf-8",
+        )
+        preflight = FakePreflight()
+        supervisor = PerpsAccountSupervisor(
+            journal=self.journal,
+            account_preflight=preflight,
+            status_path=self.status_path,
+            submission_lock_path=self.submission_lock_path,
+            now_provider=lambda: NOW,
+        )
+        await supervisor.run(max_cycles=1)
+
+        status = read_perps_account_supervisor_status(self.status_path)
+        self.assertEqual(status["worker_state"], "degraded")
+        self.assertEqual(status["last_error_code"], "submission_lock_unavailable")
+        self.assertEqual(status["blocked_reasons"], ["submission_lock_unavailable"])
+        self.assertFalse(status["recovery_completed"])
+        self.assertEqual(self.journal.calls, 0)
+        self.assertEqual(preflight.calls, 0)
+        self.assertTrue(self.submission_lock_path.exists())
+
+    async def test_report_cannot_claim_pass_when_critical_account_invariants_fail(self):
+        invalid = report()
+        invalid["observations"]["unknown_remote_open_orders"] = 1
+        supervisor = PerpsAccountSupervisor(
+            journal=self.journal,
+            account_preflight=FakePreflight(reports=[invalid]),
+            status_path=self.status_path,
+            submission_lock_path=self.submission_lock_path,
+            now_provider=lambda: NOW,
+        )
+        await supervisor.run(max_cycles=1)
+
+        status = read_perps_account_supervisor_status(self.status_path)
+        self.assertEqual(status["worker_state"], "degraded")
+        self.assertFalse(status["read_only_preflight_passed"])
+        self.assertEqual(status["blocked_reasons"], ["preflight_pass_invariant_violation"])
+
     async def test_blocked_account_preflight_is_degraded_but_not_a_worker_crash(self):
         preflight = FakePreflight(reports=[
             report(passed=False, reasons=["unmanaged_or_mismatched_remote_open_orders"])
@@ -129,6 +195,7 @@ class PerpsAccountSupervisorTests(unittest.IsolatedAsyncioTestCase):
             journal=self.journal,
             account_preflight=preflight,
             status_path=self.status_path,
+            submission_lock_path=self.submission_lock_path,
             now_provider=lambda: NOW,
         )
         await supervisor.run(max_cycles=1)
@@ -154,6 +221,7 @@ class PerpsAccountSupervisorTests(unittest.IsolatedAsyncioTestCase):
             journal=self.journal,
             account_preflight=preflight,
             status_path=self.status_path,
+            submission_lock_path=self.submission_lock_path,
             now_provider=lambda: NOW,
             max_consecutive_failures=1,
         )
@@ -175,6 +243,7 @@ class PerpsAccountSupervisorTests(unittest.IsolatedAsyncioTestCase):
             journal=self.journal,
             account_preflight=HangingPreflight(),
             status_path=self.status_path,
+            submission_lock_path=self.submission_lock_path,
             now_provider=lambda: NOW,
             cycle_timeout_seconds=0.05,
             max_consecutive_failures=1,
@@ -198,6 +267,7 @@ class PerpsAccountSupervisorTests(unittest.IsolatedAsyncioTestCase):
             journal=self.journal,
             account_preflight=preflight,
             status_path=self.status_path,
+            submission_lock_path=self.submission_lock_path,
             now_provider=lambda: NOW,
             max_consecutive_failures=2,
             sleep=fake_sleep,
@@ -238,6 +308,7 @@ class PerpsAccountSupervisorTests(unittest.IsolatedAsyncioTestCase):
                 journal=self.journal,
                 account_preflight=FakePreflight(),
                 status_path=self.status_path,
+            submission_lock_path=self.submission_lock_path,
                 poll_interval_seconds=5,
             )
         with self.assertRaisesRegex(ValueError, "max_consecutive_failures"):
@@ -245,6 +316,7 @@ class PerpsAccountSupervisorTests(unittest.IsolatedAsyncioTestCase):
                 journal=self.journal,
                 account_preflight=FakePreflight(),
                 status_path=self.status_path,
+            submission_lock_path=self.submission_lock_path,
                 max_consecutive_failures=0,
             )
 

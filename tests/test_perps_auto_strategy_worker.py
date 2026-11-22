@@ -56,7 +56,8 @@ class SignalStrategy:
 
     def evaluate(self, history, *, current_snapshot, now):
         self.calls += 1
-        self.decision_bar = int(now.timestamp() // 60 * 60_000)
+        if self.decision_bar is None:
+            self.decision_bar = int(now.timestamp() // 60 * 60_000)
         return {
             "strategy": "test_signal",
             "research_only": True,

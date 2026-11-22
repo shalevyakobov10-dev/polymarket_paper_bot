@@ -54,6 +54,103 @@ def _quantum(decimals: int) -> Decimal:
     return Decimal("1").scaleb(-decimals)
 
 
+def flatten_perps_market_snapshot(
+    snapshot: Mapping[str, Any],
+    *,
+    now: datetime | None = None,
+) -> dict[str, Any]:
+    """Convert the existing public collector's nested schema to paper-engine inputs."""
+    if not isinstance(snapshot, Mapping):
+        raise ValueError("invalid_snapshot")
+    if not all(key in snapshot for key in ("instrument", "ticker", "book")):
+        return dict(snapshot)
+
+    instrument = snapshot.get("instrument")
+    ticker = snapshot.get("ticker")
+    book = snapshot.get("book")
+    if not all(isinstance(row, Mapping) for row in (instrument, ticker, book)):
+        raise ValueError("invalid_nested_perps_snapshot")
+    current = _now(now)
+    instrument_id = int(instrument.get("instrument_id"))
+    if (
+        int(ticker.get("instrument_id")) != instrument_id
+        or int(book.get("instrument_id")) != instrument_id
+    ):
+        raise ValueError("perps_snapshot_instrument_mismatch")
+
+    received_at = _parse_time(str(snapshot.get("received_at", "")))
+    ticker_ms = int(ticker.get("timestamp_ms"))
+    book_ms = int(book.get("timestamp_ms"))
+    if ticker_ms <= 0 or book_ms <= 0:
+        raise ValueError("invalid_perps_exchange_timestamp")
+    ticker_age = (current - datetime.fromtimestamp(ticker_ms / 1000, timezone.utc)).total_seconds()
+    book_age = (current - datetime.fromtimestamp(book_ms / 1000, timezone.utc)).total_seconds()
+    if ticker_age < -2 or book_age < -2:
+        raise ValueError("future_perps_exchange_timestamp")
+
+    best_bid = _d(book.get("best_bid"), "best_bid")
+    best_ask = _d(book.get("best_ask"), "best_ask")
+    if best_bid <= 0 or best_ask <= best_bid:
+        raise ValueError("invalid_perps_best_bid_ask")
+    midpoint = (best_bid + best_ask) / Decimal("2")
+    spread_bps = (best_ask - best_bid) / midpoint * Decimal("10000")
+
+    next_funding_raw = ticker.get("next_funding_ms")
+    funding_available = (
+        isinstance(next_funding_raw, int)
+        and not isinstance(next_funding_raw, bool)
+        and next_funding_raw > 0
+        and bool(str(instrument.get("funding_interval") or "").strip())
+    )
+    close_only = instrument.get("close_only") is True
+    settlement = instrument.get("settlement") is not None
+
+    return {
+        "schema_version": 1,
+        "source": "polymarket_perps_public_rest",
+        "research_only": snapshot.get("research_only") is True,
+        "execution": snapshot.get("execution"),
+        "observed_at": received_at.isoformat(),
+        "instrument_id": instrument_id,
+        "symbol": str(instrument.get("symbol") or ""),
+        "category": str(instrument.get("category") or "unknown"),
+        "base_asset": str(instrument.get("base_asset") or ""),
+        "quote_asset": str(instrument.get("quote_asset") or ""),
+        "close_only": close_only,
+        "settlement": settlement,
+        "entry_eligible": not close_only and not settlement,
+        "funding_metadata_available": funding_available,
+        "funding_interval": str(instrument.get("funding_interval") or ""),
+        "quantity_decimals": int(instrument.get("quantity_decimals", 0)),
+        "price_decimals": int(instrument.get("price_decimals", 0)),
+        "min_notional": instrument.get("min_notional"),
+        "max_market_notional": instrument.get("max_market_notional"),
+        "max_limit_notional": instrument.get("max_limit_notional"),
+        "price_bounds": instrument.get("price_bounds"),
+        "liquidation_fee": instrument.get("liquidation_fee"),
+        "max_leverage": instrument.get("max_leverage"),
+        "isolated_only": instrument.get("isolated_only") is True,
+        "risk_tiers": instrument.get("risk_tiers"),
+        "mark_price": ticker.get("mark_price"),
+        "index_price": ticker.get("index_price"),
+        "last_price": ticker.get("last_price"),
+        "mid_price": ticker.get("mid_price"),
+        "open_interest": ticker.get("open_interest"),
+        "funding_rate": ticker.get("funding_rate", "0"),
+        "next_funding_ms": int(next_funding_raw) if funding_available else 0,
+        "ticker_timestamp_ms": ticker_ms,
+        "book_timestamp_ms": book_ms,
+        "ticker_age_seconds": round(max(0.0, ticker_age), 3),
+        "book_age_seconds": round(max(0.0, book_age), 3),
+        "best_bid": str(best_bid),
+        "best_ask": str(best_ask),
+        "midpoint_from_book": str(midpoint),
+        "spread_bps": str(spread_bps),
+        "bids": book.get("bids"),
+        "asks": book.get("asks"),
+    }
+
+
 def sweep_perps_book(
     snapshot: Mapping[str, Any],
     *,
@@ -316,7 +413,7 @@ class PerpsPaperEngine:
         instrument_id: int,
         snapshot: Mapping[str, Any],
     ) -> None:
-        new_next = int(snapshot["next_funding_ms"])
+        new_next = int(snapshot.get("next_funding_ms") or 0)
         new_rate = _d(snapshot.get("funding_rate", "0"), "funding_rate")
         interval_ms = self._funding_interval_ms(snapshot.get("funding_interval"))
         rows = connection.execute(
@@ -331,7 +428,15 @@ class PerpsPaperEngine:
         for row in rows:
             old_next = int(row["next_funding_ms"])
             status = str(row["funding_status"])
-            if status != "tracking" or new_next <= old_next:
+            if status != "tracking":
+                continue
+            if snapshot.get("funding_metadata_available") is False or new_next <= 0:
+                connection.execute(
+                    "UPDATE perps_paper_trades SET funding_status='gap' WHERE trade_id=?",
+                    (row["trade_id"],),
+                )
+                continue
+            if new_next <= old_next:
                 continue
             if interval_ms is None or abs((new_next - old_next) - interval_ms) > 300_000:
                 connection.execute(
@@ -459,11 +564,17 @@ class PerpsPaperEngine:
     ) -> dict[str, Any]:
         """Open a local paper position only after book-fill and risk validation."""
         current = _now(now)
+        try:
+            snapshot = flatten_perps_market_snapshot(snapshot, now=current)
+        except (ValueError, TypeError, ArithmeticError, KeyError):
+            return {"status": "PAPER_ENTRY_BLOCKED", "reason": "invalid_or_stale_snapshot", "execution": "none"}
         direction = side.strip().upper() if isinstance(side, str) else ""
         if direction not in {"LONG", "SHORT"}:
             return {"status": "PAPER_ENTRY_BLOCKED", "reason": "invalid_side", "execution": "none"}
         try:
             self._validate_snapshot(snapshot, current)
+            if snapshot.get("funding_metadata_available") is False:
+                return {"status": "PAPER_ENTRY_BLOCKED", "reason": "funding_metadata_unavailable", "execution": "none"}
             requested = _d(requested_notional, "requested_notional")
             mark = _d(snapshot["mark_price"], "mark_price")
             quantity_step = _quantum(int(snapshot.get("quantity_decimals", 0)))
@@ -674,6 +785,7 @@ class PerpsPaperEngine:
     ) -> dict[str, Any]:
         current = _now(now)
         try:
+            snapshot = flatten_perps_market_snapshot(snapshot, now=current)
             self._validate_snapshot(snapshot, current, allow_close_only=True)
         except (ValueError, TypeError, ArithmeticError):
             return {"status": "PAPER_EXIT_BLOCKED", "reason": "invalid_or_stale_snapshot", "execution": "none"}
@@ -707,6 +819,7 @@ class PerpsPaperEngine:
         """Persist a snapshot, mark open exposure, book funding, and honor exits."""
         current = _now(now)
         try:
+            snapshot = flatten_perps_market_snapshot(snapshot, now=current)
             # An instrument temporarily marked close-only may still be used to
             # reduce/close an existing position. Do not permit entries here.
             if snapshot.get("research_only") is not True or snapshot.get("execution") != "none":
@@ -739,14 +852,6 @@ class PerpsPaperEngine:
                     connection.commit()
                     return {"status": "PAPER_MARK_RECORDED", "open_position": False, "execution": "none"}
                 row = open_rows[0]
-                if row["funding_status"] == "gap":
-                    connection.commit()
-                    return {
-                        "status": "PAPER_POSITION_FUNDING_GAP",
-                        "trade_id": row["trade_id"],
-                        "new_entries_blocked": True,
-                        "execution": "none",
-                    }
                 mark = _d(snapshot["mark_price"], "mark_price")
                 stop = _d(row["stop_price"], "stop_price")
                 target = _d(row["take_profit_price"], "take_profit_price")
@@ -757,6 +862,14 @@ class PerpsPaperEngine:
                     result = self._close_locked(connection, row, snapshot, reason=reason, now=current)
                     connection.commit()
                     return result
+                if row["funding_status"] == "gap":
+                    connection.commit()
+                    return {
+                        "status": "PAPER_POSITION_FUNDING_GAP",
+                        "trade_id": row["trade_id"],
+                        "new_entries_blocked": True,
+                        "execution": "none",
+                    }
                 connection.commit()
                 return {
                     "status": "PAPER_MARK_RECORDED",

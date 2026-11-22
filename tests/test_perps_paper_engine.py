@@ -104,6 +104,15 @@ class FakeHistory:
     def history(self, instrument_id, limit=100):
         return self.rows[-limit:]
 
+    def funding_rate_at(self, instrument_id, timestamp_ms, *, tolerance_ms=1000):
+        if self.settled_rate is None:
+            return None
+        return {
+            "instrument_id": instrument_id,
+            "timestamp_ms": timestamp_ms,
+            "funding_rate": self.settled_rate,
+        }
+
 
 class PerpsPaperEngineTests(unittest.TestCase):
     def make_engine(self, directory, **kwargs):

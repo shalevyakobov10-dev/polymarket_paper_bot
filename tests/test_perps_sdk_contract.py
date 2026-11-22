@@ -44,6 +44,7 @@ class CompatiblePerpsSession:
     def fetch_orders(self, *, client_order_id=None): pass
     def list_fills(self, *, instrument_id=None, start=None, end=None, sort=None): pass
     def list_funding_payments(self, *, instrument_id=None, start=None, end=None): pass
+    async def close(self): pass
     def place_order(
         self, *, instrument_id, side, quantity, time_in_force, reduce_only=False,
         client_order_id=None,
@@ -103,6 +104,7 @@ class PerpsSdkContractTests(unittest.TestCase):
         self.assertFalse(report["compatible"])
         self.assertIn("fetch_portfolio", report["perps_session_method_failures"])
         self.assertIn("place_order", report["perps_session_method_failures"])
+        self.assertIn("close", report["perps_session_method_failures"])
 
     def test_missing_private_client_construction_hook_fails_closed(self):
         class SecureClientWithoutExistingCredentialConstruction:

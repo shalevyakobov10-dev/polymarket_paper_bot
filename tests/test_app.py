@@ -712,6 +712,59 @@ class ParserTests(unittest.TestCase):
                     thread.join(timeout=2)
                 app.SUPERVISOR_STATUS_FILE = old_path
 
+    def test_service_supervisor_nested_account_status_applies_heartbeat_freshness(self):
+        server = app.ThreadingHTTPServer(("127.0.0.1", 0), app.Handler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        old_supervisor = app.SUPERVISOR_STATUS_FILE
+        old_account = app.PERPS_ACCOUNT_SUPERVISOR_STATUS_FILE
+        with tempfile.TemporaryDirectory() as directory:
+            try:
+                app.SUPERVISOR_STATUS_FILE = Path(directory) / "supervisor.json"
+                account_path = Path(directory) / "account-supervisor.json"
+                old_stamp = (datetime.now(timezone.utc) - timedelta(seconds=120)).isoformat()
+                account_path.write_text(json.dumps({
+                    "schema_version": 1,
+                    "mode": "PERPS_ACCOUNT_READ_ONLY_SUPERVISOR",
+                    "enabled": True,
+                    "worker_state": "healthy",
+                    "last_heartbeat_at": old_stamp,
+                    "last_preflight_at": old_stamp,
+                    "last_error_code": None,
+                    "consecutive_failures": 0,
+                    "recovery_completed": True,
+                    "recovered_interrupted_submissions": 0,
+                    "read_only_preflight_passed": True,
+                    "blocked_reasons": [],
+                    "observations": {
+                        "portfolio_fresh": True,
+                        "auto_cancel_armed": True,
+                        "fee_schedule_fresh": True,
+                        "account_fee_tier": 0,
+                        "margin_available": "100",
+                    },
+                    "poll_interval_seconds": 30,
+                    "cycle_timeout_seconds": 60,
+                }), encoding="utf-8")
+                app.PERPS_ACCOUNT_SUPERVISOR_STATUS_FILE = account_path
+                thread.start()
+                address = f"http://127.0.0.1:{server.server_port}/service-supervisor"
+                with http_urlopen(address, timeout=3) as response:
+                    payload = json.loads(response.read().decode("utf-8"))
+
+                nested = payload["perps_account_supervisor"]
+                self.assertEqual(nested["worker_state"], "stale")
+                self.assertFalse(nested["heartbeat_fresh"])
+                self.assertGreater(nested["heartbeat_age_seconds"], 90)
+                self.assertFalse(nested["order_submission_allowed"])
+                self.assertFalse(nested["live_execution_enabled"])
+            finally:
+                server.shutdown()
+                server.server_close()
+                if thread.is_alive():
+                    thread.join(timeout=2)
+                app.SUPERVISOR_STATUS_FILE = old_supervisor
+                app.PERPS_ACCOUNT_SUPERVISOR_STATUS_FILE = old_account
+
     def test_service_supervisor_endpoint_is_explicit_when_not_supervised(self):
         server = app.ThreadingHTTPServer(("127.0.0.1", 0), app.Handler)
         thread = threading.Thread(target=server.serve_forever, daemon=True)

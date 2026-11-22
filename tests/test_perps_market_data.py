@@ -6,8 +6,10 @@ from perps_market_data import (
     PerpsNoUsableMarkets,
     PerpsPublicMarketDataProvider,
     _normalize_book,
+    _normalize_fee_schedule,
     _normalize_instrument,
     _normalize_ticker,
+    _funding_timestamp_ms,
 )
 
 
@@ -74,6 +76,16 @@ class FakePerpsProvider(PerpsPublicMarketDataProvider):
         self.instruments_payload = instruments
         self.tickers_payload = tickers
         self.books_payload = books
+        self.fees_payload = kwargs.pop("fees_payload", {
+            "fee_schedule": [{
+                "instrument_type": "perpetual", "category": "crypto",
+                "taker_fee_rate": "0.0004", "maker_fee_rate": "0.000125",
+                "tiers": [
+                    {"min_volume_30d": "0", "taker_fee_rate": "0.0004", "maker_fee_rate": "0.000125"},
+                    {"min_volume_30d": "1000000", "taker_fee_rate": "0.0003", "maker_fee_rate": "0.0001"},
+                ],
+            }]
+        })
         self.calls = []
 
     def _get_json(self, path, params=None):
@@ -82,6 +94,16 @@ class FakePerpsProvider(PerpsPublicMarketDataProvider):
             return self.instruments_payload
         if path == "/v1/info/tickers":
             return self.tickers_payload
+        if path == "/v1/info/fees":
+            return self.fees_payload
+        if path == "/v1/info/funding":
+            return {
+                "data": [
+                    {"funding_rate": "0.000125", "timestamp": 1795334400},
+                    {"funding_rate": "-0.00005", "timestamp": 1795338000000},
+                ],
+                "more": False,
+            }
         if path == "/v1/info/book":
             return self.books_payload[params["instrument_id"]]
         raise AssertionError(f"unexpected endpoint {path}")
@@ -226,6 +248,60 @@ class PerpsMarketDataTests(unittest.TestCase):
         self.assertEqual(
             sum(1 for path, _ in provider.calls if path == "/v1/info/book"), 2
         )
+
+    def test_fee_schedule_uses_highest_published_taker_rate(self):
+        fees = _normalize_fee_schedule({
+            "fee_schedule": [{
+                "instrument_type": "perpetual", "category": "crypto",
+                "taker_fee_rate": "0.0004", "maker_fee_rate": "0.0001",
+                "tiers": [{
+                    "min_volume_30d": "1000",
+                    "taker_fee_rate": "0.0003", "maker_fee_rate": "0.00008",
+                }],
+            }]
+        }, NOW)
+        self.assertEqual(fees["crypto"]["taker_fee_rate"], "0.0004")
+        self.assertEqual(fees["crypto"]["maker_fee_rate"], "0.0001")
+        self.assertIn("highest_published_rate", fees["crypto"]["tier_assumption"])
+
+    def test_fee_schedule_rejects_missing_or_invalid_rates(self):
+        with self.assertRaisesRegex(Exception, "missing fee_schedule"):
+            _normalize_fee_schedule({}, NOW)
+        with self.assertRaisesRegex(Exception, "strictly increasing"):
+            _normalize_fee_schedule({"fee_schedule": [{
+                "instrument_type": "perpetual", "category": "crypto",
+                "taker_fee_rate": "0.0004", "maker_fee_rate": "0.0001",
+                "tiers": [
+                    {"min_volume_30d": "10", "taker_fee_rate": "0.0003", "maker_fee_rate": "0.0001"},
+                    {"min_volume_30d": "10", "taker_fee_rate": "0.0002", "maker_fee_rate": "0.0001"},
+                ],
+            }]}, NOW)
+
+    def test_funding_timestamps_accept_documented_seconds_and_sdk_milliseconds(self):
+        self.assertEqual(_funding_timestamp_ms(1795334400), 1795334400000)
+        self.assertEqual(_funding_timestamp_ms(1795334400000), 1795334400000)
+        with self.assertRaisesRegex(ValueError, "Unix seconds or milliseconds"):
+            _funding_timestamp_ms(1234)
+
+    def test_provider_fetches_bounded_public_funding_settlements(self):
+        provider = FakePerpsProvider([instrument()], [ticker()], {7: book()})
+        rows = provider.load_funding_history(
+            7,
+            start_timestamp_ms=1795334400000,
+            end_timestamp_ms=1795338000000,
+        )
+        self.assertEqual(len(rows), 2)
+        self.assertEqual(rows[0]["funding_rate"], "0.000125")
+        self.assertEqual(rows[1]["funding_rate"], "-0.00005")
+        call = [row for row in provider.calls if row[0] == "/v1/info/funding"][0]
+        self.assertEqual(call[1]["instrument_id"], 7)
+        self.assertEqual(call[1]["start_timestamp"], 1795334400)
+
+    def test_ticker_requires_nonempty_symbol(self):
+        invalid = ticker()
+        invalid["symbol"] = " "
+        with self.assertRaisesRegex(ValueError, "symbol is required"):
+            _normalize_ticker(invalid, 7, NOW, 10)
 
     def test_provider_rejects_naive_now(self):
         provider = FakePerpsProvider([instrument()], [ticker()], {7: book()})

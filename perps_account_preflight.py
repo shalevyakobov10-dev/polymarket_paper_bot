@@ -95,7 +95,7 @@ class PerpsAccountPreflight:
         self.portfolio_max_age_seconds = portfolio_max_age_seconds
         self.auto_cancel_min_remaining_seconds = auto_cancel_min_remaining_seconds
         if fee_schedule_provider is not None and not callable(fee_schedule_provider):
-            raise ValueError("fee_schedule_provider must be an async callable")
+            raise ValueError("fee_schedule_provider must be callable")
         if (
             isinstance(fee_schedule_max_age_seconds, bool)
             or not isinstance(fee_schedule_max_age_seconds, int)
@@ -329,13 +329,20 @@ class PerpsAccountPreflight:
                 reasons.append("public_perps_fee_schedule_provider_missing")
             else:
                 try:
-                    pending_fee_snapshot = self.fee_schedule_provider()
-                    if not hasattr(pending_fee_snapshot, "__await__"):
-                        raise TypeError("fee schedule provider must return an awaitable")
-                    fee_snapshot = await asyncio.wait_for(
-                        pending_fee_snapshot,
+                    # Public fee snapshots are synchronous REST reads, while
+                    # injected adapters may already be async. Always invoke a sync
+                    # provider in a worker thread so it cannot stall account checks.
+                    pending_fee_snapshot = await asyncio.wait_for(
+                        asyncio.to_thread(self.fee_schedule_provider),
                         timeout=self.account_read_timeout_seconds,
                     )
+                    if hasattr(pending_fee_snapshot, "__await__"):
+                        fee_snapshot = await asyncio.wait_for(
+                            pending_fee_snapshot,
+                            timeout=self.account_read_timeout_seconds,
+                        )
+                    else:
+                        fee_snapshot = pending_fee_snapshot
                     taker_rate, maker_rate = self._resolve_account_fee_tier(
                         fee_snapshot, fee_tier, current
                     )

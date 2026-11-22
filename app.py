@@ -1018,6 +1018,7 @@ def perps_backup_health_component(
         status = "degraded"
     elif (
         snapshot.get("backup_files_last_run") != 2
+        or not snapshot.get("last_backup_manifest_name")
         or snapshot.get("backup_consecutive_failures", 0) != 0
     ):
         status = "degraded"

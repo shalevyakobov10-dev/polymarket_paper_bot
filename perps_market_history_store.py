@@ -29,6 +29,16 @@ def _finite_decimal(value: Any, field: str, *, positive: bool = False, nonnegati
     return parsed
 
 
+def _aware_iso(value: str | datetime, field: str) -> str:
+    try:
+        parsed = value if isinstance(value, datetime) else datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except (TypeError, ValueError):
+        raise ValueError(f"{field} must be a valid ISO timestamp") from None
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        raise ValueError(f"{field} must be timezone-aware")
+    return parsed.astimezone(timezone.utc).isoformat()
+
+
 class PerpsMarketHistoryStore:
     """Persist validated public Perps snapshots without storing account data."""
 
@@ -221,6 +231,50 @@ class PerpsMarketHistoryStore:
             "execution": "none",
         }
 
+    @staticmethod
+    def _decode_snapshot_rows(rows: Any) -> list[dict[str, Any]]:
+        result = []
+        for row in rows:
+            item = dict(row)
+            item["bids"] = json.loads(item.pop("bids_json"))
+            item["asks"] = json.loads(item.pop("asks_json"))
+            item["instrument"] = json.loads(item.pop("instrument_json"))
+            item["ticker"] = json.loads(item.pop("ticker_json"))
+            item["fees"] = json.loads(item.pop("fees_json"))
+            result.append(item)
+        return result
+
+    def snapshots(
+        self,
+        *,
+        start_received_at: str | datetime | None = None,
+        end_received_at: str | datetime | None = None,
+        limit: int = 10_000,
+    ) -> list[dict[str, Any]]:
+        """Return a bounded chronological multi-instrument replay window."""
+        if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 100_000:
+            raise ValueError("limit must be an integer between 1 and 100000")
+        start = _aware_iso(start_received_at, "start_received_at") if start_received_at is not None else None
+        end = _aware_iso(end_received_at, "end_received_at") if end_received_at is not None else None
+        if start is not None and end is not None and start > end:
+            raise ValueError("start_received_at must not exceed end_received_at")
+        clauses: list[str] = []
+        params: list[Any] = []
+        if start is not None:
+            clauses.append("received_at >= ?")
+            params.append(start)
+        if end is not None:
+            clauses.append("received_at <= ?")
+            params.append(end)
+        where = " WHERE " + " AND ".join(clauses) if clauses else ""
+        rows = self.db.execute(
+            f"SELECT * FROM perps_market_snapshots{where} ORDER BY received_at ASC, snapshot_id ASC LIMIT ?",
+            (*params, limit + 1),
+        ).fetchall()
+        if len(rows) > limit:
+            raise ValueError(f"replay window exceeds the {limit}-snapshot safety limit; narrow the time range")
+        return self._decode_snapshot_rows(rows)
+
     def latest(self, limit: int = 50) -> list[dict[str, Any]]:
         bounded = max(1, min(500, int(limit)))
         rows = self.db.execute(
@@ -244,11 +298,19 @@ class PerpsMarketHistoryStore:
             result.append(item)
         return result
 
-    def history(self, instrument_id: int, limit: int = 100) -> list[dict[str, Any]]:
+    def history(
+        self,
+        instrument_id: int,
+        limit: int = 100,
+        *,
+        as_of_received_at: str | datetime | None = None,
+    ) -> list[dict[str, Any]]:
         """Return bounded, chronological snapshots for one instrument.
 
-        The newest rows are selected first so a bounded query still preserves
-        the requested most recent window, then returned in ascending time order.
+        The newest eligible rows are selected first so a bounded query still
+        preserves the requested most recent window, then returned in ascending
+        time order. When supplied, as_of_received_at is applied in SQL before
+        LIMIT, preventing later snapshots from leaking into historical decisions.
         """
         if isinstance(instrument_id, bool) or not isinstance(instrument_id, int) or instrument_id < 0:
             raise ValueError("instrument_id must be a nonnegative integer")
@@ -258,26 +320,29 @@ class PerpsMarketHistoryStore:
             bounded = max(1, min(5000, int(limit)))
         except (TypeError, ValueError, OverflowError):
             raise ValueError("limit must be an integer") from None
-        rows = self.db.execute(
-            """
-            SELECT * FROM perps_market_snapshots
-            WHERE instrument_id = ?
-            ORDER BY book_timestamp_ms DESC, snapshot_id DESC
-            LIMIT ?
-            """,
-            (instrument_id, bounded),
-        ).fetchall()
-        result = []
-        for row in rows:
-            item = dict(row)
-            item["bids"] = json.loads(item.pop("bids_json"))
-            item["asks"] = json.loads(item.pop("asks_json"))
-            item["instrument"] = json.loads(item.pop("instrument_json"))
-            item["ticker"] = json.loads(item.pop("ticker_json"))
-            item["fees"] = json.loads(item.pop("fees_json"))
-            result.append(item)
-        result.reverse()
-        return result
+        as_of = _aware_iso(as_of_received_at, "as_of_received_at") if as_of_received_at is not None else None
+        if as_of is None:
+            rows = self.db.execute(
+                """
+                SELECT * FROM perps_market_snapshots
+                WHERE instrument_id = ?
+                ORDER BY book_timestamp_ms DESC, snapshot_id DESC
+                LIMIT ?
+                """,
+                (instrument_id, bounded),
+            ).fetchall()
+        else:
+            rows = self.db.execute(
+                """
+                SELECT * FROM perps_market_snapshots
+                WHERE instrument_id = ? AND received_at <= ?
+                ORDER BY book_timestamp_ms DESC, snapshot_id DESC
+                LIMIT ?
+                """,
+                (instrument_id, as_of, bounded),
+            ).fetchall()
+        rows.reverse()
+        return self._decode_snapshot_rows(rows)
 
 
     def record_funding_history(
@@ -329,6 +394,7 @@ class PerpsMarketHistoryStore:
         timestamp_ms: int,
         *,
         tolerance_ms: int = 1000,
+        as_of_received_at: str | datetime | None = None,
     ) -> dict[str, Any] | None:
         """Return one unambiguous published settlement nearest the scheduled time."""
         if isinstance(instrument_id, bool) or not isinstance(instrument_id, int) or instrument_id < 0:
@@ -337,12 +403,22 @@ class PerpsMarketHistoryStore:
             raise ValueError("timestamp_ms must be a positive integer")
         if isinstance(tolerance_ms, bool) or not isinstance(tolerance_ms, int) or not 0 <= tolerance_ms <= 5000:
             raise ValueError("tolerance_ms must be between 0 and 5000")
-        rows = self.db.execute(
-            """SELECT funding_timestamp_ms, funding_rate FROM perps_funding_history
-               WHERE instrument_id=? AND funding_timestamp_ms BETWEEN ? AND ?
-               ORDER BY ABS(funding_timestamp_ms - ?) LIMIT 2""",
-            (instrument_id, timestamp_ms - tolerance_ms, timestamp_ms + tolerance_ms, timestamp_ms),
-        ).fetchall()
+        as_of = _aware_iso(as_of_received_at, "as_of_received_at") if as_of_received_at is not None else None
+        if as_of is None:
+            rows = self.db.execute(
+                """SELECT funding_timestamp_ms, funding_rate FROM perps_funding_history
+                   WHERE instrument_id=? AND funding_timestamp_ms BETWEEN ? AND ?
+                   ORDER BY ABS(funding_timestamp_ms - ?) LIMIT 2""",
+                (instrument_id, timestamp_ms - tolerance_ms, timestamp_ms + tolerance_ms, timestamp_ms),
+            ).fetchall()
+        else:
+            rows = self.db.execute(
+                """SELECT funding_timestamp_ms, funding_rate FROM perps_funding_history
+                   WHERE instrument_id=? AND funding_timestamp_ms BETWEEN ? AND ?
+                     AND received_at <= ?
+                   ORDER BY ABS(funding_timestamp_ms - ?) LIMIT 2""",
+                (instrument_id, timestamp_ms - tolerance_ms, timestamp_ms + tolerance_ms, as_of, timestamp_ms),
+            ).fetchall()
         if len(rows) != 1:
             return None
         return {

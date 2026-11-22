@@ -170,6 +170,8 @@ class PerpsPaperEngine:
                 opened_at TEXT NOT NULL,
                 status TEXT NOT NULL CHECK(status IN ('OPEN','CLOSED','LIQUIDATED')),
                 close_reason TEXT,
+                pending_exit_reason TEXT,
+                pending_exit_liquidated INTEGER NOT NULL DEFAULT 0,
                 exit_price TEXT,
                 gross_pnl TEXT NOT NULL DEFAULT '0',
                 net_pnl TEXT NOT NULL DEFAULT '0',
@@ -211,6 +213,14 @@ class PerpsPaperEngine:
             self.db.execute(
                 "UPDATE perps_paper_positions SET liquidation_fee_rate=? WHERE liquidation_fee_rate='0'",
                 (str(self.liquidation_fee_rate),),
+            )
+        if "pending_exit_reason" not in position_columns:
+            self.db.execute(
+                "ALTER TABLE perps_paper_positions ADD COLUMN pending_exit_reason TEXT"
+            )
+        if "pending_exit_liquidated" not in position_columns:
+            self.db.execute(
+                "ALTER TABLE perps_paper_positions ADD COLUMN pending_exit_liquidated INTEGER NOT NULL DEFAULT 0"
             )
         self.db.execute(
             """
@@ -478,8 +488,16 @@ class PerpsPaperEngine:
                 "side": side,
                 "quantity": str(quantity),
                 "liquidation": liquidated,
-                "detail": "visible order-book depth could not absorb the full position",
+                "detail": "insufficient visible order-book depth could not absorb the full position",
             })
+            self.db.execute(
+                """
+                UPDATE perps_paper_positions
+                SET pending_exit_reason=?, pending_exit_liquidated=?
+                WHERE position_id=? AND status='OPEN'
+                """,
+                (reason, int(liquidated), position["position_id"]),
+            )
             return False
         exit_price, exit_notional = fill
         entry_price = Decimal(position["entry_price"])
@@ -517,7 +535,8 @@ class PerpsPaperEngine:
         self.db.execute(
             """
             UPDATE perps_paper_positions
-            SET status=?, close_reason=?, exit_price=?, gross_pnl=?, net_pnl=?, closed_at=?, last_mark=?
+            SET status=?, close_reason=?, pending_exit_reason=NULL,
+                pending_exit_liquidated=0, exit_price=?, gross_pnl=?, net_pnl=?, closed_at=?, last_mark=?
             WHERE position_id=?
             """,
             (
@@ -658,7 +677,8 @@ class PerpsPaperEngine:
         if desired_notional <= ZERO:
             self._event(snapshot_key, instrument_id, "ENTRY_BLOCKED", now, {"reason": "total_exposure_limit"})
             return
-        quantity = _quantize_down(desired_notional / mark, decimals)
+        execution_reference = ask if side == "LONG" else bid
+        quantity = _quantize_down(desired_notional / execution_reference, decimals)
         if quantity <= ZERO:
             self._event(snapshot_key, instrument_id, "ENTRY_BLOCKED", now, {"reason": "quantity_below_precision"})
             return
@@ -684,6 +704,7 @@ class PerpsPaperEngine:
             entry_notional < min_notional
             or entry_notional > max_market_notional
             or entry_notional > self.max_position_notional
+            or entry_notional > desired_notional
         ):
             self._event(snapshot_key, instrument_id, "ENTRY_BLOCKED", now, {
                 "reason": "instrument_or_position_notional_constraint",
@@ -691,6 +712,7 @@ class PerpsPaperEngine:
                 "min_notional": str(min_notional),
                 "max_market_notional": str(max_market_notional),
                 "max_position_notional": str(self.max_position_notional),
+                "risk_budget_notional": str(desired_notional),
             })
             return
         tier_max = self._tier_leverage(instrument, entry_notional)
@@ -840,24 +862,37 @@ class PerpsPaperEngine:
                 ).fetchone()
                 quantity = Decimal(current["quantity"])
                 notional = quantity * mark
-                maintenance_rate = Decimal("0.5") / Decimal(instrument["max_leverage"])
+                maintenance_rate = Decimal("0.5") / Decimal(current["maintenance_leverage"])
                 maintenance = notional * maintenance_rate
                 position_equity = Decimal(current["margin_balance"]) + self._unrealized(current, mark)
                 margin_ratio = position_equity / maintenance if maintenance > ZERO else Decimal("0")
-                liquidation = margin_ratio < ONE
-                reason = None
-                if liquidation:
-                    reason = "maintenance_margin_breached"
-                elif instrument.get("close_only") is True:
-                    reason = "instrument_close_only_exit_required"
-                elif current["side"] == "LONG" and mark <= Decimal(current["stop_price"]):
-                    reason = "stop_loss"
-                elif current["side"] == "SHORT" and mark >= Decimal(current["stop_price"]):
-                    reason = "stop_loss"
-                elif current["side"] == "LONG" and mark >= Decimal(current["take_profit_price"]):
-                    reason = "take_profit"
-                elif current["side"] == "SHORT" and mark <= Decimal(current["take_profit_price"]):
-                    reason = "take_profit"
+
+                # Exit triggers are latched durably. A stop or liquidation that
+                # cannot consume the current book must not disappear on recovery.
+                reason = current["pending_exit_reason"]
+                liquidation = bool(current["pending_exit_liquidated"])
+                if reason is None:
+                    if margin_ratio < ONE:
+                        reason, liquidation = "maintenance_margin_breached", True
+                    elif instrument.get("close_only") is True:
+                        reason = "instrument_close_only_exit_required"
+                    elif current["side"] == "LONG" and mark <= Decimal(current["stop_price"]):
+                        reason = "stop_loss"
+                    elif current["side"] == "SHORT" and mark >= Decimal(current["stop_price"]):
+                        reason = "stop_loss"
+                    elif current["side"] == "LONG" and mark >= Decimal(current["take_profit_price"]):
+                        reason = "take_profit"
+                    elif current["side"] == "SHORT" and mark <= Decimal(current["take_profit_price"]):
+                        reason = "take_profit"
+                    if reason:
+                        self.db.execute(
+                            """
+                            UPDATE perps_paper_positions
+                            SET pending_exit_reason=?, pending_exit_liquidated=?
+                            WHERE position_id=? AND status='OPEN'
+                            """,
+                            (reason, int(liquidation), current["position_id"]),
+                        )
                 if reason:
                     fresh_position = self.db.execute(
                         "SELECT * FROM perps_paper_positions WHERE position_id=?",
@@ -872,8 +907,14 @@ class PerpsPaperEngine:
                 "SELECT 1 FROM perps_paper_positions WHERE instrument_id=? AND status='OPEN' LIMIT 1",
                 (instrument_id,),
             ).fetchone()
-            if not had_open_position and not open_for_market and instrument.get("close_only") is not True:
-                self._try_open(snapshot, history_store, captured_now, snapshot_key)
+            if not had_open_position and not open_for_market:
+                if instrument.get("close_only") is True:
+                    self._event(
+                        snapshot_key, instrument_id, "ENTRY_BLOCKED", captured_now,
+                        {"reason": "instrument_close_only"},
+                    )
+                else:
+                    self._try_open(snapshot, history_store, captured_now, snapshot_key)
             self._refresh_account(captured_now)
             return self.summary()
 
@@ -922,6 +963,10 @@ class PerpsPaperEngine:
             events = self.db.execute(
                 "SELECT event_type, COUNT(*) AS count FROM perps_paper_events GROUP BY event_type"
             ).fetchall()
+            pending_exit_count = self.db.execute(
+                "SELECT COUNT(*) FROM perps_paper_positions "
+                "WHERE status='OPEN' AND pending_exit_reason IS NOT NULL"
+            ).fetchone()[0]
             return {
                 "mode": "POLYMARKET_PERPS_ISOLATED_MARGIN_PAPER",
                 "enabled": True,
@@ -932,6 +977,7 @@ class PerpsPaperEngine:
                 "isolated_margin_reserved": str(margin),
                 "unrealized_pnl": str(unrealized),
                 "open_positions": len(positions),
+                "pending_exit_positions": int(pending_exit_count),
                 "closed_positions": closed_count,
                 "closed_net_pnl": str(closed_net_pnl),
                 "halted": bool(account["halted"]),

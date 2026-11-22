@@ -173,6 +173,14 @@ class PerpsLiveExecutionGatewayTests(unittest.IsolatedAsyncioTestCase):
     def risk_decision(self, **overrides):
         result = {
             "approved": True,
+            "risk_approval_id": "approval-1",
+            "instrument_id": 17,
+            "side": "buy",
+            "position_intent": "open_long",
+            "time_in_force": "ioc",
+            "quantity": "0.01",
+            "limit_price": "2000",
+            "order_notional_usd": "20",
             "captured_at": NOW.isoformat(),
             "max_notional_usd": "25",
             "required_initial_margin_usd": "12.5",
@@ -250,6 +258,33 @@ class PerpsLiveExecutionGatewayTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(denied["reason_code"], "independent_risk_decision_not_approved")
         invalid = await self.submit(risk_decision=self.risk_decision(required_initial_margin_usd=None))
         self.assertEqual(invalid["reason_code"], "risk_snapshot_missing_or_invalid")
+
+    async def test_risk_approval_is_bound_to_the_exact_order_intent(self):
+        cases = (
+            ({"risk_approval_id": None}, "risk_approval_id_missing"),
+            ({"instrument_id": 18}, "risk_approval_instrument_mismatch"),
+            ({"side": "sell"}, "risk_approval_side_mismatch"),
+            ({"position_intent": "open_short"}, "risk_approval_position_intent_mismatch"),
+            ({"time_in_force": "fok"}, "risk_approval_time_in_force_mismatch"),
+            ({"quantity": "0.02"}, "risk_approval_quantity_mismatch"),
+            ({"limit_price": "2001"}, "risk_approval_limit_price_mismatch"),
+            ({"order_notional_usd": "19"}, "risk_approval_notional_mismatch"),
+            ({"quantity": "not-a-number"}, "risk_approval_order_binding_invalid"),
+        )
+        for index, (changes, expected_reason) in enumerate(cases):
+            with self.subTest(changes=changes):
+                client_id = format(index + 1, "032x")
+                result = await self.submit(
+                    risk_decision=self.risk_decision(**changes),
+                    client_order_id=client_id,
+                )
+                self.assertEqual(result["state"], "blocked")
+                self.assertEqual(result["reason_code"], expected_reason)
+                self.assertFalse(result["order_placement_attempted"])
+                self.assertIsNone(self.journal.get_intent(client_id))
+        self.assertEqual(self.guard.calls, 0)
+        self.assertEqual(self.preflight.calls, 0)
+        self.assertEqual(self.session.place_calls, [])
 
     async def test_risk_snapshot_is_rechecked_after_account_network_reads(self):
         gateway = self.gateway(

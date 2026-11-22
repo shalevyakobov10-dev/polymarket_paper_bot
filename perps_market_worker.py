@@ -95,7 +95,9 @@ def read_perps_worker_status(path: str | Path) -> dict[str, Any]:
             "paper_closed_trades": _status_count(raw.get("paper_closed_trades", 0), "paper_closed_trades"),
             "paper_closed_last_cycle": _status_count(raw.get("paper_closed_last_cycle", 0), "paper_closed_last_cycle"),
             "paper_funding_gaps_last_cycle": _status_count(raw.get("paper_funding_gaps_last_cycle", 0), "paper_funding_gaps_last_cycle"),
+            "paper_exit_blocks_last_cycle": _status_count(raw.get("paper_exit_blocks_last_cycle", 0), "paper_exit_blocks_last_cycle"),
             "paper_snapshot_rejections_last_cycle": _status_count(raw.get("paper_snapshot_rejections_last_cycle", 0), "paper_snapshot_rejections_last_cycle"),
+            "paper_strategy_status": "not_configured",
             "paper_cash_balance": str(raw.get("paper_cash_balance"))[:80] if raw.get("paper_cash_balance") is not None else None,
             "paper_equity": str(raw.get("paper_equity"))[:80] if raw.get("paper_equity") is not None else None,
             "paper_daily_loss": str(raw.get("paper_daily_loss"))[:80] if raw.get("paper_daily_loss") is not None else None,
@@ -117,7 +119,8 @@ def read_perps_worker_status(path: str | Path) -> dict[str, Any]:
             "paper_engine_enabled": False, "paper_worker_state": "disabled",
             "paper_open_positions": 0, "paper_closed_trades": 0,
             "paper_closed_last_cycle": 0, "paper_funding_gaps_last_cycle": 0,
-            "paper_snapshot_rejections_last_cycle": 0,
+            "paper_exit_blocks_last_cycle": 0, "paper_snapshot_rejections_last_cycle": 0,
+            "paper_strategy_status": "not_configured",
             "paper_cash_balance": None, "paper_equity": None, "paper_daily_loss": None,
             "backup_at": None, "backup_error_type": None,
             "research_only": True, "live_execution_enabled": False, "execution": "none",
@@ -133,7 +136,8 @@ def read_perps_worker_status(path: str | Path) -> dict[str, Any]:
             "paper_engine_enabled": False, "paper_worker_state": "disabled",
             "paper_open_positions": 0, "paper_closed_trades": 0,
             "paper_closed_last_cycle": 0, "paper_funding_gaps_last_cycle": 0,
-            "paper_snapshot_rejections_last_cycle": 0,
+            "paper_exit_blocks_last_cycle": 0, "paper_snapshot_rejections_last_cycle": 0,
+            "paper_strategy_status": "not_configured",
             "paper_cash_balance": None, "paper_equity": None, "paper_daily_loss": None,
             "backup_at": None, "backup_error_type": None,
             "research_only": True, "live_execution_enabled": False, "execution": "none",
@@ -149,6 +153,7 @@ def run_worker(
     poll_interval_seconds: int | None = None,
     history_retention_days: int | None = None,
     max_cycles: int | None = None,
+    max_consecutive_failures: int = 8,
     paper_engine: Any | None = None,
     paper_engine_factory: Any | None = None,
     paper_engine_enabled: bool | None = None,
@@ -169,6 +174,8 @@ def run_worker(
     )
     if not 1 <= retention_days <= 365:
         raise ValueError("history_retention_days must be between 1 and 365")
+    if isinstance(max_consecutive_failures, bool) or not isinstance(max_consecutive_failures, int) or not 1 <= max_consecutive_failures <= 50:
+        raise ValueError("max_consecutive_failures must be between 1 and 50")
     current_provider = provider or PerpsPublicMarketDataProvider(
         market_limit=_positive_int_env("PERPS_MARKET_LIMIT", 10, 1, 50),
         max_age_seconds=10.0,
@@ -230,7 +237,9 @@ def run_worker(
         "paper_closed_trades": 0,
         "paper_closed_last_cycle": 0,
         "paper_funding_gaps_last_cycle": 0,
+        "paper_exit_blocks_last_cycle": 0,
         "paper_snapshot_rejections_last_cycle": 0,
+        "paper_strategy_status": "not_configured",
         "paper_cash_balance": None,
         "paper_equity": None,
         "paper_daily_loss": None,
@@ -240,6 +249,8 @@ def run_worker(
     }
     cycles = 0
     last_backup_monotonic: float | None = None
+    next_backup_attempt_monotonic = 0.0
+    backup_failures = 0
     last_prune_monotonic: float | None = None
     try:
         _write_status(status_file, state)
@@ -255,6 +266,7 @@ def run_worker(
 
                 paper_closed = 0
                 paper_funding_gaps = 0
+                paper_exit_blocks = 0
                 paper_rejections = 0
                 paper_metrics = None
                 if current_paper_engine is not None:
@@ -264,6 +276,8 @@ def run_worker(
                             paper_closed += 1
                         elif outcome.get("status") == "PAPER_POSITION_FUNDING_GAP":
                             paper_funding_gaps += 1
+                        elif outcome.get("status") == "PAPER_EXIT_BLOCKED":
+                            paper_exit_blocks += 1
                         elif outcome.get("status") == "PAPER_SNAPSHOT_REJECTED":
                             paper_rejections += 1
                     paper_metrics = current_paper_engine.account_metrics()
@@ -284,7 +298,7 @@ def run_worker(
                     state["expired_rows_pruned_total"] += deleted
                     state["history_rows"] = int(pruned.get("remaining", current_store.count()))
                     last_prune_monotonic = monotonic_now
-                paper_warning = bool(paper_funding_gaps or paper_rejections)
+                paper_warning = bool(paper_funding_gaps or paper_exit_blocks or paper_rejections)
                 if current_paper_engine is not None and paper_metrics is not None:
                     paper_status = current_paper_engine.status()
                     state.update({
@@ -293,7 +307,9 @@ def run_worker(
                         "paper_closed_trades": int(paper_status.get("closed_trades") or 0),
                         "paper_closed_last_cycle": paper_closed,
                         "paper_funding_gaps_last_cycle": paper_funding_gaps,
+                        "paper_exit_blocks_last_cycle": paper_exit_blocks,
                         "paper_snapshot_rejections_last_cycle": paper_rejections,
+                        "paper_strategy_status": "not_configured",
                         "paper_cash_balance": str(paper_metrics.get("cash_balance")),
                         "paper_equity": str(paper_metrics.get("equity")),
                         "paper_daily_loss": str(paper_metrics.get("daily_loss")),
@@ -309,10 +325,11 @@ def run_worker(
                 state["history_rows"] = int(current_store.count())
                 state["last_heartbeat_at"] = _utc_now()
 
-                if backup_function is not None and (
+                backup_due = (
                     last_backup_monotonic is None
                     or monotonic_now - last_backup_monotonic >= interval_backup * 3600
-                ):
+                )
+                if backup_function is not None and backup_due and monotonic_now >= next_backup_attempt_monotonic:
                     backup_sources = []
                     store_path = getattr(current_store, "path", None)
                     if store_path is not None and Path(store_path).exists():
@@ -330,10 +347,16 @@ def run_worker(
                                 raise RuntimeError("perps_backup_incomplete")
                             state["backup_at"] = str(backup_result.get("created_at") or _utc_now())
                             state["backup_error_type"] = None
+                            backup_failures = 0
                             last_backup_monotonic = monotonic_now
+                            next_backup_attempt_monotonic = monotonic_now
                         except Exception as exc:
+                            backup_failures += 1
                             state["backup_error_type"] = type(exc).__name__[:80]
                             state["worker_state"] = "degraded"
+                            next_backup_attempt_monotonic = monotonic_now + min(
+                                3600.0, 60.0 * (2 ** min(backup_failures - 1, 6))
+                            )
                 _write_status(status_file, state)
                 cycles += 1
                 if max_cycles is not None and cycles >= max_cycles:
@@ -348,7 +371,7 @@ def run_worker(
                 state["consecutive_failures"] = failures
                 state["last_heartbeat_at"] = _utc_now()
                 _write_status(status_file, state)
-                if max_cycles is not None:
+                if max_cycles is not None or failures >= max_consecutive_failures:
                     return 1
                 if stopping.wait(delay):
                     break

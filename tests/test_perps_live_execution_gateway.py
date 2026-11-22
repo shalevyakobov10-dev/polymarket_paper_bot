@@ -95,6 +95,10 @@ class FakePreflight:
             "observations": {
                 "margin_available": "100",
                 "portfolio_fresh": True,
+                "fee_schedule_fresh": True,
+                "account_fee_tier": 0,
+                "effective_taker_fee_rate": "0.0005",
+                "effective_maker_fee_rate": "0.0002",
             },
             "order_placement_authorized": False,
             "execution": "none",
@@ -170,6 +174,7 @@ class PerpsLiveExecutionGatewayTests(unittest.IsolatedAsyncioTestCase):
             "approved": True,
             "max_notional_usd": "25",
             "required_initial_margin_usd": "12.5",
+            "max_round_trip_fee_usd": "0.02",
             "risk_snapshot_id": "risk-snapshot-1",
             "strategy_signal_id": "signal-1",
         }
@@ -252,6 +257,28 @@ class PerpsLiveExecutionGatewayTests(unittest.IsolatedAsyncioTestCase):
         self.preflight.report["read_only_preflight_passed"] = False
         blocked_account = await self.submit(client_order_id="b" * 32)
         self.assertEqual(blocked_account["reason_code"], "account_preflight_failed")
+        self.assertEqual(self.session.place_calls, [])
+
+    async def test_current_account_fee_tier_must_be_verified_before_submit(self):
+        self.preflight.report["observations"]["fee_schedule_fresh"] = False
+        result = await self.submit()
+        self.assertEqual(result["reason_code"], "account_fee_schedule_not_fresh_or_verified")
+        self.assertEqual(self.session.place_calls, [])
+
+    async def test_risk_fee_budget_must_cover_current_round_trip_taker_fee(self):
+        result = await self.submit(
+            risk_decision=self.risk_decision(max_round_trip_fee_usd="0.0199"),
+        )
+        self.assertEqual(result["reason_code"], "risk_fee_budget_below_current_taker_fee_estimate")
+        self.assertEqual(self.session.place_calls, [])
+
+    async def test_entry_fee_is_reserved_in_available_margin_check(self):
+        self.preflight.report["observations"]["margin_available"] = "12.509"
+        result = await self.submit()
+        self.assertEqual(
+            result["reason_code"],
+            "insufficient_available_initial_margin_and_entry_fee",
+        )
         self.assertEqual(self.session.place_calls, [])
 
     async def test_required_initial_margin_must_fit_account_available_margin(self):

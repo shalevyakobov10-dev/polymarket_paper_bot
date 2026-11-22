@@ -236,7 +236,7 @@ class SupervisorTests(unittest.TestCase):
                 2.0,
             )
             path.write_text(
-                '{"last_heartbeat_at":"2026-11-22T07:59:49+00:00"}',
+                '{"last_heartbeat_at":"2026-11-22T07:59:47+00:00"}',
                 encoding="utf-8",
             )
             # A timestamp older than this process launch is not inherited as fresh.

@@ -92,6 +92,7 @@ class PerpsSdkReconcilerTests(unittest.IsolatedAsyncioTestCase):
             status=status,
             client_order_id=client_order_id or self.client_id,
             created_at=datetime(2026, 11, 22, 8, 0, tzinfo=timezone.utc),
+            updated_at=datetime(2026, 11, 22, 8, 1, tzinfo=timezone.utc),
         )
 
     def fill(self, *, order_id=123, quantity="1", price="2500", instrument_id=17):
@@ -193,6 +194,31 @@ class PerpsSdkReconcilerTests(unittest.IsolatedAsyncioTestCase):
         state = await self.reconciler.reconcile(self.client_id)
         self.assertEqual(state["status"], "submission_unknown")
         self.assertEqual(state["last_reason_code"], "duplicate_client_order_id_results")
+
+    async def test_duplicate_and_lookup_error_statuses_require_manual_review(self):
+        self.prepare_pending()
+        for remote_status in ("duplicate_order", "order_not_found", "order_already_terminal"):
+            with self.subTest(remote_status=remote_status):
+                self.reconciler_session.orders[self.client_id] = [
+                    self.order(status=remote_status)
+                ]
+                # Re-create the intent after the prior subtest's transition.
+                if remote_status != "duplicate_order":
+                    self.journal.close()
+                    self.journal = PerpsOrderJournal(
+                        Path(self.temp_dir.name) / f"{remote_status}.sqlite3"
+                    )
+                    self.reconciler.journal = self.journal
+                    self.client_id = "b" * 32 if remote_status == "order_not_found" else "c" * 32
+                    self.prepare_pending()
+                    self.reconciler_session.orders[self.client_id] = [
+                        self.order(
+                            client_order_id=self.client_id,
+                            status=remote_status,
+                        )
+                    ]
+                state = await self.reconciler.reconcile(self.client_id)
+                self.assertEqual(state["status"], "manual_review")
 
     async def test_unrecognized_sdk_status_moves_order_to_manual_review(self):
         self.prepare_pending()

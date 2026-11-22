@@ -12,6 +12,7 @@ import logging
 import math
 import os
 import signal
+import stat
 import subprocess
 import sys
 import threading
@@ -323,8 +324,8 @@ def build_supervisor_config(
             raise ValueError("Perps account supervisor secret file must be a regular non-symlink file")
         if secrets_stat.st_size <= 0 or secrets_stat.st_size > 16 * 1024:
             raise ValueError("Perps account supervisor secret file has invalid size")
-        permissions = secrets_stat.st_mode & 0o777
-        if permissions & ~0o640 or not permissions & 0o400:
+        permissions = stat.S_IMODE(secrets_stat.st_mode)
+        if permissions not in {0o400, 0o600}:
             raise ValueError("Perps account supervisor secret file permissions are unsafe")
 
         account_poll = _bounded_integer(

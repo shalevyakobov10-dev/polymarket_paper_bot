@@ -168,6 +168,7 @@ class SupervisorTests(unittest.TestCase):
         config = build_supervisor_config(
             {
                 "ENABLE_PERPS_MARKET_DATA_WORKER": "true",
+                "ENABLE_PERPS_PAPER_ENGINE": "true",
                 "DATA_DIR": "/persist/data",
                 "DRY_RUN": "false",
                 "LIVE_EXECUTION_ENABLED": "true",
@@ -193,6 +194,22 @@ class SupervisorTests(unittest.TestCase):
         )
         self.assertEqual(config.perps_worker_env["PERPS_POLL_INTERVAL_SECONDS"], "45")
         self.assertEqual(config.perps_worker_env["PERPS_MARKET_LIMIT"], "8")
+        self.assertEqual(config.perps_worker_env["ENABLE_PERPS_PAPER_ENGINE"], "true")
+        self.assertEqual(
+            config.perps_worker_env["PERPS_PAPER_DB"],
+            "/persist/data/perps_paper.sqlite3",
+        )
+        self.assertNotIn("LIVE_TRADING_ENABLED", config.perps_worker_env)
+        self.assertNotIn("LIVE_TRADING_ARMED", config.perps_worker_env)
+
+    def test_perps_paper_engine_requires_public_market_worker_and_valid_flag(self):
+        with self.assertRaisesRegex(ValueError, "requires ENABLE_PERPS_MARKET_DATA_WORKER"):
+            build_supervisor_config({"ENABLE_PERPS_PAPER_ENGINE": "true"})
+        with self.assertRaisesRegex(ValueError, "ENABLE_PERPS_PAPER_ENGINE"):
+            build_supervisor_config({
+                "ENABLE_PERPS_MARKET_DATA_WORKER": "true",
+                "ENABLE_PERPS_PAPER_ENGINE": "sometimes",
+            })
 
     def test_invalid_perps_worker_flag_fails_closed(self):
         with self.assertRaisesRegex(ValueError, "ENABLE_PERPS_MARKET_DATA_WORKER"):

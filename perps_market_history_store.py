@@ -469,6 +469,52 @@ class PerpsMarketHistoryStore:
             "conflicts": conflicts,
         }
 
+    def funding_conflict_at(
+        self,
+        instrument_id: int,
+        timestamp_ms: int,
+        *,
+        tolerance_ms: int = 1000,
+        as_of_received_at: str | datetime | None = None,
+    ) -> dict[str, Any] | None:
+        """Return a conflicting public revision once its first receipt is known."""
+        if isinstance(instrument_id, bool) or not isinstance(instrument_id, int) or instrument_id < 0:
+            raise ValueError("instrument_id must be a nonnegative integer")
+        if isinstance(timestamp_ms, bool) or not isinstance(timestamp_ms, int) or timestamp_ms <= 0:
+            raise ValueError("timestamp_ms must be a positive integer")
+        if isinstance(tolerance_ms, bool) or not isinstance(tolerance_ms, int) or not 0 <= tolerance_ms <= 5000:
+            raise ValueError("tolerance_ms must be between 0 and 5000")
+        as_of = _aware_iso(as_of_received_at, "as_of_received_at") if as_of_received_at is not None else None
+        query = """
+            SELECT funding_timestamp_ms, observed_rates_json, first_detected_at
+            FROM perps_funding_conflicts
+            WHERE instrument_id=? AND funding_timestamp_ms BETWEEN ? AND ?
+        """
+        params: tuple[Any, ...] = (
+            instrument_id, timestamp_ms - tolerance_ms, timestamp_ms + tolerance_ms
+        )
+        if as_of is not None:
+            query += " AND first_detected_at <= ?"
+            params += (as_of,)
+        row = self.db.execute(query + " ORDER BY ABS(funding_timestamp_ms - ?) LIMIT 1",
+                              (*params, timestamp_ms)).fetchone()
+        if row is None:
+            return None
+        try:
+            observed_rates = json.loads(row["observed_rates_json"])
+        except (TypeError, ValueError, json.JSONDecodeError):
+            raise ValueError("stored funding conflict record is corrupt") from None
+        if not isinstance(observed_rates, list) or any(
+            not isinstance(value, str) for value in observed_rates
+        ):
+            raise ValueError("stored funding conflict record is corrupt")
+        return {
+            "instrument_id": instrument_id,
+            "timestamp_ms": int(row["funding_timestamp_ms"]),
+            "observed_rates": observed_rates,
+            "first_detected_at": row["first_detected_at"],
+        }
+
     def funding_rate_at(
         self,
         instrument_id: int,
@@ -485,22 +531,12 @@ class PerpsMarketHistoryStore:
         if isinstance(tolerance_ms, bool) or not isinstance(tolerance_ms, int) or not 0 <= tolerance_ms <= 5000:
             raise ValueError("tolerance_ms must be between 0 and 5000")
         as_of = _aware_iso(as_of_received_at, "as_of_received_at") if as_of_received_at is not None else None
-        conflict_query = """
-            SELECT 1 FROM perps_funding_conflicts
-            WHERE instrument_id=? AND funding_timestamp_ms BETWEEN ? AND ?
-        """
-        conflict_params: tuple[Any, ...] = (
-            instrument_id, timestamp_ms - tolerance_ms, timestamp_ms + tolerance_ms
+        conflict = self.funding_conflict_at(
+            instrument_id,
+            timestamp_ms,
+            tolerance_ms=tolerance_ms,
+            as_of_received_at=as_of,
         )
-        if as_of is not None:
-            # A later correction must not retroactively alter an earlier replay
-            # decision; a conflict becomes visible only after first detection.
-            conflict_query += " AND first_detected_at <= ?"
-            conflict_params += (as_of,)
-        conflict = self.db.execute(
-            conflict_query + " LIMIT 1",
-            conflict_params,
-        ).fetchone()
         if conflict is not None:
             return None
         if as_of is None:

@@ -6,8 +6,33 @@ from perps_sdk_contract import EXPECTED_VERSION, evaluate_sdk_contract
 
 
 class CompatibleSecureClient:
+    @classmethod
+    def _create(
+        cls, *, private_key, wallet, credentials, validate_credentials=True
+    ):
+        raise AssertionError("contract inspection must not call SDK methods")
+
     def open_perps_session(self, *, credentials=None, expires_in=None):
         raise AssertionError("contract inspection must not call SDK methods")
+
+
+class CompatibleApiKeyCreds:
+    model_fields = {"key": object(), "secret": object(), "passphrase": object()}
+
+    @classmethod
+    def model_validate(cls, value):
+        raise AssertionError("contract inspection must not validate model instances")
+
+
+class CompatiblePerpsCredentials:
+    model_fields = {
+        "proxy": object(), "private_key": object(), "secret": object(),
+        "expires_at": object(),
+    }
+
+    @classmethod
+    def model_validate(cls, value):
+        raise AssertionError("contract inspection must not validate model instances")
 
 
 class CompatiblePerpsSession:
@@ -44,6 +69,8 @@ class PerpsSdkContractTests(unittest.TestCase):
             installed_version=EXPECTED_VERSION,
             async_secure_client=CompatibleSecureClient,
             perps_session=CompatiblePerpsSession,
+            api_key_credentials=CompatibleApiKeyCreds,
+            perps_credentials=CompatiblePerpsCredentials,
         )
         self.assertTrue(report["compatible"])
         self.assertTrue(report["perps_api_experimental"])
@@ -59,6 +86,8 @@ class PerpsSdkContractTests(unittest.TestCase):
             installed_version="0.20.0",
             async_secure_client=CompatibleSecureClient,
             perps_session=CompatiblePerpsSession,
+            api_key_credentials=CompatibleApiKeyCreds,
+            perps_credentials=CompatiblePerpsCredentials,
         )
         self.assertFalse(report["compatible"])
         self.assertFalse(report["version_matches"])
@@ -68,6 +97,8 @@ class PerpsSdkContractTests(unittest.TestCase):
             installed_version=EXPECTED_VERSION,
             async_secure_client=CompatibleSecureClient,
             perps_session=IncompatiblePerpsSession,
+            api_key_credentials=CompatibleApiKeyCreds,
+            perps_credentials=CompatiblePerpsCredentials,
         )
         self.assertFalse(report["compatible"])
         self.assertIn("fetch_portfolio", report["perps_session_method_failures"])
@@ -82,6 +113,8 @@ class PerpsSdkContractTests(unittest.TestCase):
             installed_version=EXPECTED_VERSION,
             async_secure_client=IncompatibleSecureClient,
             perps_session=CompatiblePerpsSession,
+            api_key_credentials=CompatibleApiKeyCreds,
+            perps_credentials=CompatiblePerpsCredentials,
         )
         self.assertFalse(report["compatible"])
         self.assertEqual(

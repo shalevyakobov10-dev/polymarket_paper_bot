@@ -218,7 +218,7 @@ class PerpsMarketDataTests(unittest.TestCase):
         self.assertEqual(result[0]["execution"], "none")
         self.assertEqual(
             [call[0] for call in provider.calls],
-            ["/v1/info/instruments", "/v1/info/tickers", "/v1/info/book"],
+            ["/v1/info/instruments", "/v1/info/tickers", "/v1/info/fees", "/v1/info/book"],
         )
 
     def test_provider_retains_close_only_for_exits_and_skips_stale_books(self):

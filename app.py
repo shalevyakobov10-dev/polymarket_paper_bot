@@ -1310,7 +1310,7 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def do_GET(self):
-        if self.path in ("/", "/status", "/health", "/paper", "/news", "/matches", "/market-stream", "/resolutions", "/forecast-evaluation", "/research-features", "/independent-model-evaluation", "/model-forecasts", "/learning", "/execution-readiness", "/service-supervisor", "/event-paper", "/perps-market"):
+        if self.path in ("/", "/status", "/health", "/paper", "/news", "/matches", "/market-stream", "/resolutions", "/forecast-evaluation", "/research-features", "/independent-model-evaluation", "/model-forecasts", "/learning", "/execution-readiness", "/service-supervisor", "/event-paper", "/perps-market", "/perps-paper"):
             with _lock:
                 snapshot = dict(_state)
             if self.path == "/health":
@@ -1379,6 +1379,36 @@ class Handler(BaseHTTPRequestHandler):
                         payload["status"] = "unhealthy"
                         payload["required_component_failures"].append("perps_market_data")
                     payload["health_policy"] += "; perps_market_data_is_required_when_enabled"
+                    if perps_snapshot.get("paper_engine_enabled") is True:
+                        paper_state = perps_snapshot.get("paper_worker_state")
+                        paper_status = "healthy" if paper_state == "running" and perps_status == "healthy" else (
+                            "degraded" if paper_state == "degraded" or perps_status == "degraded" else "unhealthy"
+                        )
+                        paper_component = {
+                            "name": "perps_paper_engine",
+                            "status": paper_status,
+                            "worker_state": paper_state,
+                            "open_positions": perps_snapshot.get("paper_open_positions", 0),
+                            "closed_trades": perps_snapshot.get("paper_closed_trades", 0),
+                            "cash_balance": perps_snapshot.get("paper_cash_balance"),
+                            "equity": perps_snapshot.get("paper_equity"),
+                            "daily_loss": perps_snapshot.get("paper_daily_loss"),
+                            "funding_gaps_last_cycle": perps_snapshot.get("paper_funding_gaps_last_cycle", 0),
+                            "snapshot_rejections_last_cycle": perps_snapshot.get("paper_snapshot_rejections_last_cycle", 0),
+                            "backup_at": perps_snapshot.get("backup_at"),
+                            "backup_error_type": perps_snapshot.get("backup_error_type"),
+                            "research_only": True,
+                            "live_execution_enabled": False,
+                            "execution": "none",
+                        }
+                        payload["components"]["perps_paper_engine"] = paper_component
+                        payload["required_components"].append("perps_paper_engine")
+                        if paper_status != "healthy":
+                            healthy = False
+                            payload["ok"] = False
+                            payload["status"] = "unhealthy"
+                            payload["required_component_failures"].append("perps_paper_engine")
+                        payload["health_policy"] += "; perps_paper_engine_is_required_when_enabled"
                 self._send(200 if healthy else 503, payload)
             elif self.path == "/paper":
                 self._send(200, get_paper_trader().snapshot())
@@ -1475,6 +1505,37 @@ class Handler(BaseHTTPRequestHandler):
                     "mode": "POLYMARKET_PERPS_PUBLIC_MARKET_DATA",
                     "research_only": True,
                     "live_execution_enabled": False,
+                    "order_submission_allowed": False,
+                    "execution": "none",
+                })
+                self._send(200, worker_snapshot)
+            elif self.path == "/perps-paper":
+                supervisor_snapshot = read_supervisor_status(SUPERVISOR_STATUS_FILE)
+                if supervisor_snapshot.get("perps_market_worker_enabled") is True:
+                    worker_snapshot = read_perps_worker_status(PERPS_MARKET_WORKER_STATUS_FILE)
+                else:
+                    worker_snapshot = {
+                        "enabled": False,
+                        "worker_state": "disabled",
+                        "paper_engine_enabled": False,
+                        "paper_worker_state": "disabled",
+                        "paper_open_positions": 0,
+                        "paper_closed_trades": 0,
+                        "paper_closed_last_cycle": 0,
+                        "paper_funding_gaps_last_cycle": 0,
+                        "paper_snapshot_rejections_last_cycle": 0,
+                        "paper_cash_balance": None,
+                        "paper_equity": None,
+                        "paper_daily_loss": None,
+                        "backup_at": None,
+                        "backup_error_type": None,
+                    }
+                worker_snapshot.update({
+                    "mode": "POLYMARKET_PERPS_PAPER_ONLY",
+                    "strategy_status": "not_configured",
+                    "research_only": True,
+                    "live_execution_enabled": False,
+                    "live_execution_eligible": False,
                     "order_submission_allowed": False,
                     "execution": "none",
                 })

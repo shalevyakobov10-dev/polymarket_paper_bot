@@ -321,7 +321,15 @@ def run_worker(
                     raise RuntimeError("history store returned an invalid insert count")
                 if current_engine is not None:
                     funding_requirements = current_engine.funding_requirements(snapshots)
+                    unique_funding_requirements = {}
                     for requirement in funding_requirements:
+                        key = (
+                            requirement.get("instrument_id"),
+                            requirement.get("start_timestamp_ms"),
+                            requirement.get("end_timestamp_ms"),
+                        )
+                        unique_funding_requirements[key] = requirement
+                    for requirement in unique_funding_requirements.values():
                         try:
                             settlements = current_provider.load_funding_history(
                                 requirement["instrument_id"],

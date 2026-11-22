@@ -110,6 +110,44 @@ def _sanitize_paper_summary(value: Any) -> dict[str, Any] | None:
         summary["halt_reason"] = str(value.get("halt_reason"))[:120] if value.get("halt_reason") else None
     if isinstance(value.get("utc_day"), str):
         summary["utc_day"] = value["utc_day"][:10]
+    performance = value.get("performance")
+    if isinstance(performance, dict):
+        safe_performance: dict[str, Any] = {
+            "descriptive_only": True,
+            "out_of_sample_validated": False,
+            "live_execution_eligible": False,
+        }
+        for field in (
+            "closed_trades", "winning_trades", "losing_trades", "breakeven_trades",
+        ):
+            raw = performance.get(field)
+            if isinstance(raw, int) and not isinstance(raw, bool) and raw >= 0:
+                safe_performance[field] = raw
+        decimal_fields = (
+            "win_rate_pct", "gross_closed_pnl", "net_closed_pnl_after_fees_and_funding",
+            "net_expectancy_per_closed_trade", "profit_factor", "entry_fees_paid",
+            "exit_fees_paid", "liquidation_fees_paid", "total_fees_paid", "funding_paid",
+        )
+        for field in decimal_fields:
+            raw = performance.get(field)
+            if raw is None:
+                safe_performance[field] = None
+                continue
+            text_value = str(raw).strip()
+            if len(text_value) > 80:
+                continue
+            try:
+                from decimal import Decimal, InvalidOperation
+                parsed = Decimal(text_value)
+                if parsed.is_finite():
+                    safe_performance[field] = text_value
+            except (InvalidOperation, ValueError, TypeError):
+                continue
+        if performance.get("profit_factor_status") in {
+            "calculated", "undefined_without_closed_losses", "no_closed_trades",
+        }:
+            safe_performance["profit_factor_status"] = performance["profit_factor_status"]
+        summary["performance"] = safe_performance
     if isinstance(value.get("event_counts"), dict):
         counts = {}
         for key, count in list(value["event_counts"].items())[:30]:

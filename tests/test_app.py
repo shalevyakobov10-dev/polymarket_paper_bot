@@ -805,6 +805,16 @@ class ParserTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             try:
                 app.SUPERVISOR_STATUS_FILE = Path(directory) / "supervisor.json"
+                write_supervisor_status(
+                    app.SUPERVISOR_STATUS_FILE,
+                    build_supervisor_status(
+                        service_state="running",
+                        monitor_enabled=False,
+                        monitor_state="disabled",
+                        perps_account_supervisor_enabled=True,
+                        perps_account_supervisor_state="running",
+                    ),
+                )
                 account_path = Path(directory) / "account-supervisor.json"
                 old_stamp = (datetime.now(timezone.utc) - timedelta(seconds=120)).isoformat()
                 account_path.write_text(json.dumps({

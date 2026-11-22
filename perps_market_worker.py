@@ -5,6 +5,7 @@ import argparse
 import json
 import os
 import signal
+import sys
 import tempfile
 import threading
 import time
@@ -310,8 +311,15 @@ def run_worker(
                 state["last_error"] = f"{type(exc).__name__}: {str(exc)[:180]}"
                 state["consecutive_failures"] = failures
                 state["last_heartbeat_at"] = _utc_now()
+                if current_engine is not None:
+                    state["paper_engine_state"] = "degraded"
+                    try:
+                        state["paper_engine"] = current_engine.summary()
+                    except Exception:
+                        state["paper_engine"] = None
                 _write_status(status_file, state)
                 if max_cycles is not None:
+                    print(f"Perps worker cycle failed: {state['last_error']}", file=sys.stderr, flush=True)
                     return 1
                 if stopping.wait(delay):
                     break

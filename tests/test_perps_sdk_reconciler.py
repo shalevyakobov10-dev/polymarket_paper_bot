@@ -4,6 +4,7 @@ import tempfile
 import unittest
 from datetime import datetime, timezone
 from pathlib import Path
+from decimal import Decimal
 from types import SimpleNamespace
 
 from perps_order_journal import PerpsOrderJournal

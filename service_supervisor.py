@@ -104,6 +104,40 @@ def _perps_worker_heartbeat_age(
     return max(0.0, age)
 
 
+def _perps_account_worker_heartbeat_age(
+    status_path: Path,
+    *,
+    worker_started_at: datetime,
+    now: datetime | None = None,
+) -> float:
+    """Use this process instance's uptime until it publishes a fresh heartbeat."""
+    current = now or datetime.now(timezone.utc)
+    if current.tzinfo is None or current.utcoffset() is None:
+        raise ValueError("now must be timezone-aware")
+    if worker_started_at.tzinfo is None or worker_started_at.utcoffset() is None:
+        raise ValueError("worker_started_at must be timezone-aware")
+    started = worker_started_at.astimezone(timezone.utc)
+    current = current.astimezone(timezone.utc)
+    process_age = max(0.0, (current - started).total_seconds())
+    try:
+        raw = json.loads(Path(status_path).read_text(encoding="utf-8"))
+        stamp_text = raw.get("last_heartbeat_at") if isinstance(raw, dict) else None
+        if not isinstance(stamp_text, str) or not stamp_text.strip():
+            return process_age
+        stamp = datetime.fromisoformat(stamp_text.replace("Z", "+00:00"))
+        if stamp.tzinfo is None or stamp.utcoffset() is None:
+            return process_age
+        stamp = stamp.astimezone(timezone.utc)
+    except (OSError, UnicodeError, ValueError, TypeError, json.JSONDecodeError):
+        return process_age
+    if stamp < started:
+        return process_age
+    age = (current - stamp).total_seconds()
+    if age < -2:
+        return process_age
+    return max(0.0, age)
+
+
 def _bounded_integer(value: Any, name: str, *, minimum: int, maximum: int) -> int:
     if isinstance(value, bool):
         raise ValueError(f"{name} must be an integer between {minimum} and {maximum}")
@@ -467,21 +501,30 @@ def run_supervisor(
     paper_worker_state = "starting" if paper_worker_enabled else "disabled"
     perps_worker_enabled = config.perps_worker_command is not None
     perps_worker_state = "starting" if perps_worker_enabled else "disabled"
+    perps_account_supervisor_enabled = config.perps_account_supervisor_command is not None
+    perps_account_supervisor_state = (
+        "starting" if perps_account_supervisor_enabled else "disabled"
+    )
     service_state = "starting"
     monitor_process = None
     paper_worker_process = None
     perps_worker_process = None
     perps_worker_started_at: datetime | None = None
+    perps_account_supervisor_process = None
+    perps_account_supervisor_started_at: datetime | None = None
     app_process = None
     monitor_failures = 0
     paper_worker_failures = 0
     perps_worker_failures = 0
+    perps_account_supervisor_failures = 0
     last_monitor_exit_code: int | None = None
     next_restart_at: str | None = None
     last_paper_worker_exit_code: int | None = None
     paper_worker_next_restart_at: str | None = None
     last_perps_worker_exit_code: int | None = None
     perps_worker_next_restart_at: str | None = None
+    last_perps_account_supervisor_exit_code: int | None = None
+    perps_account_supervisor_next_restart_at: str | None = None
     app_exit_code: int | None = None
 
     def publish_status() -> None:
@@ -504,6 +547,11 @@ def run_supervisor(
                 perps_market_worker_restart_count=perps_worker_failures,
                 perps_market_worker_last_exit_code=last_perps_worker_exit_code,
                 perps_market_worker_next_restart_at=perps_worker_next_restart_at,
+                perps_account_supervisor_enabled=perps_account_supervisor_enabled,
+                perps_account_supervisor_state=perps_account_supervisor_state,
+                perps_account_supervisor_restart_count=perps_account_supervisor_failures,
+                perps_account_supervisor_last_exit_code=last_perps_account_supervisor_exit_code,
+                perps_account_supervisor_next_restart_at=perps_account_supervisor_next_restart_at,
             )
             write_supervisor_status(config.status_path, payload)
         except (OSError, TypeError, ValueError) as exc:
@@ -557,6 +605,17 @@ def run_supervisor(
         else:
             perps_worker_state = "disabled"
             log.info("public Perps market-data worker is disabled")
+        if perps_account_supervisor_enabled:
+            perps_account_supervisor_process = popen_factory(
+                list(config.perps_account_supervisor_command or ()),
+                env=dict(config.perps_account_supervisor_env or {}),
+            )
+            perps_account_supervisor_started_at = datetime.now(timezone.utc)
+            perps_account_supervisor_state = "running"
+            log.info("started opt-in read-only Perps account supervisor")
+        else:
+            perps_account_supervisor_state = "disabled"
+            log.info("read-only Perps account supervisor is disabled")
         if not monitor_enabled:
             log.info("authenticated account monitor is disabled")
         else:
@@ -577,10 +636,14 @@ def run_supervisor(
                 monitor_state = "stopped" if monitor_enabled else "disabled"
                 paper_worker_state = "stopped" if paper_worker_enabled else "disabled"
                 perps_worker_state = "stopped" if perps_worker_enabled else "disabled"
+                perps_account_supervisor_state = (
+                    "stopped" if perps_account_supervisor_enabled else "disabled"
+                )
                 app_exit_code = int(app_code)
                 next_restart_at = None
                 paper_worker_next_restart_at = None
                 perps_worker_next_restart_at = None
+                perps_account_supervisor_next_restart_at = None
                 publish_status()
                 return int(app_code) if int(app_code) != 0 else 1
 
@@ -669,6 +732,63 @@ def run_supervisor(
                     publish_status()
                     continue
 
+            if perps_account_supervisor_process is not None:
+                account_code = perps_account_supervisor_process.poll()
+                if (
+                    account_code is None
+                    and config.perps_account_supervisor_status_path is not None
+                    and perps_account_supervisor_started_at is not None
+                ):
+                    heartbeat_age = _perps_account_worker_heartbeat_age(
+                        config.perps_account_supervisor_status_path,
+                        worker_started_at=perps_account_supervisor_started_at,
+                    )
+                    if (
+                        heartbeat_age
+                        >= config.perps_account_supervisor_heartbeat_timeout_seconds
+                    ):
+                        log.error(
+                            "Perps account supervisor heartbeat stale for %.1f seconds "
+                            "(limit %.1f); terminating and restarting",
+                            heartbeat_age,
+                            config.perps_account_supervisor_heartbeat_timeout_seconds,
+                        )
+                        _stop_child(perps_account_supervisor_process)
+                        account_code = perps_account_supervisor_process.poll()
+                        if account_code is None:
+                            account_code = -signal.SIGKILL
+                if account_code is not None:
+                    perps_account_supervisor_failures += 1
+                    last_perps_account_supervisor_exit_code = int(account_code)
+                    delay = monitor_restart_delay(
+                        perps_account_supervisor_failures,
+                        base_seconds=config.monitor_restart_base_seconds,
+                        max_seconds=config.monitor_restart_max_seconds,
+                    )
+                    perps_account_supervisor_next_restart_at = (
+                        datetime.now(timezone.utc) + timedelta(seconds=delay)
+                    ).isoformat()
+                    perps_account_supervisor_state = "restarting"
+                    publish_status()
+                    log.warning(
+                        "read-only Perps account supervisor exited with code %s; "
+                        "restart %s in %.1f seconds",
+                        account_code,
+                        perps_account_supervisor_failures,
+                        delay,
+                    )
+                    if wait_with_heartbeat(delay):
+                        break
+                    perps_account_supervisor_process = popen_factory(
+                        list(config.perps_account_supervisor_command or ()),
+                        env=dict(config.perps_account_supervisor_env or {}),
+                    )
+                    perps_account_supervisor_started_at = datetime.now(timezone.utc)
+                    perps_account_supervisor_state = "running"
+                    perps_account_supervisor_next_restart_at = None
+                    publish_status()
+                    continue
+
             if monitor_process is not None:
                 monitor_code = monitor_process.poll()
                 if monitor_code is not None:
@@ -711,24 +831,33 @@ def run_supervisor(
         monitor_state = "stopped" if monitor_enabled else "disabled"
         paper_worker_state = "stopped" if paper_worker_enabled else "disabled"
         perps_worker_state = "stopped" if perps_worker_enabled else "disabled"
+        perps_account_supervisor_state = (
+            "stopped" if perps_account_supervisor_enabled else "disabled"
+        )
         next_restart_at = None
         paper_worker_next_restart_at = None
         perps_worker_next_restart_at = None
+        perps_account_supervisor_next_restart_at = None
         publish_status()
         raise
     finally:
         _stop_child(monitor_process)
         _stop_child(paper_worker_process)
         _stop_child(perps_worker_process)
+        _stop_child(perps_account_supervisor_process)
         _stop_child(app_process)
         if service_state != "app_failed" and service_state != "startup_failed":
             service_state = "stopped"
             monitor_state = "stopped" if monitor_enabled else "disabled"
             paper_worker_state = "stopped" if paper_worker_enabled else "disabled"
             perps_worker_state = "stopped" if perps_worker_enabled else "disabled"
+            perps_account_supervisor_state = (
+                "stopped" if perps_account_supervisor_enabled else "disabled"
+            )
             next_restart_at = None
             paper_worker_next_restart_at = None
             perps_worker_next_restart_at = None
+            perps_account_supervisor_next_restart_at = None
             publish_status()
 
 

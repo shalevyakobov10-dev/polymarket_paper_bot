@@ -40,6 +40,7 @@ footer{margin-top:24px;color:var(--muted);font-size:12px}
 <section class="grid" aria-live="polite">
 <article class="card" id="card-system"><h2>System health</h2><div class="empty">Loading status…</div></article>
 <article class="card" id="card-perps-market"><h2>Perps market data</h2><div class="empty">Loading status…</div></article>
+<article class="card" id="card-perps-account-supervisor"><h2>Perps account supervision</h2><div class="empty">Loading status…</div></article>
 <article class="card" id="card-perps-paper"><h2>Perps Paper engine</h2><div class="empty">Loading status…</div></article>
 <article class="card" id="card-event-paper"><h2>Event Paper engine</h2><div class="empty">Loading status…</div></article>
 <article class="card" id="card-release"><h2>Live release gates</h2><div class="empty">Loading status…</div></article>
@@ -53,6 +54,7 @@ footer{margin-top:24px;color:var(--muted);font-size:12px}
 const sources=[
  {id:"system",url:"/health",title:"System health"},
  {id:"perps-market",url:"/perps-market",title:"Perps market data"},
+ {id:"perps-account-supervisor",url:"/perps-account-supervisor",title:"Perps account supervision"},
  {id:"perps-paper",url:"/perps-paper",title:"Perps Paper engine"},
  {id:"event-paper",url:"/event-paper",title:"Event Paper engine"},
  {id:"release",url:"/perps-live-gate",title:"Live release gates"},
@@ -84,6 +86,23 @@ function metricEntries(id,d){
   const p=d.portfolio||{};
   const rows=[["Enabled",d.enabled],["Worker state",d.worker_state],["Fee coverage",d.fee_coverage_status],["New Paper entries ready",d.fee_verified_entry_path_available],["Open positions",p.open_positions],["Closed positions",p.closed_positions],["Open notional (USD)",p.open_notional_usd],["Effective leverage",p.effective_leverage],["Peak drawdown (%)",p.peak_drawdown_pct],["UTC-day PnL (%)",p.daily_pnl_pct],["Halt reason",p.halt_reason||d.degraded_reason]];
   return {status:d.worker_state,rows};
+ }
+ if(id==="perps-account-supervisor"){
+  const o=d.observations||{};
+  return {status:d.worker_state,rows:[
+   ["Enabled",d.enabled],
+   ["Read-only preflight passed",d.read_only_preflight_passed],
+   ["Startup recovery complete",d.recovery_completed],
+   ["Interrupted submissions recovered",d.recovered_interrupted_submissions],
+   ["Unresolved local orders",o.unresolved_order_count],
+   ["Unknown venue orders",o.unknown_remote_open_orders],
+   ["Missing venue open orders",o.missing_remote_open_orders],
+   ["Auto-Cancel deadline verified",o.auto_cancel_armed],
+   ["Last preflight",d.last_preflight_at],
+   ["Blocked reasons",d.blocked_reasons],
+   ["Last error code",d.last_error_code],
+   ["Order submission allowed",d.order_submission_allowed]
+  ]};
  }
  if(id==="event-paper")return {status:d.worker_state,rows:[["Worker state",d.worker_state],["Heartbeat fresh",d.heartbeat_fresh],["Last success",d.last_success_at],["Consecutive failures",d.consecutive_failures],["Open positions",d.paper_portfolio&&d.paper_portfolio.open_positions],["Last error",d.last_error]]};
  if(id==="release"){

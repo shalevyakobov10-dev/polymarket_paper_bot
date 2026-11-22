@@ -166,6 +166,10 @@ class PerpsEmaMomentumStrategy:
         }
         needed = config.minimum_completed_bars
         if len(bars) < needed:
+            if len(bars) >= 2 and any(
+                right["bucket"] - left["bucket"] != 1 for left, right in zip(bars, bars[1:])
+            ):
+                return base | {"reason": "incomplete_contiguous_minute_history"}
             return base | {"reason": "warming_up_insufficient_completed_bars"}
         bars = bars[-needed:]
         # A gap in the recent one-minute series invalidates crossover context.

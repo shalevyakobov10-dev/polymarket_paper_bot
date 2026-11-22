@@ -324,7 +324,7 @@ def build_supervisor_config(
         if secrets_stat.st_size <= 0 or secrets_stat.st_size > 16 * 1024:
             raise ValueError("Perps account supervisor secret file has invalid size")
         permissions = secrets_stat.st_mode & 0o777
-        if permissions & 0o037 or not permissions & 0o400:
+        if permissions & ~0o640 or not permissions & 0o400:
             raise ValueError("Perps account supervisor secret file permissions are unsafe")
 
         account_poll = _bounded_integer(

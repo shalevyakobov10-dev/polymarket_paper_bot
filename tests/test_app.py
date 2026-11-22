@@ -963,6 +963,38 @@ class ParserTests(unittest.TestCase):
         self.assertFalse(payload["live_execution_enabled"])
         forecast.assert_called_once()
 
+    def test_control_center_serves_read_only_dashboard_with_security_headers(self):
+        server = app.ThreadingHTTPServer(("127.0.0.1", 0), app.Handler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        try:
+            thread.start()
+            address = f"http://127.0.0.1:{server.server_port}/control-center"
+            with http_urlopen(address, timeout=3) as response:
+                html = response.read().decode("utf-8")
+                self.assertEqual(response.status, 200)
+                self.assertIn("text/html", response.headers.get("Content-Type", ""))
+                self.assertEqual(response.headers.get("X-Frame-Options"), "DENY")
+                self.assertEqual(response.headers.get("X-Content-Type-Options"), "nosniff")
+                self.assertEqual(response.headers.get("Cache-Control"), "no-store")
+                policy = response.headers.get("Content-Security-Policy", "")
+                self.assertIn("connect-src 'self'", policy)
+                self.assertIn("frame-ancestors 'none'", policy)
+            self.assertIn("Polymarket Bot Control Center", html)
+            self.assertIn("Read-only monitoring", html)
+            self.assertIn("/perps-paper", html)
+            self.assertIn("/perps-live-gate", html)
+            self.assertIn("Live order submission and signing remain disabled", html)
+            self.assertNotIn("<input", html.lower())
+            self.assertNotIn("type=\"password\"", html.lower())
+            self.assertNotIn("submit_limit_order", html)
+            self.assertNotIn("PERPS_LIVE_CONFIRMATION", html)
+        finally:
+            server.shutdown()
+            server.server_close()
+            if thread.is_alive():
+                thread.join(timeout=2)
+
+
 class WorkerRetryIntegrationTests(unittest.TestCase):
     def test_worker_retry_delay_grows_to_shared_cap(self):
         with patch("app.random.random", return_value=0.5):

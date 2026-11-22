@@ -38,7 +38,7 @@ PERPS_SESSION_METHODS: dict[str, set[str]] = {
     },
     "post_orders": {"orders"},
     "cancel_order": {"order_id", "client_order_id"},
-    "arm_auto_cancel": set(),
+    "arm_auto_cancel": {"cancel_at"},
     "disarm_auto_cancel": set(),
     "update_leverage": {"instrument_id", "leverage", "cross_margin"},
     "update_margin": {"instrument_id", "amount"},

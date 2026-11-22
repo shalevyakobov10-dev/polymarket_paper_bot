@@ -12,6 +12,7 @@ import json
 import os
 import re
 import tempfile
+import uuid
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
@@ -145,6 +146,61 @@ def _sanitize_preflight_report(report: Any) -> dict[str, Any]:
         "blocked_reasons": reasons,
         "observations": safe_observations,
     }
+
+
+class _ExclusiveAccountInspectionLock:
+    """Use the same O_EXCL lock path as the single-order gateway.
+
+    An existing lock, including a stale one, is never removed automatically.
+    Operators must inspect the account and journal before clearing a stale lock.
+    """
+
+    def __init__(self, path: str | Path) -> None:
+        self.path = Path(path).expanduser()
+        self.token = uuid.uuid4().hex
+        self.acquired = False
+
+    def acquire(self) -> bool:
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        payload = json.dumps({
+            "token": self.token,
+            "pid": os.getpid(),
+            "created_at": _utc_now().isoformat(),
+            "mode": "PERPS_SINGLE_SUBMISSION_LOCK",
+        }, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        try:
+            descriptor = os.open(
+                self.path,
+                os.O_CREAT | os.O_EXCL | os.O_WRONLY,
+                0o600,
+            )
+        except FileExistsError:
+            return False
+        try:
+            with os.fdopen(descriptor, "wb") as handle:
+                handle.write(payload)
+                handle.flush()
+                os.fsync(handle.fileno())
+            self.acquired = True
+            return True
+        except BaseException:
+            try:
+                self.path.unlink(missing_ok=True)
+            finally:
+                raise
+
+    def release(self) -> None:
+        if not self.acquired:
+            return
+        try:
+            try:
+                payload = json.loads(self.path.read_text(encoding="utf-8"))
+            except (OSError, UnicodeError, ValueError):
+                return
+            if payload.get("token") == self.token:
+                self.path.unlink(missing_ok=True)
+        finally:
+            self.acquired = False
 
 
 def _default_status() -> dict[str, Any]:
@@ -290,6 +346,7 @@ class PerpsAccountSupervisor:
         journal: Any,
         account_preflight: Any,
         status_path: str | Path,
+        submission_lock_path: str | Path,
         poll_interval_seconds: int = DEFAULT_POLL_INTERVAL_SECONDS,
         cycle_timeout_seconds: float = DEFAULT_CYCLE_TIMEOUT_SECONDS,
         max_consecutive_failures: int = DEFAULT_MAX_CONSECUTIVE_FAILURES,
@@ -318,9 +375,12 @@ class PerpsAccountSupervisor:
             raise ValueError("now_provider must be callable")
         if not callable(sleep):
             raise ValueError("sleep must be callable")
+        if not str(submission_lock_path).strip():
+            raise ValueError("submission_lock_path must be a non-empty path")
         self.journal = journal
         self.account_preflight = account_preflight
         self.status_path = Path(status_path).expanduser()
+        self.submission_lock_path = Path(submission_lock_path).expanduser()
         self.poll_interval_seconds = poll_interval_seconds
         self.cycle_timeout_seconds = float(cycle_timeout_seconds)
         self.max_consecutive_failures = max_consecutive_failures
@@ -353,34 +413,52 @@ class PerpsAccountSupervisor:
         while stop_event is None or not stop_event.is_set():
             current = _aware_utc(self.now_provider(), "now_provider")
             state["last_heartbeat_at"] = current.isoformat()
+            lock = _ExclusiveAccountInspectionLock(self.submission_lock_path)
             try:
-                if not recovery_completed:
-                    recovered = self.journal.recover_interrupted_submissions()
-                    state["recovered_interrupted_submissions"] = _nonnegative_int(
-                        recovered, "recovered_interrupted_submissions"
-                    )
-                    state["recovery_completed"] = True
-                    recovery_completed = True
+                if not lock.acquire():
+                    # Do not inspect or recover the journal while the gateway may
+                    # be inside its single-order submission critical section.
+                    state.update({
+                        "worker_state": "degraded",
+                        "last_error_code": "submission_lock_unavailable",
+                        "consecutive_failures": 0,
+                        "read_only_preflight_passed": False,
+                        "blocked_reasons": ["submission_lock_unavailable"],
+                        "observations": {},
+                    })
+                else:
+                    try:
+                        if not recovery_completed:
+                            recovered = self.journal.recover_interrupted_submissions()
+                            state["recovered_interrupted_submissions"] = _nonnegative_int(
+                                recovered, "recovered_interrupted_submissions"
+                            )
+                            state["recovery_completed"] = True
+                            recovery_completed = True
 
-                report = await asyncio.wait_for(
-                    self.account_preflight.run(now=current),
-                    timeout=self.cycle_timeout_seconds,
-                )
-                safe_report = _sanitize_preflight_report(report)
-                completed_at = _aware_utc(self.now_provider(), "now_provider")
-                state.update({
-                    "worker_state": "healthy" if safe_report["passed"] else "degraded",
-                    "last_preflight_at": completed_at.isoformat(),
-                    "last_error_code": None,
-                    "consecutive_failures": 0,
-                    "read_only_preflight_passed": safe_report["passed"],
-                    "blocked_reasons": safe_report["blocked_reasons"],
-                    "observations": safe_report["observations"],
-                })
-                failures = 0
+                        report = await asyncio.wait_for(
+                            self.account_preflight.run(now=current),
+                            timeout=self.cycle_timeout_seconds,
+                        )
+                        safe_report = _sanitize_preflight_report(report)
+                        completed_at = _aware_utc(self.now_provider(), "now_provider")
+                        state.update({
+                            "worker_state": "healthy" if safe_report["passed"] else "degraded",
+                            "last_preflight_at": completed_at.isoformat(),
+                            "last_error_code": None,
+                            "consecutive_failures": 0,
+                            "read_only_preflight_passed": safe_report["passed"],
+                            "blocked_reasons": safe_report["blocked_reasons"],
+                            "observations": safe_report["observations"],
+                        })
+                        failures = 0
+                    finally:
+                        lock.release()
             except asyncio.CancelledError:
+                lock.release()
                 raise
             except Exception as exc:
+                lock.release()
                 failures += 1
                 state.update({
                     "worker_state": "degraded",

@@ -91,6 +91,8 @@ function metricEntries(id,d){
   const o=d.observations||{};
   return {status:d.worker_state,rows:[
    ["Enabled",d.enabled],
+   ["PID-1 worker state",d.process_supervisor_state],
+   ["PID-1 restart count",d.process_restart_count],
    ["Read-only preflight passed",d.read_only_preflight_passed],
    ["Heartbeat fresh",d.heartbeat_fresh],
    ["Heartbeat age (seconds)",d.heartbeat_age_seconds],

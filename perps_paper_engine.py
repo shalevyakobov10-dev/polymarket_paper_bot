@@ -503,8 +503,6 @@ class PerpsPaperEngine:
         if instrument.get("close_only") is True:
             self._event(snapshot_key, instrument_id, "ENTRY_BLOCKED", now, {"reason": "instrument_close_only"})
             return
-        if int(instrument.get("min_notional", 0) == 0) if False else False:
-            return
         try:
             min_notional = _decimal(instrument.get("min_notional"), "min_notional", positive=True)
             max_market_notional = _decimal(instrument.get("max_market_notional"), "max_market_notional", positive=True)
@@ -688,6 +686,7 @@ class PerpsPaperEngine:
                 "SELECT * FROM perps_paper_positions WHERE instrument_id=? AND status='OPEN' ORDER BY position_id DESC LIMIT 1",
                 (instrument_id,),
             ).fetchone()
+            had_open_position = existing is not None
             if existing:
                 if not self._funding(existing, instrument, ticker, captured_now, snapshot_key):
                     pass
@@ -737,7 +736,7 @@ class PerpsPaperEngine:
                 "SELECT 1 FROM perps_paper_positions WHERE instrument_id=? AND status='OPEN' LIMIT 1",
                 (instrument_id,),
             ).fetchone()
-            if not open_for_market and instrument.get("close_only") is not True:
+            if not had_open_position and not open_for_market and instrument.get("close_only") is not True:
                 self._try_open(snapshot, history_store, captured_now, snapshot_key)
             self._refresh_account(captured_now)
             return self.summary()

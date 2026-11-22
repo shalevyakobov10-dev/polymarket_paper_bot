@@ -46,6 +46,23 @@ class PerpsHealthTests(unittest.TestCase):
         self.assertEqual(component["status"], "stale")
         self.assertIn("perps_paper_worker", payload["required_component_failures"])
 
+    def test_protective_exit_block_degrades_required_service_health(self):
+        healthy, payload = health_payload(
+            self.market,
+            now=self.now,
+            perps_worker_snapshot=self.perps_status(
+                worker_state="degraded",
+                last_cycle_warning="protective_exit_blocked",
+                exit_blocks_last_cycle=1,
+                last_exit_block_reason="insufficient_visible_depth",
+            ),
+        )
+        self.assertFalse(healthy)
+        component = payload["components"]["perps_paper_worker"]
+        self.assertEqual(component["status"], "degraded")
+        self.assertEqual(component["exit_blocks_last_cycle"], 1)
+        self.assertEqual(component["last_exit_block_reason"], "insufficient_visible_depth")
+
     def test_disabled_perps_worker_is_not_required(self):
         healthy, payload = health_payload(self.market, now=self.now)
         self.assertTrue(healthy)

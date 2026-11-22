@@ -133,7 +133,7 @@ jobs:
           assert perps_market.get("execution") == "none", "Perps endpoint must not submit orders"
           assert perps_paper.get("mode") == "POLYMARKET_PERPS_PAPER_ONLY", "Perps Paper endpoint mode mismatch"
           assert perps_paper.get("paper_engine_enabled") is False, "Perps Paper engine must be disabled in smoke test"
-          assert perps_paper.get("strategy_status") == "not_configured", "Perps autonomous strategy must not be represented as configured"
+          assert perps_paper.get("strategy_status") == "disabled", "Perps autonomous strategy must not be represented as configured"
           assert perps_paper.get("live_execution_enabled") is False, "Perps Paper must never enable live execution"
           assert perps_paper.get("live_execution_eligible") is False, "Perps Paper must not be eligible for live execution"
           assert perps_paper.get("execution") == "none", "Perps Paper endpoint must not submit orders"

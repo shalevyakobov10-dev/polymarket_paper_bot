@@ -41,6 +41,15 @@ class PerpsAccountSecretsError(RuntimeError):
     """Sanitized credential-source error; never includes secret values."""
 
 
+def _unique_json_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    result: dict[str, Any] = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError("duplicate JSON object key")
+        result[key] = value
+    return result
+
+
 def load_perps_account_secrets(path: str | Path) -> dict[str, Any]:
     """Load a strict schema from a non-symlink file not readable by others.
 
@@ -68,7 +77,10 @@ def load_perps_account_secrets(path: str | Path) -> dict[str, Any]:
             raw_bytes = handle.read(MAX_SECRET_FILE_BYTES + 1)
         if len(raw_bytes) > MAX_SECRET_FILE_BYTES:
             raise PerpsAccountSecretsError("perps_account_secrets_file_size_invalid")
-        raw = json.loads(raw_bytes.decode("utf-8"))
+        raw = json.loads(
+            raw_bytes.decode("utf-8"),
+            object_pairs_hook=_unique_json_object,
+        )
     except PerpsAccountSecretsError:
         raise
     except (OSError, UnicodeError, ValueError, TypeError, json.JSONDecodeError):
@@ -196,8 +208,8 @@ async def run_perps_account_supervisor_worker(
     if not callable(provider):
         raise ValueError("fee_schedule_provider must be callable")
 
-    journal = PerpsOrderJournal(database_path)
     async with secure_client:
+        journal = PerpsOrderJournal(database_path)
         async with open_existing_perps_read_only_session(
             secure_client,
             credentials=credentials,

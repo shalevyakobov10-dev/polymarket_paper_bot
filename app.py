@@ -1839,6 +1839,7 @@ class Handler(BaseHTTPRequestHandler):
                         if process_state in {"starting", "restarting", "stopped"}
                         else "unknown"
                     )
+                    payload["heartbeat_fresh"] = False
                     payload["read_only_preflight_passed"] = False
                 payload.update({
                     "read_only": True,
@@ -1863,6 +1864,28 @@ class Handler(BaseHTTPRequestHandler):
                 payload["perps_account_supervisor"] = perps_account_supervisor_freshness(
                     read_perps_account_supervisor_status(PERPS_ACCOUNT_SUPERVISOR_STATUS_FILE)
                 )
+                payload["perps_account_supervisor"]["process_supervisor_enabled"] = (
+                    payload.get("perps_account_supervisor_enabled") is True
+                )
+                payload["perps_account_supervisor"]["process_supervisor_state"] = (
+                    payload.get("perps_account_supervisor_state") or "unknown"
+                )
+                payload["perps_account_supervisor"]["process_restart_count"] = (
+                    payload.get("perps_account_supervisor_restart_count", 0)
+                )
+                if payload.get("perps_account_supervisor_enabled") is not True:
+                    payload["perps_account_supervisor"].update({
+                        "enabled": False,
+                        "worker_state": "disabled",
+                        "heartbeat_fresh": False,
+                        "read_only_preflight_passed": False,
+                    })
+                elif payload.get("perps_account_supervisor_state") != "running":
+                    payload["perps_account_supervisor"]["worker_state"] = (
+                        payload.get("perps_account_supervisor_state") or "unknown"
+                    )
+                    payload["perps_account_supervisor"]["heartbeat_fresh"] = False
+                    payload["perps_account_supervisor"]["read_only_preflight_passed"] = False
                 payload.update({
                     "read_only": True,
                     "order_submission_allowed": False,

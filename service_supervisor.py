@@ -146,8 +146,6 @@ def build_supervisor_config(
     )
     perps_worker_env["DRY_RUN"] = "true"
     perps_worker_env["LIVE_EXECUTION_ENABLED"] = "false"
-    perps_worker_env["LIVE_TRADING_ENABLED"] = "false"
-    perps_worker_env["LIVE_TRADING_ARMED"] = "false"
     perps_worker_env["ENABLE_USER_ORDER_MONITOR"] = "false"
 
     executable = python_executable or sys.executable

@@ -133,7 +133,7 @@ class PerpsPaperEngineTests(unittest.TestCase):
     def test_opens_isolated_long_after_sufficient_positive_momentum(self):
         with tempfile.TemporaryDirectory() as directory:
             with self.make_engine(directory) as engine:
-                result = engine.process_snapshot(make_snapshot(), FakeHistory())
+                result = process_snapshot_at_capture(engine, make_snapshot(), FakeHistory())
                 self.assertEqual(result["open_positions"], 1)
                 self.assertEqual(result["worker_state"], "healthy")
                 self.assertLess(Decimal(result["cash"]), Decimal("1000"))

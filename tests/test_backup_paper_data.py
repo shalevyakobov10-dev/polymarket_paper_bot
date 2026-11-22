@@ -1,5 +1,7 @@
 import json
 import sqlite3
+from contextlib import redirect_stdout
+from io import StringIO
 import tempfile
 import unittest
 from datetime import datetime, timezone
@@ -7,6 +9,7 @@ from pathlib import Path
 
 from backup_paper_data import (
     create_paper_data_backups,
+    main as backup_main,
     restore_paper_data_backup,
     verify_paper_data_backup,
 )
@@ -154,6 +157,49 @@ class PaperDataBackupTests(unittest.TestCase):
                 restore_paper_data_backup(
                     manifest, "paper.sqlite3", restored_path
                 )
+
+    def test_cli_can_verify_manifest_and_restore_only_to_new_destination(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            paper = root / "paper.sqlite3"
+            self._database(paper, "cli-trade")
+            result = create_paper_data_backups(
+                [paper],
+                root / "backups",
+                now=datetime(2026, 11, 22, 12, 0, tzinfo=timezone.utc),
+            )
+            manifest = root / "backups" / result["manifest_name"]
+
+            output = StringIO()
+            with redirect_stdout(output):
+                self.assertEqual(
+                    backup_main(["--verify-manifest", str(manifest)]),
+                    0,
+                )
+            verified = json.loads(output.getvalue())
+            self.assertTrue(verified["complete"])
+
+            target = root / "cli-restore" / "paper.sqlite3"
+            output = StringIO()
+            with redirect_stdout(output):
+                self.assertEqual(
+                    backup_main([
+                        "--verify-manifest", str(manifest),
+                        "--restore-source", "paper.sqlite3",
+                        "--restore-to", str(target),
+                    ]),
+                    0,
+                )
+            restored = json.loads(output.getvalue())
+            self.assertEqual(restored["integrity_check"], "ok")
+            db = sqlite3.connect(target)
+            try:
+                self.assertEqual(
+                    db.execute("SELECT value FROM sample").fetchone()[0],
+                    "cli-trade",
+                )
+            finally:
+                db.close()
 
     def test_manifest_verification_detects_tampered_backup_before_restore(self):
         with tempfile.TemporaryDirectory() as directory:

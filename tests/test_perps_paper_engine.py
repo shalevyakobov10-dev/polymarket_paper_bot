@@ -160,6 +160,15 @@ class PerpsPaperEngineTests(unittest.TestCase):
                     Decimal("25"),
                 )
 
+    def test_daily_equity_drawdown_halts_perps_paper_account(self):
+        with tempfile.TemporaryDirectory() as directory:
+            with self.make_engine(directory, daily_drawdown_pct="0.000001") as engine:
+                result = process_snapshot_at_capture(engine, make_snapshot(), FakeHistory())
+                self.assertTrue(result["halted"])
+                self.assertEqual(result["halt_reason"], "daily_drawdown_limit")
+                self.assertGreater(Decimal(result["peak_drawdown_pct"]), 0)
+                self.assertLess(Decimal(result["daily_pnl_pct"]), 0)
+
     def test_snapshot_cannot_open_new_risk_when_open_position_market_data_is_incomplete(self):
         with tempfile.TemporaryDirectory() as directory:
             with self.make_engine(directory) as engine:

@@ -39,6 +39,7 @@ export default defineRailway(() => {
       PERPS_MARKET_LIMIT: "10",
       PERPS_BACKUP_DIRECTORY: "/app/data/perps_backups",
       PERPS_BACKUP_INTERVAL_HOURS: "6",
+      PERPS_WORKER_MAX_CONSECUTIVE_FAILURES: "10",
       PERPS_BACKUP_RETAIN: "30",
       PERPS_POLL_INTERVAL_SECONDS: "30",
       PERPS_HISTORY_RETENTION_DAYS: "14",

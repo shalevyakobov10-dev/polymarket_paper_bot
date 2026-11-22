@@ -252,8 +252,11 @@ async def _run_from_environment(args: argparse.Namespace) -> int:
     max_failures = int(os.environ.get("PERPS_ACCOUNT_SUPERVISOR_MAX_FAILURES", "10"))
 
     secrets = load_perps_account_secrets(secrets_path)
-    client, credentials = await create_secure_client_from_existing_credentials(secrets)
-    secrets.clear()
+    try:
+        client, credentials = await create_secure_client_from_existing_credentials(secrets)
+    finally:
+        # Drop the JSON secret container even if SDK client construction fails.
+        secrets.clear()
 
     stop_event = asyncio.Event()
     loop = asyncio.get_running_loop()

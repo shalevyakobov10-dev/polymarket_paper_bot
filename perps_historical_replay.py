@@ -40,11 +40,24 @@ class PointInTimePerpsHistory:
         self._as_of = _parse_aware(as_of, "as_of")
 
     def history(self, instrument_id: int, limit: int = 100) -> list[dict[str, Any]]:
-        return self._store.history(
+        rows = self._store.history(
             instrument_id,
             limit=limit,
             as_of_received_at=self._as_of,
         )
+        decision_ms = int(self._as_of.timestamp() * 1000)
+        eligible = []
+        for row in rows:
+            try:
+                book_ms = int(row["book_timestamp_ms"])
+                ticker_ms = int(row["ticker"]["timestamp_ms"])
+            except (KeyError, TypeError, ValueError, OverflowError):
+                continue
+            # Protect against corrupted or future-dated venue timestamps even
+            # when the local receipt timestamp was recorded before the decision.
+            if 0 < book_ms <= decision_ms and 0 < ticker_ms <= decision_ms:
+                eligible.append(row)
+        return eligible
 
     def funding_rate_at(
         self,

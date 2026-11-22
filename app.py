@@ -1425,6 +1425,8 @@ class Handler(BaseHTTPRequestHandler):
                         "name": "perps_market_data",
                         "status": perps_status,
                         "worker_running": perps_snapshot.get("worker_state") in {"healthy", "degraded"},
+                        "markets_in_last_snapshot": perps_snapshot.get("markets_in_last_snapshot", 0),
+                        "markets_with_verified_fee_schedule": perps_snapshot.get("markets_with_fee_schedule", 0),
                         "last_success_at": perps_snapshot.get("last_success_at"),
                         "last_heartbeat_at": perps_snapshot.get("last_heartbeat_at"),
                         "seconds_since_heartbeat": round(perps_age, 1) if perps_age is not None else None,
@@ -1453,8 +1455,14 @@ class Handler(BaseHTTPRequestHandler):
                             "status": engine_status,
                             "worker_state": engine_state,
                             "halt_reason": engine_summary.get("halt_reason"),
+                            "degraded_reason": perps_snapshot.get("paper_engine_degraded_reason"),
+                            "verified_fee_markets": perps_snapshot.get("markets_with_fee_schedule", 0),
                             "open_positions": engine_summary.get("open_positions", 0),
                             "closed_positions": engine_summary.get("closed_positions", 0),
+                            "new_entries_permitted": (
+                                engine_status == "healthy"
+                                and perps_snapshot.get("markets_with_fee_schedule", 0) > 0
+                            ),
                             "live_execution_enabled": False,
                             "order_submission_allowed": False,
                         }

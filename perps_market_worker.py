@@ -199,6 +199,7 @@ def run_worker(
     backup_interval_hours: int | None = None,
     backup_directory: str | Path | None = None,
     backup_retain: int | None = None,
+    max_consecutive_failures: int | None = None,
     max_cycles: int | None = None,
 ) -> int:
     """Poll read-only Perps market data, archive it, and retry with bounded backoff."""
@@ -213,6 +214,12 @@ def run_worker(
     )
     if not 1 <= retention_days <= 365:
         raise ValueError("history_retention_days must be between 1 and 365")
+    failure_limit = (
+        _positive_int_env("PERPS_WORKER_MAX_CONSECUTIVE_FAILURES", 10, 1, 50)
+        if max_consecutive_failures is None else max_consecutive_failures
+    )
+    if isinstance(failure_limit, bool) or not isinstance(failure_limit, int) or not 1 <= failure_limit <= 50:
+        raise ValueError("max_consecutive_failures must be an integer between 1 and 50")
     current_provider = provider or PerpsPublicMarketDataProvider(
         market_limit=_positive_int_env("PERPS_MARKET_LIMIT", 10, 1, 50),
         max_age_seconds=10.0,
@@ -447,8 +454,12 @@ def run_worker(
                     except Exception:
                         state["paper_engine"] = None
                 _write_status(status_file, state)
-                if max_cycles is not None:
-                    print(f"Perps worker cycle failed: {state['last_error']}", file=sys.stderr, flush=True)
+                if max_cycles is not None or failures >= failure_limit:
+                    print(
+                        f"Perps worker exiting after {failures} consecutive failures: {state['last_error']}",
+                        file=sys.stderr,
+                        flush=True,
+                    )
                     return 1
                 if stopping.wait(delay):
                     break

@@ -114,6 +114,12 @@ class FakeHistory:
         }
 
 
+def process_snapshot_at_capture(engine, snapshot, history):
+    timestamp_ms = int(snapshot["book"]["timestamp_ms"])
+    captured_at = datetime.fromtimestamp(timestamp_ms / 1000, tz=timezone.utc)
+    return engine.process_snapshot(snapshot, history, now=captured_at)
+
+
 class PerpsPaperEngineTests(unittest.TestCase):
     def make_engine(self, directory, **kwargs):
         return PerpsPaperEngine(
@@ -279,6 +285,35 @@ class PerpsPaperEngineTests(unittest.TestCase):
                     "SELECT details_json FROM perps_paper_events WHERE event_type='CLOSE_BLOCKED'"
                 ).fetchone()
                 self.assertIn("insufficient visible", event["details_json"])
+                position = engine.db.execute(
+                    "SELECT pending_exit_reason,pending_exit_liquidated "
+                    "FROM perps_paper_positions WHERE status='OPEN'"
+                ).fetchone()
+                self.assertEqual(position["pending_exit_reason"], "stop_loss")
+                self.assertFalse(position["pending_exit_liquidated"])
+
+    def test_pending_stop_exit_is_retried_after_mark_recovers(self):
+        with tempfile.TemporaryDirectory() as directory:
+            with self.make_engine(directory) as engine:
+                process_snapshot_at_capture(engine, make_snapshot(), FakeHistory())
+                blocked = make_snapshot(
+                    mark="99.50", sequence=4, timestamp_ms=NOW_MS + 90_000,
+                    bid="99.49", ask="99.51", bid_quantity="0.0001",
+                )
+                process_snapshot_at_capture(engine, blocked, FakeHistory())
+                recovering = make_snapshot(
+                    mark="100.20", sequence=5, timestamp_ms=NOW_MS + 120_000,
+                    bid="100.19", ask="100.21",
+                )
+                result = process_snapshot_at_capture(engine, recovering, FakeHistory())
+                self.assertEqual(result["open_positions"], 0)
+                position = engine.db.execute(
+                    "SELECT status,close_reason,pending_exit_reason "
+                    "FROM perps_paper_positions"
+                ).fetchone()
+                self.assertEqual(position["status"], "CLOSED")
+                self.assertEqual(position["close_reason"], "stop_loss")
+                self.assertIsNone(position["pending_exit_reason"])
 
     def test_funding_uses_exact_published_settlement_not_previous_ticker_estimate(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -469,8 +504,11 @@ class PerpsPaperEngineTests(unittest.TestCase):
             with self.make_engine(directory) as engine:
                 snapshot = make_snapshot()
                 snapshot["received_at"] = iso_ms(NOW_MS + 120_000)
-                with self.assertRaisesRegex(ValueError, "stale"):
-                    engine.process_snapshot(snapshot, FakeHistory())
+                captured_at = datetime.fromtimestamp(
+                    snapshot["book"]["timestamp_ms"] / 1000, tz=timezone.utc
+                )
+                with self.assertRaisesRegex(ValueError, "future-dated"):
+                    engine.process_snapshot(snapshot, FakeHistory(), now=captured_at)
 
     def test_invalid_configuration_fails_closed(self):
         with tempfile.TemporaryDirectory() as directory:

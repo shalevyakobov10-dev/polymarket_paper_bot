@@ -7,8 +7,10 @@ on:
       - "perps_sdk_contract.py"
       - "perps_sdk_reconciler.py"
       - "perps_account_preflight.py"
+      - "perps_live_release_gate.py"
       - "tests/test_perps_sdk_contract.py"
       - "tests/test_perps_account_preflight.py"
+      - "tests/test_perps_live_release_gate.py"
       - ".github/workflows/perps-sdk-contract.yml"
   pull_request:
     paths:
@@ -16,8 +18,10 @@ on:
       - "perps_sdk_contract.py"
       - "perps_sdk_reconciler.py"
       - "perps_account_preflight.py"
+      - "perps_live_release_gate.py"
       - "tests/test_perps_sdk_contract.py"
       - "tests/test_perps_account_preflight.py"
+      - "tests/test_perps_live_release_gate.py"
       - ".github/workflows/perps-sdk-contract.yml"
 
 permissions:

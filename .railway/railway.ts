@@ -1,8 +1,8 @@
 import { defineRailway, github, project, service, volume } from "railway/iac";
 
 /**
- * Railway project definition for the continuous event-aware paper research worker.
- * The worker is always DRY_RUN-only; this IaC never enables account monitoring or live orders.
+ * Railway project definition for continuous paper and public Perps market-data workers.
+ * Both workers are research-only; this IaC never enables account monitoring or live orders.
  * The source remains main so deployment consumes only code after the release branch is merged.
  *
  * Review with `railway config plan` before applying. This file defines
@@ -33,6 +33,11 @@ export default defineRailway(() => {
       ENABLE_USER_ORDER_MONITOR: "false",
       ENABLE_EVENT_PAPER_WORKER: "true",
       EVENT_PAPER_WORKER_STATUS_FILE: "/app/data/event_paper_worker_status.json",
+      ENABLE_PERPS_MARKET_DATA_WORKER: "true",
+      PERPS_MARKET_HISTORY_DB: "/app/data/perps_market_history.sqlite3",
+      PERPS_MARKET_WORKER_STATUS_FILE: "/app/data/perps_market_worker_status.json",
+      PERPS_MARKET_LIMIT: "10",
+      PERPS_POLL_INTERVAL_SECONDS: "30",
       PAPER_MARKET_DATA_SOURCE: "live_clob",
       PAPER_DATABASE_PATH: "/app/data/offline_news_paper.sqlite3",
       MARKET_HISTORY_DATABASE_PATH: "/app/data/market_history.sqlite3",

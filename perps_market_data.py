@@ -11,7 +11,7 @@ import math
 import os
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
-from typing import Any
+from typing import Any, Iterable
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
@@ -372,7 +372,12 @@ class PerpsPublicMarketDataProvider:
         except (UnicodeDecodeError, json.JSONDecodeError):
             raise PerpsAPIError("Perps API returned invalid JSON") from None
 
-    def load(self, *, now: datetime | None = None) -> list[dict[str, Any]]:
+    def load(
+        self,
+        *,
+        now: datetime | None = None,
+        priority_instrument_ids: Iterable[int] | None = None,
+    ) -> list[dict[str, Any]]:
         current = now or datetime.now(timezone.utc)
         if current.tzinfo is None or current.utcoffset() is None:
             raise ValueError("now must be timezone-aware")
@@ -412,11 +417,38 @@ class PerpsPublicMarketDataProvider:
             ticker_rows[instrument_id] = row
         instruments.sort(key=lambda row: row["instrument_id"])
 
+        # Existing isolated positions must keep receiving Mark Price, funding,
+        # and exit-book updates even when they fall outside the discovery slice.
+        priority_ids: list[int] = []
+        if priority_instrument_ids is not None:
+            if isinstance(priority_instrument_ids, (str, bytes)):
+                raise ValueError("priority_instrument_ids must be an iterable of integer IDs")
+            seen_priority_ids: set[int] = set()
+            for value in priority_instrument_ids:
+                if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+                    raise ValueError("priority instrument IDs must be nonnegative integers")
+                seen_priority_ids.add(value)
+            if len(seen_priority_ids) > 10:
+                raise ValueError("at most ten open-position instruments may be prioritized")
+            priority_ids = sorted(seen_priority_ids)
+
+        instruments_by_id = {row["instrument_id"]: row for row in instruments}
+        priority_set = set(priority_ids)
+        priority_instruments = [
+            instruments_by_id[instrument_id]
+            for instrument_id in priority_ids
+            if instrument_id in instruments_by_id
+        ]
+        # market_limit is the discovery budget for new candidates. Existing
+        # positions are fetched first and do not consume that budget.
+        discovery_instruments = [
+            row for row in instruments if row["instrument_id"] not in priority_set
+        ][: self.market_limit]
+        candidates = priority_instruments + discovery_instruments
+
         snapshots: list[dict[str, Any]] = []
         failures: list[str] = []
-        for instrument in instruments:
-            if len(snapshots) >= self.market_limit:
-                break
+        for instrument in candidates:
             instrument_id = int(instrument["instrument_id"])
             raw_ticker = ticker_rows.get(instrument_id)
             if raw_ticker is None:

@@ -70,7 +70,7 @@ class PerpsRiskTests(unittest.TestCase):
         self.assertEqual(result["reason"], "invalid_or_incomplete_risk_input")
 
     def test_rejects_excessive_risk_budget(self):
-        limits = PerpsRiskLimits(risk_per_trade_pct=Decimal("0.001"))
+        limits = PerpsRiskLimits(risk_per_trade_pct=Decimal("0.0009"))
         result = evaluate_perps_entry(
             snapshot(), side="LONG", requested_notional="10",
             equity="100", free_collateral="100", limits=limits,

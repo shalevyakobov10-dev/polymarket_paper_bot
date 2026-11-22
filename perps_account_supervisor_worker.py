@@ -53,8 +53,8 @@ def _unique_json_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
 def load_perps_account_secrets(path: str | Path) -> dict[str, Any]:
     """Load a strict schema from a non-symlink file not readable by others.
 
-    Accepted permissions are owner-only, or owner plus group-read. Group write,
-    all other-user permissions, non-regular files and oversized files are denied.
+    Only owner-readable modes 0400 and 0600 are accepted. Group/other access,
+    executable modes, non-regular files and oversized files are denied.
     The raw document is never logged or included in raised exception text.
     """
     target = Path(path).expanduser()
@@ -68,7 +68,7 @@ def load_perps_account_secrets(path: str | Path) -> dict[str, Any]:
         if not stat.S_ISREG(metadata.st_mode):
             raise PerpsAccountSecretsError("perps_account_secrets_must_be_regular_file")
         permissions = stat.S_IMODE(metadata.st_mode)
-        if permissions & ~0o640 or not permissions & 0o400:
+        if permissions not in {0o400, 0o600}:
             raise PerpsAccountSecretsError("perps_account_secrets_permissions_invalid")
         if metadata.st_size <= 0 or metadata.st_size > MAX_SECRET_FILE_BYTES:
             raise PerpsAccountSecretsError("perps_account_secrets_file_size_invalid")

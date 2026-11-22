@@ -994,6 +994,26 @@ class PerpsPaperEngine:
                 (self._unrealized(row, Decimal(row["last_mark"])) for row in positions),
                 ZERO,
             )
+            current_notional = sum(
+                (
+                    Decimal(row["quantity"]) * Decimal(row["last_mark"])
+                    for row in positions
+                ),
+                ZERO,
+            )
+            peak_equity = Decimal(account["peak_equity"])
+            daily_start_equity = Decimal(account["day_start_equity"])
+            peak_drawdown_pct = (
+                max(ZERO, (peak_equity - equity) / peak_equity * Decimal("100"))
+                if peak_equity > ZERO else ZERO
+            )
+            daily_pnl_pct = (
+                (equity - daily_start_equity) / daily_start_equity * Decimal("100")
+                if daily_start_equity > ZERO else ZERO
+            )
+            effective_leverage = (
+                current_notional / equity if equity > ZERO else ZERO
+            )
             closed_rows = self.db.execute(
                 """
                 SELECT net_pnl,gross_pnl,entry_fee,funding_paid
@@ -1080,9 +1100,13 @@ class PerpsPaperEngine:
                 "worker_state": "healthy" if not bool(account["halted"]) else "halted",
                 "cash": str(cash),
                 "equity": str(equity),
-                "peak_equity": str(Decimal(account["peak_equity"])),
+                "peak_equity": str(peak_equity),
                 "isolated_margin_reserved": str(margin),
                 "unrealized_pnl": str(unrealized),
+                "open_notional": str(current_notional),
+                "effective_leverage": str(effective_leverage),
+                "peak_drawdown_pct": str(peak_drawdown_pct.quantize(Decimal("0.01"))),
+                "daily_pnl_pct": str(daily_pnl_pct.quantize(Decimal("0.01"))),
                 "open_positions": len(positions),
                 "pending_exit_positions": int(pending_exit_count),
                 "closed_positions": closed_count,

@@ -10,7 +10,7 @@ from __future__ import annotations
 import json
 import sqlite3
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation, ROUND_DOWN
 from pathlib import Path
 from typing import Any, Mapping
@@ -232,6 +232,7 @@ class PerpsPaperEngine:
         taker_fee_rate: Any = "0.0005",
         max_entry_impact_bps: Any = "100",
         max_market_data_age_seconds: Any = "10",
+        snapshot_retention_days: int = 14,
     ) -> None:
         self.database_path = Path(database_path).expanduser()
         self.database_path.parent.mkdir(parents=True, exist_ok=True)
@@ -243,6 +244,9 @@ class PerpsPaperEngine:
             raise ValueError("invalid_paper_account_configuration")
         if self.max_entry_impact_bps <= 0 or not Decimal("1") <= self.max_market_data_age_seconds <= Decimal("10"):
             raise ValueError("invalid_paper_execution_configuration")
+        if isinstance(snapshot_retention_days, bool) or not isinstance(snapshot_retention_days, int) or not 1 <= snapshot_retention_days <= 365:
+            raise ValueError("snapshot_retention_days must be an integer between 1 and 365")
+        self.snapshot_retention_days = snapshot_retention_days
         self.limits = limits or PerpsRiskLimits()
         self._initialise()
 
@@ -373,6 +377,14 @@ class PerpsPaperEngine:
                 int(snapshot["book_timestamp_ms"]),
                 serialized,
             ),
+        )
+        cutoff = (
+            _parse_time(str(snapshot["observed_at"]))
+            - timedelta(days=self.snapshot_retention_days)
+        ).isoformat()
+        connection.execute(
+            "DELETE FROM perps_paper_snapshots WHERE observed_at < ?",
+            (cutoff,),
         )
 
     def _update_mark_locked(

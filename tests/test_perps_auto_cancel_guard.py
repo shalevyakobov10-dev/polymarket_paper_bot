@@ -245,7 +245,7 @@ class PerpsAutoCancelGuardTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["open_orders_remaining"], 0)
         self.assertTrue(result["server_auto_cancel_disarmed"])
         self.assertEqual(self.session.cancel_all_calls, 1)
-        self.assertEqual(self.session.open_orders_calls, 1)
+        self.assertEqual(self.session.open_orders_calls, 2)
         self.assertEqual(self.session.disarm_calls, 1)
         self.assertEqual(len(self.session.arm_calls), 1)
         self.assertFalse(result["new_order_permission"])

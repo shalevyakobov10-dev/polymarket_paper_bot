@@ -10,9 +10,13 @@ on:
       - "perps_live_release_gate.py"
       - "perps_auto_cancel_guard.py"
       - "perps_live_execution_gateway.py"
+      - "perps_auto_cancel_guard.py"
+      - "perps_live_execution_gateway.py"
       - "tests/test_perps_sdk_contract.py"
       - "tests/test_perps_account_preflight.py"
       - "tests/test_perps_live_release_gate.py"
+      - "tests/test_perps_auto_cancel_guard.py"
+      - "tests/test_perps_live_execution_gateway.py"
       - "tests/test_perps_auto_cancel_guard.py"
       - "tests/test_perps_live_execution_gateway.py"
       - ".github/workflows/perps-sdk-contract.yml"
@@ -25,9 +29,13 @@ on:
       - "perps_live_release_gate.py"
       - "perps_auto_cancel_guard.py"
       - "perps_live_execution_gateway.py"
+      - "perps_auto_cancel_guard.py"
+      - "perps_live_execution_gateway.py"
       - "tests/test_perps_sdk_contract.py"
       - "tests/test_perps_account_preflight.py"
       - "tests/test_perps_live_release_gate.py"
+      - "tests/test_perps_auto_cancel_guard.py"
+      - "tests/test_perps_live_execution_gateway.py"
       - "tests/test_perps_auto_cancel_guard.py"
       - "tests/test_perps_live_execution_gateway.py"
       - ".github/workflows/perps-sdk-contract.yml"
@@ -51,5 +59,7 @@ jobs:
         run: python perps_sdk_contract.py
       - name: Run contract unit tests
         run: python -m unittest discover -s tests -p 'test_perps_sdk_contract.py' -v
+      - name: Run complete Perps unit-test suite
+        run: python -m unittest discover -s tests -p 'test_perps_*.py' -v
       - name: Run Perps account, order journal, gateway, and safety tests
         run: python -m unittest discover -s tests -p 'test_perps_*.py' -v

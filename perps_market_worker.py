@@ -237,7 +237,7 @@ def run_worker(
         raise ValueError("backup_retain must be an integer between 1 and 365")
     chosen_backup_directory = Path(backup_directory or os.getenv(
         "PERPS_BACKUP_DIRECTORY",
-        str(Path(os.getenv("DATA_DIR", "data")) / "backups"),
+        str(Path(os.getenv("DATA_DIR", "data")) / "perps_backups"),
     )).expanduser()
     current_store = store or PerpsMarketHistoryStore(database)
     status_file = Path(status_path or os.getenv(
@@ -402,8 +402,9 @@ def run_worker(
                                 retain=retain_backups,
                             )
                             files = backup_result.get("files") or []
-                            if backup_result.get("skipped_missing_sources") or len(files) != 2:
-                                raise RuntimeError("both Perps paper and market-history databases must be backed up")
+                            manifest_name = str(backup_result.get("manifest_name") or "").strip()
+                            if backup_result.get("skipped_missing_sources") or len(files) != 2 or not manifest_name:
+                                raise RuntimeError("both Perps databases and their verified manifest must be backed up")
                             manifest_time = datetime.fromisoformat(
                                 str(backup_result.get("created_at") or "").replace("Z", "+00:00")
                             )
@@ -411,7 +412,7 @@ def run_worker(
                                 raise RuntimeError("Perps backup returned a timezone-naive timestamp")
                             state.update({
                                 "last_backup_at": manifest_time.astimezone(timezone.utc).isoformat(),
-                                "last_backup_manifest_name": str(backup_result.get("manifest_name") or "")[:200] or None,
+                                "last_backup_manifest_name": manifest_name[:200],
                                 "backup_files_last_run": 2,
                                 "backup_error_type": None,
                                 "backup_consecutive_failures": 0,

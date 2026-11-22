@@ -171,6 +171,17 @@ class PerpsAccountPreflightTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("public_perps_fee_schedule_provider_missing", report["blocked_reasons"])
         self.assertFalse(report["read_only_preflight_passed"])
 
+    async def test_synchronous_public_fee_provider_is_called_off_event_loop(self):
+        preflight = PerpsAccountPreflight(
+            journal=self.journal,
+            session=self.session,
+            fee_schedule_provider=lambda: self.session.fee_schedule_snapshot,
+        )
+        report = await preflight.run(now=NOW)
+        self.assertTrue(report["read_only_preflight_passed"])
+        self.assertTrue(report["observations"]["fee_schedule_fresh"])
+        self.assertEqual(report["observations"]["effective_taker_fee_rate"], "0.0005")
+
     async def test_stale_or_future_portfolio_is_blocked(self):
         self.session.portfolio.timestamp = NOW - timedelta(minutes=5)
         report = await self.preflight.run(now=NOW)

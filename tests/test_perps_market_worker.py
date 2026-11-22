@@ -68,6 +68,9 @@ class FakePaperEngine:
     def __init__(self):
         self.processed = []
 
+    def funding_requirements(self, snapshots):
+        return []
+
     def process_snapshot(self, snapshot, history_store):
         self.processed.append(snapshot["instrument"]["instrument_id"])
 

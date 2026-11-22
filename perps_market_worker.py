@@ -156,6 +156,11 @@ def read_perps_worker_status(path: str | Path) -> dict[str, Any]:
             "paper_engine_state": raw.get("paper_engine_state") if raw.get("paper_engine_state") in {
                 "disabled", "starting", "healthy", "halted", "degraded"
             } else "unknown",
+            "paper_engine_degraded_reason": (
+                str(raw.get("paper_engine_degraded_reason"))[:120]
+                if isinstance(raw.get("paper_engine_degraded_reason"), str)
+                else None
+            ),
             "paper_engine": _sanitize_paper_summary(raw.get("paper_engine")),
             "last_backup_at": raw.get("last_backup_at"),
             "last_backup_manifest_name": str(raw.get("last_backup_manifest_name") or "")[:200] or None,
@@ -179,7 +184,8 @@ def read_perps_worker_status(path: str | Path) -> dict[str, Any]:
             "history_rows": 0, "poll_interval_seconds": None,
             "heartbeat_timeout_seconds": 180,
             "history_retention_days": None, "expired_rows_pruned_total": 0,
-            "paper_engine_enabled": False, "paper_engine_state": "unknown", "paper_engine": None,
+            "paper_engine_enabled": False, "paper_engine_state": "unknown",
+            "paper_engine_degraded_reason": None, "paper_engine": None,
             "research_only": True, "live_execution_enabled": False, "execution": "none",
         }
     except (OSError, UnicodeError, ValueError, TypeError, json.JSONDecodeError):
@@ -300,8 +306,10 @@ def run_worker(
         "paper_engine_enabled": engine_enabled,
         "paper_engine_state": (
             "halted" if initial_paper_summary and initial_paper_summary.get("halted")
-            else "healthy" if current_engine is not None else "disabled"
+            else "starting" if current_engine is not None else "disabled"
         ),
+        "paper_engine_degraded_reason": None,
+        "markets_with_fee_schedule": 0,
         "paper_engine": initial_paper_summary,
         "last_backup_at": None,
         "last_backup_manifest_name": None,
@@ -358,7 +366,7 @@ def run_worker(
                     paper_summary = current_engine.summary()
                     state["paper_engine"] = paper_summary
                     state["paper_engine_state"] = (
-                        "halted" if paper_summary.get("halted") else "healthy"
+                        "halted" if paper_summary.get("halted") else "starting"
                     )
                 monotonic_now = time.monotonic()
                 prune_before = getattr(current_store, "prune_before", None)
@@ -379,11 +387,25 @@ def run_worker(
                 state["last_error"] = None
                 state["consecutive_failures"] = 0
                 state["markets_in_last_snapshot"] = len(snapshots)
-                state["markets_with_fee_schedule"] = sum(
+                fee_market_count = sum(
                     1 for row in snapshots
                     if isinstance(row.get("fees"), dict)
                     and row["fees"].get("source") == "public_perps_fee_schedule"
                 )
+                state["markets_with_fee_schedule"] = fee_market_count
+                if current_engine is not None:
+                    paper_summary = state.get("paper_engine") or {}
+                    if paper_summary.get("halted"):
+                        state["paper_engine_state"] = "halted"
+                        state["paper_engine_degraded_reason"] = paper_summary.get("halt_reason")
+                    elif fee_market_count == 0:
+                        # Market data ingestion remains healthy, but the paper
+                        # engine cannot open new risk without verified fees.
+                        state["paper_engine_state"] = "degraded"
+                        state["paper_engine_degraded_reason"] = "no_verified_fee_schedule"
+                    else:
+                        state["paper_engine_state"] = "healthy"
+                        state["paper_engine_degraded_reason"] = None
                 state["snapshots_inserted_total"] += int(recorded["inserted"])
                 state["history_rows"] = int(current_store.count())
                 state["last_heartbeat_at"] = _utc_now()

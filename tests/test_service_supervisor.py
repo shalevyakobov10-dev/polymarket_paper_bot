@@ -205,21 +205,21 @@ class SupervisorTests(unittest.TestCase):
             config.perps_worker_env["PERPS_PAPER_DB"],
             "/persist/data/perps_paper.sqlite3",
         )
-        self.assertEqual(config.perps_worker_env["PERPS_WORKER_HEARTBEAT_TIMEOUT_SECONDS"], "279")
+        self.assertEqual(config.perps_worker_env["PERPS_WORKER_HEARTBEAT_TIMEOUT_SECONDS"], "359")
         self.assertEqual(config.perps_worker_status_path, Path(
             "/persist/data/perps_market_worker_status.json"
         ))
-        self.assertEqual(config.perps_worker_heartbeat_timeout_seconds, 279.0)
+        self.assertEqual(config.perps_worker_heartbeat_timeout_seconds, 359.0)
         self.assertNotIn("LIVE_TRADING_ENABLED", config.perps_worker_env)
         self.assertNotIn("LIVE_TRADING_ARMED", config.perps_worker_env)
 
     def test_perps_heartbeat_timeout_cannot_be_shorter_than_market_poll_budget(self):
-        with self.assertRaisesRegex(ValueError, "between 279 and 7200"):
+        with self.assertRaisesRegex(ValueError, "between 359 and 7200"):
             build_supervisor_config({
                 "ENABLE_PERPS_MARKET_DATA_WORKER": "true",
                 "PERPS_POLL_INTERVAL_SECONDS": "45",
                 "PERPS_MARKET_LIMIT": "8",
-                "PERPS_WORKER_HEARTBEAT_TIMEOUT_SECONDS": "278",
+                "PERPS_WORKER_HEARTBEAT_TIMEOUT_SECONDS": "358",
             })
 
     def test_perps_heartbeat_age_ignores_old_process_files_and_rejects_future_stamps(self):

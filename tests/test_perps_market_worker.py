@@ -356,6 +356,31 @@ class PerpsMarketWorkerTests(unittest.TestCase):
             self.assertEqual(safe["backup_error_type"], "OSError")
             self.assertEqual(safe["backup_retry_delay_seconds"], 60)
 
+    def test_worker_exits_after_bounded_consecutive_failures_for_supervisor_restart(self):
+        class ContinueStopEvent:
+            def is_set(self):
+                return False
+
+            def wait(self, seconds):
+                return False
+
+        with tempfile.TemporaryDirectory() as directory:
+            target = Path(directory) / "status.json"
+            result = run_worker(
+                provider=FakeProvider(error=RuntimeError("persistent upstream outage")),
+                store=FakeStore(),
+                stop_event=ContinueStopEvent(),
+                status_path=target,
+                poll_interval_seconds=15,
+                backup_function=None,
+                max_consecutive_failures=2,
+            )
+            self.assertEqual(result, 1)
+            raw = json.loads(target.read_text(encoding="utf-8"))
+            self.assertEqual(raw["worker_state"], "degraded")
+            self.assertEqual(raw["consecutive_failures"], 2)
+            self.assertIn("persistent upstream outage", raw["last_error"])
+
     def test_worker_marks_degraded_and_returns_failure_when_data_is_unavailable(self):
         with tempfile.TemporaryDirectory() as directory:
             target = Path(directory) / "status.json"

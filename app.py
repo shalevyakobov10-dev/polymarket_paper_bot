@@ -30,7 +30,10 @@ from resilience import exponential_backoff_seconds, parse_retry_after
 from supervisor_status import read_supervisor_status
 from event_paper_worker import read_event_paper_worker_status
 from perps_market_worker import read_perps_worker_status
-from perps_account_supervisor import read_perps_account_supervisor_status
+from perps_account_supervisor import (
+    read_perps_account_supervisor_status,
+    perps_account_supervisor_freshness,
+)
 from perps_live_release_gate import evaluate_perps_live_release_gate
 from control_center import CONTROL_CENTER_HTML
 
@@ -1743,6 +1746,7 @@ class Handler(BaseHTTPRequestHandler):
                 payload = read_perps_account_supervisor_status(
                     PERPS_ACCOUNT_SUPERVISOR_STATUS_FILE
                 )
+                payload = perps_account_supervisor_freshness(payload)
                 payload.update({
                     "read_only": True,
                     "order_submission_allowed": False,

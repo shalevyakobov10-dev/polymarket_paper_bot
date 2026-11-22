@@ -1427,6 +1427,12 @@ class Handler(BaseHTTPRequestHandler):
                         "worker_running": perps_snapshot.get("worker_state") in {"healthy", "degraded"},
                         "markets_in_last_snapshot": perps_snapshot.get("markets_in_last_snapshot", 0),
                         "markets_with_verified_fee_schedule": perps_snapshot.get("markets_with_fee_schedule", 0),
+                        "fee_coverage_status": (
+                            "unavailable" if perps_snapshot.get("markets_with_fee_schedule", 0) == 0
+                            else "complete" if perps_snapshot.get("markets_with_fee_schedule", 0)
+                            >= perps_snapshot.get("markets_in_last_snapshot", 0)
+                            else "partial"
+                        ),
                         "last_success_at": perps_snapshot.get("last_success_at"),
                         "last_heartbeat_at": perps_snapshot.get("last_heartbeat_at"),
                         "seconds_since_heartbeat": round(perps_age, 1) if perps_age is not None else None,
@@ -1457,9 +1463,15 @@ class Handler(BaseHTTPRequestHandler):
                             "halt_reason": engine_summary.get("halt_reason"),
                             "degraded_reason": perps_snapshot.get("paper_engine_degraded_reason"),
                             "verified_fee_markets": perps_snapshot.get("markets_with_fee_schedule", 0),
+                            "fee_coverage_status": (
+                                "unavailable" if perps_snapshot.get("markets_with_fee_schedule", 0) == 0
+                                else "complete" if perps_snapshot.get("markets_with_fee_schedule", 0)
+                                >= perps_snapshot.get("markets_in_last_snapshot", 0)
+                                else "partial"
+                            ),
                             "open_positions": engine_summary.get("open_positions", 0),
                             "closed_positions": engine_summary.get("closed_positions", 0),
-                            "new_entries_permitted": (
+                            "fee_verified_entry_path_available": (
                                 engine_status == "healthy"
                                 and perps_snapshot.get("markets_with_fee_schedule", 0) > 0
                             ),
@@ -1600,7 +1612,13 @@ class Handler(BaseHTTPRequestHandler):
                     "degraded_reason": worker_snapshot.get("paper_engine_degraded_reason"),
                     "markets_in_last_snapshot": worker_snapshot.get("markets_in_last_snapshot", 0),
                     "markets_with_verified_fee_schedule": worker_snapshot.get("markets_with_fee_schedule", 0),
-                    "new_entries_permitted": (
+                    "fee_coverage_status": (
+                        "unavailable" if worker_snapshot.get("markets_with_fee_schedule", 0) == 0
+                        else "complete" if worker_snapshot.get("markets_with_fee_schedule", 0)
+                        >= worker_snapshot.get("markets_in_last_snapshot", 0)
+                        else "partial"
+                    ),
+                    "fee_verified_entry_path_available": (
                         engine_enabled
                         and engine_state == "healthy"
                         and worker_snapshot.get("markets_with_fee_schedule", 0) > 0

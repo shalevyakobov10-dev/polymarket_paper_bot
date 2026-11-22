@@ -38,6 +38,7 @@ export default defineRailway(() => {
       PERPS_MARKET_WORKER_STATUS_FILE: "/app/data/perps_market_worker_status.json",
       PERPS_MARKET_LIMIT: "10",
       PERPS_POLL_INTERVAL_SECONDS: "30",
+      PERPS_HISTORY_RETENTION_DAYS: "14",
       PAPER_MARKET_DATA_SOURCE: "live_clob",
       PAPER_DATABASE_PATH: "/app/data/offline_news_paper.sqlite3",
       MARKET_HISTORY_DATABASE_PATH: "/app/data/market_history.sqlite3",

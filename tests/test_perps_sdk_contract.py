@@ -104,6 +104,44 @@ class PerpsSdkContractTests(unittest.TestCase):
         self.assertIn("fetch_portfolio", report["perps_session_method_failures"])
         self.assertIn("place_order", report["perps_session_method_failures"])
 
+    def test_missing_private_client_construction_hook_fails_closed(self):
+        class SecureClientWithoutExistingCredentialConstruction:
+            def open_perps_session(self, *, credentials=None, expires_in=None):
+                pass
+
+        report = evaluate_sdk_contract(
+            installed_version=EXPECTED_VERSION,
+            async_secure_client=SecureClientWithoutExistingCredentialConstruction,
+            perps_session=CompatiblePerpsSession,
+            api_key_credentials=CompatibleApiKeyCreds,
+            perps_credentials=CompatiblePerpsCredentials,
+        )
+        self.assertFalse(report["compatible"])
+        self.assertIn(
+            "_create",
+            report["async_secure_method_failures"],
+        )
+
+    def test_changed_credential_model_schema_fails_closed(self):
+        class IncompatiblePerpsCredentials:
+            model_fields = {"proxy": object(), "secret": object()}
+            @classmethod
+            def model_validate(cls, value):
+                raise AssertionError("contract inspection must not validate credentials")
+
+        report = evaluate_sdk_contract(
+            installed_version=EXPECTED_VERSION,
+            async_secure_client=CompatibleSecureClient,
+            perps_session=CompatiblePerpsSession,
+            api_key_credentials=CompatibleApiKeyCreds,
+            perps_credentials=IncompatiblePerpsCredentials,
+        )
+        self.assertFalse(report["compatible"])
+        self.assertEqual(
+            report["credential_model_failures"]["PerpsCredentials"],
+            ["expires_at", "private_key"],
+        )
+
     def test_changed_parameter_surface_fails_closed(self):
         class IncompatibleSecureClient:
             def open_perps_session(self, *, label=None):

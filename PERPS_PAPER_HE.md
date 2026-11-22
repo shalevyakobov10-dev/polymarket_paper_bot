@@ -34,6 +34,14 @@
 - היסטוריית Paper snapshots נשמרת עד 14 ימים כברירת מחדל.
 - עמלות Paper: 0.05% לכל צד כברירת מחדל — הנחת סימולציה בלבד, לא הצהרה שזהו תעריף Polymarket הנוכחי.
 
+## אסטרטגיית אותות
+
+נוסף מודול מחקר EMA 8/21 עם מומנטום 5 נרות וסינון תנודתיות 14 נרות. הוא משתמש רק בנרות דקה שהושלמו, דורש לפחות 60 נרות רציפים, ומחשב Stop בטווח 0.5%-1.5% ויעד התחלתי של 2R. זהו baseline ניסיוני בלבד; אין תוצאות OOS או הוכחה ליתרון מסחרי.
+
+`PERPS_SIGNAL_EVALUATION_ENABLED=true` מאפשר להעריך ולרשום אותות. `PERPS_AUTO_ENTRY_ENABLED=false` נשאר כבוי ב-Railway. פתיחת כניסות Paper אפשרית רק אחרי הפעלה מפורשת של דגל זה, לעולם לא פקודות live.
+
+כל החלטה נרשמת ב-SQLite לפי `(instrument_id, bar_close_ms)`, עם claim אטומי ומנגנון reclaim מוגבל לנעילה ישנה. כך worker restart אינו יוצר כפילות של אותו נר. ב-`/perps-paper` מוצגים מספר אותות, כניסות שנפתחו, כניסות שנחסמו ומצב האסטרטגיה.
+
 ## מה כבר אוטומטי
 
 - collector רציף יחיד שומר נתונים ציבוריים עם חותמות זמן.
@@ -60,6 +68,8 @@
 לפני חיבור order submission נדרשים: אסטרטגיית כניסה עם נתוני היסטוריה point-in-time, walk-forward ו־out-of-sample; אימות מלא של Funding ועמלות עדכניות; סימולציית liquidation מול מנוע הבורסה; בדיקת partial fills/reconciliation; circuit breakers נפרדים ל־Perps; בדיקות restart/recovery/backup restore; אבטחת מפתחות ב־secret manager; ובדיקת eligibility/region. גם לאחר מכן נדרש אישור מפורש של המפעיל.
 
 בענף הזה:
+- PERPS_SIGNAL_EVALUATION_ENABLED = true ב-Railway
+- PERPS_AUTO_ENTRY_ENABLED = false ב-Railway
 - research_only = true
 - execution = "none"
 - live_execution_enabled = false

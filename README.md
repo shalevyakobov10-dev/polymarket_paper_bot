@@ -519,6 +519,18 @@ Enable the simulator with `ENABLE_PERPS_PAPER_ENGINE=true` together with `ENABLE
 
 **This does not execute real Perps orders.** There is no Perps signing, authenticated balances, exchange order submission/cancellation, cross-margin, maker/limit-order simulation, partial-fill queue model, user-specific authenticated fee-tier lookup, or production wallet integration in this engine. Polymarket supports both Isolated and Cross Margin, but this paper model intentionally implements Isolated Margin only. It does not simulate the venue's insurance-fund or auto-deleveraging backstops, and its visible-book close is an approximation rather than a venue-exact liquidation execution. Incomplete exit depth leaves a position open and audited; a liquidation that cannot be filled or would exceed isolated collateral halts the paper account. Funding-history gaps halt rather than being approximated. The momentum signal has not been proven profitable or validated out of sample; no live-trading eligibility is asserted. Do not enable real-money execution from these results.
 
+Point-in-time Perps replay is available through `perps_historical_replay.py`. For example:
+
+```bash
+python perps_historical_replay.py \
+  --database ./data/perps_market_history.sqlite3 \
+  --from "2026-11-01T00:00:00+00:00" \
+  --to "2026-11-22T00:00:00+00:00" \
+  --max-snapshots 10000
+```
+
+The replay uses the same `PERPS_PAPER_*` risk and signal configuration as the supervised worker unless explicit research overrides are passed through the Python API. It filters both market snapshots and published funding settlements by their original local receipt time before using them in each decision, and returns a bounded closed-trade log plus gross/net PnL, win rate and profit factor. It runs in a fresh temporary portfolio database and never modifies the running paper account. The replay is an in-sample historical diagnostic; it does not certify an out-of-sample edge or enable live execution. Market and funding history are retained for 14 days by default.
+
 A scheduled GitHub Actions check (`Perps public market-data smoke`) fetches live public instruments, tickers and books and verifies at least one current usable market. It is a point-in-time integration check, not continuous hosting or an execution test. The normal Tests workflow also compiles the new engine, runs its unit tests, and smoke-tests the `/perps-paper` endpoint with the simulator disabled.
 
 ## Point-in-time Perps historical replay

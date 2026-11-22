@@ -96,7 +96,7 @@ class PerpsPaperWorkerTests(unittest.TestCase):
             self.assertFalse(status["live_execution_enabled"])
             self.assertEqual(status["execution"], "none")
             raw = json.loads(path.read_text())
-            self.assertEqual(raw["strategy_status"], "not_configured")
+            self.assertEqual(raw["strategy_status"], "disabled")
 
     def test_retries_a_transient_provider_error_then_recovers(self):
         with tempfile.TemporaryDirectory() as directory:

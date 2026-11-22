@@ -125,6 +125,27 @@ python backtest.py --markets 20 --days 30 --fidelity 5 --train-ratio 0.7 --sensi
 
 הגיבוי של Perps רץ מיד לאחר מחזור Paper תקין ראשון ולאחר מכן כל שש שעות. הוא מגבה יחד את perps_paper.sqlite3 ואת perps_market_history.sqlite3 (כולל Funding ונתוני העמלות), מאמת PRAGMA integrity_check ו־foreign_key_check, ומייצר SHA-256 ו־manifest. ברירת המחדל היא /app/data/perps_backups, ושומרים עד 30 גיבויים לכל מסד. בדיקת /health דורשת גיבוי זוגי תקין ורענן; כשלי גיבוי מדווחים ומפעילים retry עם backoff. תקלות נתוני Perps מקבלות retry עם backoff; לאחר עשרה מחזורים כושלים ברציפות התהליך יוצא כדי שה־Supervisor יפעיל אותו מחדש. הגיבויים נשמרים באותו Persistent Volume של Railway, ולכן הם אינם גיבוי Off-site ואינם מגנים מכשל או מחיקה של ה־Volume עצמו.
 
+### אימות ושחזור גיבוי Perps
+
+כל manifest כולל את שמות קובצי SQLite, גודל, SHA-256, תוצאת integrity ו־foreign-key check. לפני כל שחזור יש לאמת את כל הסט:
+
+```bash
+python backup_paper_data.py --verify-manifest /app/data/perps_backups/paper-backup-manifest-<timestamp>.json
+```
+
+כדי לשחזר את תיק ה־Paper לקובץ staging חדש:
+
+```bash
+python backup_paper_data.py \
+  --verify-manifest /app/data/perps_backups/paper-backup-manifest-<timestamp>.json \
+  --restore-source perps_paper.sqlite3 \
+  --restore-to /app/data/restore-staging/perps_paper.sqlite3
+```
+
+אותו תהליך אפשר לבצע עבור `perps_market_history.sqlite3` או `perps_order_journal.sqlite3`, תוך התאמת `--restore-source` ונתיב היעד. הכלי מאמת שוב checksum ו־SQLite integrity, מסרב ל־manifest חלקי, ואינו דורס קובץ יעד קיים. השחזור יוצר קובץ חדש בלבד: הוא אינו משנה משתני סביבה, אינו עוצר writers ואינו מחליף DB פעיל.
+
+לפני מעבר מתוכנן למסד ששוחזר, יש לעצור את כל ה־writers, לבצע גיבוי נוסף, להשוות את ה־manifest ואת מספרי הרשומות, לבדוק את הקובץ בגרסת קוד תואמת, ורק אז לבצע שינוי נתיב ידני עם אפשרות rollback. אין לבצע שחזור ישירות מעל `/app/data/perps_paper.sqlite3` או `/app/data/perps_market_history.sqlite3` בזמן שה־worker פועל.
+
 לניתוח היסטורי ניתן להריץ `python perps_historical_replay.py --database /app/data/perps_market_history.sqlite3 --max-snapshots 10000` מתוך סביבת ה־Paper. ה־Replay משתמש באותן הגדרות `PERPS_PAPER_*` של ה־worker, יוצר תיק זמני ואינו משנה את תיק ההשקעות הפעיל. הוא מספק תוצאה מחקרית בלבד ומסמן תמיד `out_of_sample_validated=false` ו־`live_execution_eligible=false`.
 
 **אין כאן מסחר אמיתי ב־Perps.** לא קיימים עדיין אימות חשבון, חתימה, שליחת/ביטול פקודות Perps, מודל Cross-Margin מלא או בדיקת התאמה מלאה למנוע החיסול של הבורסה. אין לחבר מפתחות או להפעיל מסחר חי לפני הוכחת יתרון מחוץ למדגם, שחזור Funding מלא, סימולציית ביצוע ארוכה, סקירת אבטחה ובדיקת זכאות/רגולציה. ה־IaC עדיין מצביע על ענף `main`; עד למיזוג מורשה ופריסה מאומתת, השינויים בענף ה־PR אינם רצים בשירות Railway.

@@ -92,6 +92,8 @@ function metricEntries(id,d){
   return {status:d.worker_state,rows:[
    ["Enabled",d.enabled],
    ["Read-only preflight passed",d.read_only_preflight_passed],
+   ["Heartbeat fresh",d.heartbeat_fresh],
+   ["Heartbeat age (seconds)",d.heartbeat_age_seconds],
    ["Startup recovery complete",d.recovery_completed],
    ["Interrupted submissions recovered",d.recovered_interrupted_submissions],
    ["Unresolved local orders",o.unresolved_order_count],

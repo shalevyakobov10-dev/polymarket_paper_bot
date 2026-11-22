@@ -77,6 +77,7 @@ def sweep_perps_book(
         remaining = requested
         total_quantity = Decimal("0")
         total_quote = Decimal("0")
+        levels_consumed = 0
         for level in levels:
             if not isinstance(level, Mapping):
                 return {"filled": False, "reason": "invalid_book_level"}
@@ -85,6 +86,8 @@ def sweep_perps_book(
             if price <= 0 or available <= 0:
                 return {"filled": False, "reason": "invalid_book_level"}
             take = min(remaining, available)
+            if take > 0:
+                levels_consumed += 1
             total_quantity += take
             total_quote += take * price
             remaining -= take
@@ -113,10 +116,7 @@ def sweep_perps_book(
             "vwap": str(vwap),
             "notional": str(total_quote),
             "impact_bps": str(impact_bps),
-            "levels_consumed": sum(
-                1 for level in levels
-                if Decimal(str(level["quantity"])) > 0
-            ),
+            "levels_consumed": levels_consumed,
             "execution": "paper_simulation_only",
         }
     except (ValueError, TypeError, ArithmeticError):
@@ -223,12 +223,20 @@ class PerpsPaperEngine:
                 (str(self.starting_cash), str(self.starting_cash), _iso()),
             )
 
-    def _validate_snapshot(self, snapshot: Mapping[str, Any], now: datetime) -> None:
+    def _validate_snapshot(
+        self,
+        snapshot: Mapping[str, Any],
+        now: datetime,
+        *,
+        allow_close_only: bool = False,
+    ) -> None:
         if not isinstance(snapshot, Mapping):
             raise ValueError("invalid_snapshot")
         if snapshot.get("research_only") is not True or snapshot.get("execution") != "none":
             raise ValueError("snapshot_not_research_only")
-        if snapshot.get("entry_eligible") is not True or snapshot.get("close_only") is True:
+        if not allow_close_only and (
+            snapshot.get("entry_eligible") is not True or snapshot.get("close_only") is True
+        ):
             raise ValueError("instrument_not_entry_eligible")
         if snapshot.get("settlement") is True:
             raise ValueError("instrument_settled")
@@ -655,7 +663,7 @@ class PerpsPaperEngine:
     ) -> dict[str, Any]:
         current = _now(now)
         try:
-            self._validate_snapshot(snapshot, current)
+            self._validate_snapshot(snapshot, current, allow_close_only=True)
         except (ValueError, TypeError, ArithmeticError):
             return {"status": "PAPER_EXIT_BLOCKED", "reason": "invalid_or_stale_snapshot", "execution": "none"}
         with self._connect() as connection:

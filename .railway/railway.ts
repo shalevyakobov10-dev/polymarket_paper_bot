@@ -37,7 +37,7 @@ export default defineRailway(() => {
       PERPS_MARKET_HISTORY_DB: "/app/data/perps_market_history.sqlite3",
       PERPS_MARKET_WORKER_STATUS_FILE: "/app/data/perps_market_worker_status.json",
       PERPS_MARKET_LIMIT: "10",
-      PERPS_BACKUP_DIRECTORY: "/app/data/backups",
+      PERPS_BACKUP_DIRECTORY: "/app/data/perps_backups",
       PERPS_BACKUP_INTERVAL_HOURS: "6",
       PERPS_BACKUP_RETAIN: "30",
       PERPS_POLL_INTERVAL_SECONDS: "30",

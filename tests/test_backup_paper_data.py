@@ -285,6 +285,37 @@ class PaperDataBackupTests(unittest.TestCase):
             self.assertEqual(list(backup_dir.glob("*.tmp")), [])
             self.assertEqual(list(backup_dir.glob(".*.tmp")), [])
 
+    def test_partial_backup_publication_rolls_back_when_a_link_fails(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            paper = root / "paper.sqlite3"
+            history = root / "history.sqlite3"
+            self._database(paper, "trade")
+            self._database(history, "history")
+            backup_dir = root / "backups"
+            original_link = __import__("os").link
+            calls = 0
+
+            def fail_second_link(source, destination):
+                nonlocal calls
+                calls += 1
+                if calls == 2:
+                    raise OSError("simulated publish failure")
+                return original_link(source, destination)
+
+            with patch("backup_paper_data.os.link", side_effect=fail_second_link):
+                with self.assertRaisesRegex(OSError, "publish failure"):
+                    create_paper_data_backups(
+                        [paper, history],
+                        backup_dir,
+                        now=datetime(2026, 11, 22, 12, 0, tzinfo=timezone.utc),
+                    )
+
+            self.assertEqual(list(backup_dir.glob("paper-*.sqlite3")), [])
+            self.assertEqual(list(backup_dir.glob("history-*.sqlite3")), [])
+            self.assertEqual(list(backup_dir.glob("paper-backup-manifest-*.json")), [])
+            self.assertEqual(list(backup_dir.glob(".*.tmp")), [])
+
     def test_manifest_write_failure_preserves_previous_backup_and_cleans_staging(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

@@ -391,6 +391,10 @@ class PerpsLiveExecutionGatewayTests(unittest.IsolatedAsyncioTestCase):
     async def test_close_position_uses_reduce_only_and_correct_sell_side(self):
         result = await self.submit(
             position_intent="close_long",
+            risk_decision=self.risk_decision(
+                side="sell",
+                position_intent="close_long",
+            ),
             client_order_id="b" * 32,
         )
         self.assertEqual(result["state"], "open")

@@ -10,6 +10,7 @@ GTC, batch-order, leverage-change, margin-transfer, or withdrawal path.
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import uuid
@@ -20,6 +21,7 @@ from typing import Any
 
 from perps_order_journal import PerpsOrderJournal
 from perps_sdk_reconciler import PerpsSdkReconciler
+from perps_live_release_gate import evaluate_perps_live_release_gate
 
 
 LIVE_ACKNOWLEDGEMENT = "I_ACKNOWLEDGE_PERPS_LIVE_TRADING_RISK"
@@ -124,6 +126,8 @@ class PerpsLiveExecutionGateway:
         submission_lock_path: str | Path,
         max_order_notional_usd: Any = "25",
         max_leverage: int = 2,
+        account_read_timeout_seconds: float = 5.0,
+        submission_timeout_seconds: float = 10.0,
     ) -> None:
         if not callable(getattr(session, "place_order", None)):
             raise ValueError("session must expose place_order")
@@ -158,8 +162,20 @@ class PerpsLiveExecutionGateway:
         self.acknowledgement = acknowledgement
         self.kill_switch_path = Path(kill_switch_path).expanduser()
         self.submission_lock_path = Path(submission_lock_path).expanduser()
+        for name, value in (
+            ("account_read_timeout_seconds", account_read_timeout_seconds),
+            ("submission_timeout_seconds", submission_timeout_seconds),
+        ):
+            if (
+                isinstance(value, bool)
+                or not isinstance(value, (int, float))
+                or not 0.05 <= float(value) <= 60.0
+            ):
+                raise ValueError(f"{name} must be between 0.05 and 60")
         self.max_order_notional_usd = max_notional
         self.max_leverage = max_leverage
+        self.account_read_timeout_seconds = float(account_read_timeout_seconds)
+        self.submission_timeout_seconds = float(submission_timeout_seconds)
 
     def _blocked(self, reason: str, *, client_order_id: str | None = None) -> dict[str, Any]:
         return {
@@ -192,6 +208,9 @@ class PerpsLiveExecutionGateway:
             return self._blocked("live_execution_not_explicitly_enabled_and_armed")
         if self.dry_run or self.acknowledgement != LIVE_ACKNOWLEDGEMENT:
             return self._blocked("dry_run_or_live_acknowledgement_gate")
+        release_report = evaluate_perps_live_release_gate()
+        if release_report.get("eligible_for_separate_gateway_review") is not True:
+            return self._blocked("source_controlled_perps_release_gate_closed")
         if self.kill_switch_path.exists():
             return self._blocked("local_perps_kill_switch_present")
         if isinstance(instrument_id, bool) or not isinstance(instrument_id, int) or instrument_id <= 0:
@@ -261,12 +280,22 @@ class PerpsLiveExecutionGateway:
 
             # Confirm the target instrument's own margin mode and leverage.
             try:
-                configs = await self.session.fetch_account_config(instrument_id=instrument_id)
+                configs = await asyncio.wait_for(
+                    self.session.fetch_account_config(instrument_id=instrument_id),
+                    timeout=self.account_read_timeout_seconds,
+                )
             except Exception:
                 return self._blocked("target_instrument_config_unavailable", client_order_id=identifier)
             if not isinstance(configs, (tuple, list)) or len(configs) != 1:
                 return self._blocked("target_instrument_config_missing_or_ambiguous", client_order_id=identifier)
             config = configs[0]
+            configured_instrument_id = _field(config, "instrument_id")
+            if (
+                isinstance(configured_instrument_id, bool)
+                or not isinstance(configured_instrument_id, int)
+                or configured_instrument_id != instrument_id
+            ):
+                return self._blocked("target_instrument_config_instrument_mismatch", client_order_id=identifier)
             leverage = _field(config, "leverage")
             cross_margin = _field(config, "cross")
             if cross_margin is not False:
@@ -298,15 +327,38 @@ class PerpsLiveExecutionGateway:
                 return self._blocked("durable_pre_submission_journal_failed", client_order_id=identifier)
 
             try:
-                placement = await self.session.place_order(
-                    instrument_id=instrument_id,
-                    side=side,
-                    quantity=qty,
-                    time_in_force=tif,
-                    price=price,
-                    reduce_only=intent.startswith("close_"),
-                    client_order_id=identifier,
+                placement = await asyncio.wait_for(
+                    self.session.place_order(
+                        instrument_id=instrument_id,
+                        side=side,
+                        quantity=qty,
+                        time_in_force=tif,
+                        price=price,
+                        reduce_only=intent.startswith("close_"),
+                        client_order_id=identifier,
+                    ),
+                    timeout=self.submission_timeout_seconds,
                 )
+            except asyncio.CancelledError:
+                self.journal.record_submission_unknown(
+                    identifier,
+                    reason_code="sdk_submission_task_cancelled_outcome_unknown",
+                )
+                raise
+            except asyncio.TimeoutError:
+                state = self.journal.record_submission_unknown(
+                    identifier,
+                    reason_code="sdk_submission_timeout_outcome_unknown",
+                )
+                return {
+                    "mode": "PERPS_LIVE_EXECUTION_GATEWAY",
+                    "state": state["status"],
+                    "reason_code": state["last_reason_code"],
+                    "client_order_id": identifier,
+                    "order_placement_attempted": True,
+                    "automatic_retry_permitted": False,
+                    "execution": "submission_outcome_unknown",
+                }
             except Exception:
                 state = self.journal.record_submission_unknown(
                     identifier,

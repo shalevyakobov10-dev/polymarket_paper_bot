@@ -25,6 +25,9 @@ PAPER_WORKER_STATES = frozenset({
 PERPS_WORKER_STATES = frozenset({
     "disabled", "starting", "running", "restarting", "stopped",
 })
+PERPS_ACCOUNT_WORKER_STATES = frozenset({
+    "disabled", "starting", "running", "restarting", "stopped",
+})
 STATUS_SCHEMA_VERSION = 1
 
 
@@ -47,6 +50,11 @@ def build_supervisor_status(
     perps_market_worker_restart_count: int = 0,
     perps_market_worker_last_exit_code: int | None = None,
     perps_market_worker_next_restart_at: str | None = None,
+    perps_account_supervisor_enabled: bool = False,
+    perps_account_supervisor_state: str = "disabled",
+    perps_account_supervisor_restart_count: int = 0,
+    perps_account_supervisor_last_exit_code: int | None = None,
+    perps_account_supervisor_next_restart_at: str | None = None,
     updated_at: str | None = None,
 ) -> dict[str, Any]:
     if service_state not in SERVICE_STATES:
@@ -150,6 +158,44 @@ def build_supervisor_status(
             raise ValueError("perps_market_worker_next_restart_at must be timezone-aware")
     if perps_market_worker_state != "restarting" and perps_market_worker_next_restart_at is not None:
         raise ValueError("perps_market_worker_next_restart_at is valid only while restarting")
+    if not isinstance(perps_account_supervisor_enabled, bool):
+        raise ValueError("perps_account_supervisor_enabled must be boolean")
+    if perps_account_supervisor_state not in PERPS_ACCOUNT_WORKER_STATES:
+        raise ValueError("invalid perps_account_supervisor_state")
+    if not perps_account_supervisor_enabled and perps_account_supervisor_state != "disabled":
+        raise ValueError("disabled Perps account supervisor must use disabled state")
+    if perps_account_supervisor_enabled and perps_account_supervisor_state == "disabled":
+        raise ValueError("enabled Perps account supervisor cannot use disabled state")
+    if (
+        isinstance(perps_account_supervisor_restart_count, bool)
+        or not isinstance(perps_account_supervisor_restart_count, int)
+        or perps_account_supervisor_restart_count < 0
+    ):
+        raise ValueError("perps_account_supervisor_restart_count must be a nonnegative integer")
+    if perps_account_supervisor_last_exit_code is not None and (
+        isinstance(perps_account_supervisor_last_exit_code, bool)
+        or not isinstance(perps_account_supervisor_last_exit_code, int)
+    ):
+        raise ValueError("perps_account_supervisor_last_exit_code must be an integer or null")
+    if perps_account_supervisor_next_restart_at is not None:
+        if (
+            not isinstance(perps_account_supervisor_next_restart_at, str)
+            or not perps_account_supervisor_next_restart_at.strip()
+        ):
+            raise ValueError("perps_account_supervisor_next_restart_at must be an ISO timestamp or null")
+        try:
+            account_restart_time = datetime.fromisoformat(perps_account_supervisor_next_restart_at)
+        except ValueError:
+            raise ValueError("perps_account_supervisor_next_restart_at must be a valid ISO timestamp") from None
+        if account_restart_time.tzinfo is None or account_restart_time.utcoffset() is None:
+            raise ValueError("perps_account_supervisor_next_restart_at must be timezone-aware")
+    if (
+        perps_account_supervisor_state != "restarting"
+        and perps_account_supervisor_next_restart_at is not None
+    ):
+        raise ValueError(
+            "perps_account_supervisor_next_restart_at is valid only while restarting"
+        )
 
     return {
         "schema_version": STATUS_SCHEMA_VERSION,
@@ -171,6 +217,11 @@ def build_supervisor_status(
         "perps_market_worker_restart_count": perps_market_worker_restart_count,
         "perps_market_worker_last_exit_code": perps_market_worker_last_exit_code,
         "perps_market_worker_next_restart_at": perps_market_worker_next_restart_at,
+        "perps_account_supervisor_enabled": perps_account_supervisor_enabled,
+        "perps_account_supervisor_state": perps_account_supervisor_state,
+        "perps_account_supervisor_restart_count": perps_account_supervisor_restart_count,
+        "perps_account_supervisor_last_exit_code": perps_account_supervisor_last_exit_code,
+        "perps_account_supervisor_next_restart_at": perps_account_supervisor_next_restart_at,
         "updated_at": parsed.astimezone(timezone.utc).isoformat(),
         "execution": "none",
     }
@@ -198,6 +249,11 @@ def write_supervisor_status(path: str | Path, payload: dict[str, Any]) -> None:
         perps_market_worker_restart_count=payload.get("perps_market_worker_restart_count", 0),
         perps_market_worker_last_exit_code=payload.get("perps_market_worker_last_exit_code"),
         perps_market_worker_next_restart_at=payload.get("perps_market_worker_next_restart_at"),
+        perps_account_supervisor_enabled=payload.get("perps_account_supervisor_enabled", False),
+        perps_account_supervisor_state=payload.get("perps_account_supervisor_state", "disabled"),
+        perps_account_supervisor_restart_count=payload.get("perps_account_supervisor_restart_count", 0),
+        perps_account_supervisor_last_exit_code=payload.get("perps_account_supervisor_last_exit_code"),
+        perps_account_supervisor_next_restart_at=payload.get("perps_account_supervisor_next_restart_at"),
         updated_at=payload.get("updated_at"),
     )
     target = Path(path).expanduser()
@@ -268,6 +324,11 @@ def read_supervisor_status(
             perps_market_worker_restart_count=raw.get("perps_market_worker_restart_count", 0),
             perps_market_worker_last_exit_code=raw.get("perps_market_worker_last_exit_code"),
             perps_market_worker_next_restart_at=raw.get("perps_market_worker_next_restart_at"),
+            perps_account_supervisor_enabled=raw.get("perps_account_supervisor_enabled", False),
+            perps_account_supervisor_state=raw.get("perps_account_supervisor_state", "disabled"),
+            perps_account_supervisor_restart_count=raw.get("perps_account_supervisor_restart_count", 0),
+            perps_account_supervisor_last_exit_code=raw.get("perps_account_supervisor_last_exit_code"),
+            perps_account_supervisor_next_restart_at=raw.get("perps_account_supervisor_next_restart_at"),
             updated_at=raw.get("updated_at"),
         )
         current = now or datetime.now(timezone.utc)
@@ -299,6 +360,11 @@ def read_supervisor_status(
             "perps_market_worker_restart_count": 0,
             "perps_market_worker_last_exit_code": None,
             "perps_market_worker_next_restart_at": None,
+            "perps_account_supervisor_enabled": False,
+            "perps_account_supervisor_state": "disabled",
+            "perps_account_supervisor_restart_count": 0,
+            "perps_account_supervisor_last_exit_code": None,
+            "perps_account_supervisor_next_restart_at": None,
             "updated_at": None,
             "status_age_seconds": None,
             "status_fresh": False,
@@ -326,6 +392,11 @@ def read_supervisor_status(
             "perps_market_worker_restart_count": 0,
             "perps_market_worker_last_exit_code": None,
             "perps_market_worker_next_restart_at": None,
+            "perps_account_supervisor_enabled": False,
+            "perps_account_supervisor_state": "disabled",
+            "perps_account_supervisor_restart_count": 0,
+            "perps_account_supervisor_last_exit_code": None,
+            "perps_account_supervisor_next_restart_at": None,
             "updated_at": None,
             "status_age_seconds": None,
             "status_fresh": False,

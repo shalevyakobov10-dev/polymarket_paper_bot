@@ -83,7 +83,7 @@ class PerpsWalkForwardEvaluationTests(unittest.TestCase):
         return path
 
     @staticmethod
-    def _profitable_fold_report(**kwargs):
+    def _profitable_fold_report(*args, **kwargs):
         entry_start = kwargs.get("entry_start_received_at")
         end = kwargs.get("end_received_at")
         return {

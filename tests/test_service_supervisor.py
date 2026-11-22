@@ -7,6 +7,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from service_supervisor import (
+    _perps_account_worker_heartbeat_age,
     _perps_worker_heartbeat_age,
     build_supervisor_config,
     monitor_restart_delay,
@@ -344,6 +345,226 @@ class SupervisorTests(unittest.TestCase):
             self.assertEqual(status["perps_market_worker_restart_count"], 1)
             self.assertEqual(status["perps_market_worker_last_exit_code"], 9)
             self.assertIsNone(status["perps_market_worker_next_restart_at"])
+
+    def _account_supervisor_secret_file(self, directory, *, mode=0o600):
+        path = Path(directory) / "perps-account-supervisor-secrets.json"
+        path.write_text("{}", encoding="utf-8")
+        path.chmod(mode)
+        return path
+
+    def test_perps_account_supervisor_is_disabled_by_default(self):
+        config = build_supervisor_config(
+            {"DATA_DIR": "/persist/data"},
+            python_executable="python-test",
+        )
+        self.assertIsNone(config.perps_account_supervisor_command)
+        self.assertIsNone(config.perps_account_supervisor_env)
+        self.assertIsNone(config.perps_account_supervisor_status_path)
+
+    def test_perps_account_supervisor_requires_public_perps_worker_and_secret_file(self):
+        with self.assertRaisesRegex(ValueError, "requires ENABLE_PERPS_MARKET_DATA_WORKER"):
+            build_supervisor_config({
+                "ENABLE_PERPS_ACCOUNT_SUPERVISOR": "true",
+                "PERPS_ACCOUNT_SUPERVISOR_SECRETS_FILE": "/secrets/perps.json",
+            })
+        with tempfile.TemporaryDirectory() as directory:
+            with self.assertRaisesRegex(ValueError, "secret file"):
+                build_supervisor_config({
+                    "ENABLE_PERPS_ACCOUNT_SUPERVISOR": "true",
+                    "ENABLE_PERPS_MARKET_DATA_WORKER": "true",
+                    "PERPS_ACCOUNT_SUPERVISOR_SECRETS_FILE": str(
+                        Path(directory) / "missing.json"
+                    ),
+                })
+
+    def test_perps_account_supervisor_uses_strict_child_environment_and_shared_lock(self):
+        with tempfile.TemporaryDirectory() as directory:
+            secret_path = self._account_supervisor_secret_file(directory)
+            config = build_supervisor_config(
+                {
+                    "ENABLE_PERPS_ACCOUNT_SUPERVISOR": "true",
+                    "ENABLE_PERPS_MARKET_DATA_WORKER": "true",
+                    "DATA_DIR": directory,
+                    "PERPS_ACCOUNT_SUPERVISOR_SECRETS_FILE": str(secret_path),
+                    "POLYMARKET_PRIVATE_KEY": "must-not-enter-account-env",
+                    "POLYMARKET_API_KEY": "must-not-enter-account-env",
+                    "POLYMARKET_API_SECRET": "must-not-enter-account-env",
+                    "DRY_RUN": "false",
+                    "LIVE_EXECUTION_ENABLED": "true",
+                    "LIVE_TRADING_ENABLED": "true",
+                    "PERPS_ACCOUNT_SUPERVISOR_POLL_SECONDS": "45",
+                    "PERPS_ACCOUNT_SUPERVISOR_CYCLE_TIMEOUT_SECONDS": "75",
+                    "PERPS_ACCOUNT_SUPERVISOR_MAX_FAILURES": "4",
+                },
+                python_executable="python-test",
+            )
+        self.assertEqual(
+            config.perps_account_supervisor_command,
+            ("python-test", "perps_account_supervisor_worker.py"),
+        )
+        env = config.perps_account_supervisor_env
+        self.assertEqual(env["PERPS_ACCOUNT_SUPERVISOR_POLL_SECONDS"], "45")
+        self.assertEqual(env["PERPS_ACCOUNT_SUPERVISOR_CYCLE_TIMEOUT_SECONDS"], "75.0")
+        self.assertEqual(env["PERPS_ACCOUNT_SUPERVISOR_MAX_FAILURES"], "4")
+        self.assertEqual(env["DRY_RUN"], "true")
+        self.assertEqual(env["LIVE_EXECUTION_ENABLED"], "false")
+        self.assertEqual(
+            env["PERPS_SUBMISSION_LOCK_PATH"],
+            str(Path(directory) / "perps_submission.lock"),
+        )
+        self.assertEqual(
+            env["PERPS_ORDER_JOURNAL_DB"],
+            str(Path(directory) / "perps_order_journal.sqlite3"),
+        )
+        self.assertNotIn("POLYMARKET_PRIVATE_KEY", env)
+        self.assertNotIn("POLYMARKET_API_KEY", env)
+        self.assertNotIn("POLYMARKET_API_SECRET", env)
+        self.assertNotIn("LIVE_TRADING_ENABLED", env)
+        self.assertEqual(
+            config.perps_account_supervisor_status_path,
+            Path(directory) / "perps_account_supervisor_status.json",
+        )
+        self.assertEqual(config.perps_account_supervisor_heartbeat_timeout_seconds, 210.0)
+        self.assertNotIn("PERPS_ACCOUNT_SUPERVISOR_SECRETS_FILE", config.app_env)
+        self.assertNotIn("PERPS_ACCOUNT_SUPERVISOR_SECRETS_FILE", config.perps_worker_env)
+
+    def test_perps_account_supervisor_secret_file_permissions_must_be_private(self):
+        with tempfile.TemporaryDirectory() as directory:
+            secret_path = self._account_supervisor_secret_file(directory, mode=0o644)
+            with self.assertRaisesRegex(ValueError, "permissions are unsafe"):
+                build_supervisor_config({
+                    "ENABLE_PERPS_ACCOUNT_SUPERVISOR": "true",
+                    "ENABLE_PERPS_MARKET_DATA_WORKER": "true",
+                    "PERPS_ACCOUNT_SUPERVISOR_SECRETS_FILE": str(secret_path),
+                })
+
+    def test_perps_account_supervisor_heartbeat_timeout_cannot_be_too_short(self):
+        with tempfile.TemporaryDirectory() as directory:
+            secret_path = self._account_supervisor_secret_file(directory)
+            with self.assertRaisesRegex(ValueError, "between 180 and 7200"):
+                build_supervisor_config({
+                    "ENABLE_PERPS_ACCOUNT_SUPERVISOR": "true",
+                    "ENABLE_PERPS_MARKET_DATA_WORKER": "true",
+                    "PERPS_ACCOUNT_SUPERVISOR_SECRETS_FILE": str(secret_path),
+                    "PERPS_ACCOUNT_SUPERVISOR_HEARTBEAT_TIMEOUT_SECONDS": "179",
+                })
+
+    def test_perps_account_supervisor_heartbeat_age_ignores_old_and_future_status(self):
+        now = datetime(2026, 11, 22, 8, 0, tzinfo=timezone.utc)
+        started = now - timedelta(seconds=10)
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "account-status.json"
+            path.write_text(
+                '{"last_heartbeat_at":"2026-11-22T07:59:58+00:00"}',
+                encoding="utf-8",
+            )
+            self.assertEqual(
+                _perps_account_worker_heartbeat_age(path, worker_started_at=started, now=now),
+                2.0,
+            )
+            path.write_text(
+                '{"last_heartbeat_at":"2026-11-22T07:59:47+00:00"}',
+                encoding="utf-8",
+            )
+            self.assertEqual(
+                _perps_account_worker_heartbeat_age(path, worker_started_at=started, now=now),
+                10.0,
+            )
+            path.write_text(
+                '{"last_heartbeat_at":"2026-11-22T08:00:10+00:00"}',
+                encoding="utf-8",
+            )
+            self.assertEqual(
+                _perps_account_worker_heartbeat_age(path, worker_started_at=started, now=now),
+                10.0,
+            )
+
+    def test_perps_account_supervisor_restarts_after_exit_and_persists_status(self):
+        with tempfile.TemporaryDirectory() as directory:
+            secret_path = self._account_supervisor_secret_file(directory)
+            config = build_supervisor_config({
+                "ENABLE_PERPS_ACCOUNT_SUPERVISOR": "true",
+                "ENABLE_PERPS_MARKET_DATA_WORKER": "true",
+                "DATA_DIR": directory,
+                "PERPS_ACCOUNT_SUPERVISOR_SECRETS_FILE": str(secret_path),
+                "SERVICE_SUPERVISOR_POLL_SECONDS": "0.25",
+            }, python_executable="python-test")
+            app = FakeProcess()
+            perps_market = FakeProcess()
+            failed_account = FakeProcess(poll_results=[11])
+            restarted_account = FakeProcess()
+            processes = [app, perps_market, failed_account, restarted_account]
+            commands = []
+
+            def fake_popen(command, *, env):
+                commands.append((command, env))
+                return processes.pop(0)
+
+            event = FakeStopEvent(stop_after_waits=2)
+            result = run_supervisor(config, popen_factory=fake_popen, stop_event=event)
+
+            self.assertEqual(result, 0)
+            self.assertEqual(len(commands), 4)
+            self.assertEqual(
+                commands[2][0],
+                ["python-test", "perps_account_supervisor_worker.py"],
+            )
+            self.assertEqual(
+                commands[3][0],
+                ["python-test", "perps_account_supervisor_worker.py"],
+            )
+            self.assertEqual(
+                commands[2][1]["PERPS_SUBMISSION_LOCK_PATH"],
+                commands[3][1]["PERPS_SUBMISSION_LOCK_PATH"],
+            )
+            self.assertNotIn("POLYMARKET_PRIVATE_KEY", commands[2][1])
+            self.assertNotIn("LIVE_EXECUTION_ENABLED", commands[2][1])
+            self.assertTrue(restarted_account.terminated)
+            status = read_supervisor_status(config.status_path)
+            self.assertTrue(status["perps_account_supervisor_enabled"])
+            self.assertEqual(status["perps_account_supervisor_state"], "stopped")
+            self.assertEqual(status["perps_account_supervisor_restart_count"], 1)
+            self.assertEqual(status["perps_account_supervisor_last_exit_code"], 11)
+            self.assertIsNone(status["perps_account_supervisor_next_restart_at"])
+
+    def test_perps_account_supervisor_heartbeat_watchdog_restarts_hung_worker(self):
+        with tempfile.TemporaryDirectory() as directory:
+            secret_path = self._account_supervisor_secret_file(directory)
+            config = build_supervisor_config({
+                "ENABLE_PERPS_ACCOUNT_SUPERVISOR": "true",
+                "ENABLE_PERPS_MARKET_DATA_WORKER": "true",
+                "DATA_DIR": directory,
+                "PERPS_ACCOUNT_SUPERVISOR_SECRETS_FILE": str(secret_path),
+                "SERVICE_SUPERVISOR_POLL_SECONDS": "0.25",
+            }, python_executable="python-test")
+            config = replace(config, perps_account_supervisor_heartbeat_timeout_seconds=0.05)
+            app = FakeProcess()
+            perps_market = FakeProcess()
+            hung_account = FakeProcess()
+            restarted_account = FakeProcess()
+            processes = [app, perps_market, hung_account, restarted_account]
+            commands = []
+
+            def fake_popen(command, *, env):
+                commands.append((command, env))
+                return processes.pop(0)
+
+            event = FakeStopEvent(stop_after_waits=2)
+            with patch(
+                "service_supervisor._perps_account_worker_heartbeat_age",
+                side_effect=[0.2, 0.0],
+            ):
+                result = run_supervisor(
+                    config, popen_factory=fake_popen, stop_event=event
+                )
+
+            self.assertEqual(result, 0)
+            self.assertEqual(len(commands), 4)
+            self.assertEqual(hung_account.returncode, -15)
+            self.assertTrue(restarted_account.terminated)
+            status = read_supervisor_status(config.status_path)
+            self.assertEqual(status["perps_account_supervisor_restart_count"], 1)
+            self.assertEqual(status["perps_account_supervisor_last_exit_code"], -15)
 
     def test_opt_in_monitor_requires_runtime_secret_and_never_puts_it_in_argv(self):
         with self.assertRaisesRegex(ValueError, "requires POLYMARKET_PRIVATE_KEY"):

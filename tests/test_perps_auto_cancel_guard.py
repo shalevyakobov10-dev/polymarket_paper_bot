@@ -5,6 +5,7 @@ import json
 import tempfile
 import unittest
 from datetime import datetime, timedelta, timezone
+from unittest.mock import patch
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -93,6 +94,12 @@ class PerpsAutoCancelGuardTests(unittest.IsolatedAsyncioTestCase):
         self.addCleanup(self.temp_dir.cleanup)
         self.kill_file = Path(self.temp_dir.name) / "perps-kill-switch.json"
         self.session = FakeAutoCancelSession()
+        self.release_gate_patch = patch(
+            "perps_auto_cancel_guard.evaluate_perps_live_release_gate",
+            return_value={"eligible_for_separate_gateway_review": True},
+        )
+        self.release_gate_patch.start()
+        self.addCleanup(self.release_gate_patch.stop)
 
     def guard(self, **overrides):
         options = {
@@ -112,6 +119,19 @@ class PerpsAutoCancelGuardTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["execution"], "none")
         self.assertEqual(self.session.arm_calls, [])
         self.assertEqual(self.session.status_calls, 0)
+
+    async def test_source_release_gate_blocks_before_any_account_modification(self):
+        with patch(
+            "perps_auto_cancel_guard.evaluate_perps_live_release_gate",
+            return_value={"eligible_for_separate_gateway_review": False},
+        ):
+            result = await self.guard().arm_once(now=NOW)
+        self.assertEqual(result["state"], "blocked")
+        self.assertEqual(result["reason_code"], "source_controlled_perps_release_gate_closed")
+        self.assertFalse(result["new_order_permission"])
+        self.assertEqual(self.session.arm_calls, [])
+        self.assertEqual(self.session.status_calls, 0)
+        self.assertTrue(self.kill_file.exists())
 
     async def test_enabled_and_manually_armed_switch_is_verified_against_server(self):
         result = await self.guard().arm_once(now=NOW)
@@ -140,6 +160,22 @@ class PerpsAutoCancelGuardTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["state"], "blocked")
         self.assertEqual(result["reason_code"], "auto_cancel_server_deadline_mismatch")
         self.assertTrue(self.kill_file.exists())
+
+    async def test_server_deadline_too_far_in_future_is_rejected(self):
+        self.session.deadline_delta = 120
+        result = await self.guard().arm_once(now=NOW)
+        self.assertEqual(result["state"], "blocked")
+        self.assertEqual(result["reason_code"], "auto_cancel_server_deadline_mismatch")
+        self.assertTrue(self.kill_file.exists())
+
+    async def test_negative_daily_trigger_count_is_rejected(self):
+        self.session.triggered = -1
+        result = await self.guard().arm_once(now=NOW)
+        self.assertEqual(result["state"], "blocked")
+        self.assertEqual(
+            result["reason_code"],
+            "auto_cancel_daily_trigger_limit_exhausted_or_unknown",
+        )
 
     async def test_daily_trigger_limit_exhaustion_fails_closed(self):
         self.session.triggered = 5
@@ -214,6 +250,27 @@ class PerpsAutoCancelGuardTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(self.session.arm_calls), 1)
         self.assertFalse(result["new_order_permission"])
 
+    async def test_graceful_shutdown_rechecks_positions_after_cancel_all_before_disarm(self):
+        self.session.open_orders = [{"id": 11}]
+        original_fetch_portfolio = self.session.fetch_portfolio
+        calls = 0
+        async def position_changes_after_cancel():
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                return await original_fetch_portfolio()
+            return SimpleNamespace(positions=[SimpleNamespace(size="0.01")])
+        self.session.fetch_portfolio = position_changes_after_cancel
+        result = await self.guard().run_forever(stop_event=StopImmediatelyEvent())
+        self.assertEqual(result["state"], "blocked")
+        self.assertEqual(
+            result["reason_code"],
+            "shutdown_position_changed_after_cancel_deadman_kept_armed",
+        )
+        self.assertEqual(calls, 2)
+        self.assertEqual(self.session.disarm_calls, 0)
+        self.assertTrue(self.kill_file.exists())
+
     async def test_graceful_shutdown_keeps_deadman_armed_when_positions_are_open(self):
         self.session.positions = [SimpleNamespace(size="0.01")]
         self.session.open_orders = [{"id": 11}]
@@ -238,6 +295,24 @@ class PerpsAutoCancelGuardTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(self.session.disarm_calls, 0)
         self.assertTrue(self.kill_file.exists())
+
+    async def test_graceful_shutdown_rechecks_open_orders_before_disarm(self):
+        class ReappearingOrderSession(FakeAutoCancelSession):
+            async def fetch_open_orders(self):
+                self.open_orders_calls += 1
+                if self.open_orders_calls == 1:
+                    return []
+                return [{"id": 77}]
+        session = ReappearingOrderSession()
+        result = await self.guard(session=session).run_forever(
+            stop_event=StopImmediatelyEvent()
+        )
+        self.assertEqual(result["state"], "blocked")
+        self.assertEqual(
+            result["reason_code"],
+            "shutdown_open_orders_reappeared_deadman_kept_armed",
+        )
+        self.assertEqual(session.disarm_calls, 0)
 
     async def test_graceful_shutdown_keeps_deadman_armed_until_all_orders_disappear(self):
         self.session.open_orders = [{"id": 11}]

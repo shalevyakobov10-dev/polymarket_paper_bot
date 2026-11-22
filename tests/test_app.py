@@ -407,6 +407,47 @@ class ParserTests(unittest.TestCase):
                 app.SUPERVISOR_STATUS_FILE = old_supervisor
                 app.EVENT_PAPER_WORKER_STATUS_FILE = old_worker
 
+    def test_perps_paper_endpoint_reports_disabled_state_without_worker_status(self):
+        server = app.ThreadingHTTPServer(("127.0.0.1", 0), app.Handler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        old_supervisor = app.SUPERVISOR_STATUS_FILE
+        old_perps_worker = app.PERPS_MARKET_WORKER_STATUS_FILE
+        with tempfile.TemporaryDirectory() as directory:
+            try:
+                app.SUPERVISOR_STATUS_FILE = Path(directory) / "supervisor.json"
+                app.PERPS_MARKET_WORKER_STATUS_FILE = Path(directory) / "missing-worker.json"
+                write_supervisor_status(
+                    app.SUPERVISOR_STATUS_FILE,
+                    build_supervisor_status(
+                        service_state="running",
+                        monitor_enabled=False,
+                        monitor_state="disabled",
+                        perps_market_worker_enabled=False,
+                        perps_market_worker_state="disabled",
+                    ),
+                )
+                thread.start()
+                address = f"http://127.0.0.1:{server.server_port}/perps-paper"
+                with http_urlopen(address, timeout=3) as response:
+                    payload = json.loads(response.read().decode("utf-8"))
+                self.assertEqual(payload["worker_state"], "disabled")
+                self.assertFalse(payload["enabled"])
+                self.assertIsNone(payload["degraded_reason"])
+                self.assertEqual(payload["markets_in_last_snapshot"], 0)
+                self.assertEqual(payload["fee_coverage_status"], "unavailable")
+                self.assertFalse(payload["fee_verified_entry_path_available"])
+                self.assertTrue(payload["research_only"])
+                self.assertFalse(payload["live_execution_enabled"])
+                self.assertFalse(payload["order_submission_allowed"])
+                self.assertEqual(payload["execution"], "none")
+            finally:
+                server.shutdown()
+                server.server_close()
+                if thread.is_alive():
+                    thread.join(timeout=2)
+                app.SUPERVISOR_STATUS_FILE = old_supervisor
+                app.PERPS_MARKET_WORKER_STATUS_FILE = old_perps_worker
+
     def test_perps_paper_endpoint_reports_fee_gated_degraded_state(self):
         server = app.ThreadingHTTPServer(("127.0.0.1", 0), app.Handler)
         thread = threading.Thread(target=server.serve_forever, daemon=True)

@@ -457,7 +457,7 @@ class PerpsPaperEngine:
                 self._halt("published_funding_settlement_missing")
                 self._event(snapshot_key, int(position["instrument_id"]), "FUNDING_RECONCILIATION_REQUIRED", now, {
                     "scheduled_funding_timestamp_ms": old_next,
-                    "reason": "public settled funding rate missing or ambiguous; no ticker-rate estimate applied",
+                    "reason": "public settled funding rate missing, conflicting, or ambiguous; no ticker-rate estimate applied",
                 })
                 return False
             mark = _decimal(ticker.get("mark_price"), "mark_price", positive=True)

@@ -16,6 +16,7 @@ from typing import Any
 from backup_paper_data import create_paper_data_backups
 from perps_market_data import PerpsPublicMarketDataProvider
 from perps_market_history_store import PerpsMarketHistoryStore
+from perps_paper_config import perps_engine_options_from_env
 from perps_paper_engine import PerpsPaperEngine
 
 
@@ -282,32 +283,7 @@ def run_worker(
     if engine_enabled and current_engine is None:
         current_engine = PerpsPaperEngine(
             os.getenv("PERPS_PAPER_DB", str(Path(os.getenv("DATA_DIR", "data")) / "perps_paper.sqlite3")),
-            initial_equity=os.getenv("PERPS_PAPER_INITIAL_EQUITY", "1000"),
-            max_position_notional=os.getenv("PERPS_PAPER_MAX_POSITION_NOTIONAL", "25"),
-            max_total_notional=os.getenv("PERPS_PAPER_MAX_TOTAL_NOTIONAL", "75"),
-            max_open_positions=_positive_int_env("PERPS_PAPER_MAX_OPEN_POSITIONS", 3, 1, 10),
-            max_leverage=os.getenv("PERPS_PAPER_MAX_LEVERAGE", "2"),
-            risk_per_trade_pct=os.getenv("PERPS_PAPER_RISK_PER_TRADE_PCT", "0.0025"),
-            stop_loss_pct=os.getenv("PERPS_PAPER_STOP_LOSS_PCT", "0.0075"),
-            take_profit_pct=os.getenv("PERPS_PAPER_TAKE_PROFIT_PCT", "0.015"),
-            # Legacy assumptions are used only to migrate positions created by
-            # pre-fee-schedule versions. New positions require a fresh public fee schedule.
-            taker_fee_rate=os.getenv("PERPS_PAPER_LEGACY_TAKER_FEE_RATE", "0.0005"),
-            liquidation_fee_rate=os.getenv("PERPS_PAPER_LEGACY_LIQUIDATION_FEE_RATE", "0.01"),
-            max_spread_bps=os.getenv("PERPS_PAPER_MAX_SPREAD_BPS", "20"),
-            lookback_observations=_positive_int_env("PERPS_PAPER_LOOKBACK_OBSERVATIONS", 10, 3, 500),
-            momentum_threshold_bps=os.getenv("PERPS_PAPER_MOMENTUM_THRESHOLD_BPS", "20"),
-            minimum_history_span_seconds=_positive_int_env("PERPS_PAPER_MIN_HISTORY_SPAN_SECONDS", 270, 0, 86400),
-            daily_drawdown_pct=os.getenv("PERPS_PAPER_DAILY_DRAWDOWN_PCT", "0.03"),
-            maximum_drawdown_pct=os.getenv("PERPS_PAPER_MAXIMUM_DRAWDOWN_PCT", "0.10"),
-            max_data_age_seconds=_positive_int_env("PERPS_PAPER_MAX_DATA_AGE_SECONDS", 15, 1, 60),
-            max_entry_impact_bps=os.getenv("PERPS_PAPER_MAX_ENTRY_IMPACT_BPS", "50"),
-            funding_schedule_grace_seconds=_positive_int_env(
-                "PERPS_PAPER_FUNDING_SCHEDULE_GRACE_SECONDS", 60, 5, 300
-            ),
-            max_post_funding_mark_delay_seconds=_positive_int_env(
-                "PERPS_PAPER_MAX_POST_FUNDING_MARK_DELAY_SECONDS", 45, 15, 120
-            ),
+            **perps_engine_options_from_env(),
         )
         engine_created = True
     if current_engine is not None and not engine_enabled:

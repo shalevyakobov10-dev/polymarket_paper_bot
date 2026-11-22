@@ -223,16 +223,18 @@ def run_worker(
         "PERPS_PAPER_DB",
         str(Path(os.getenv("DATA_DIR", "data")) / "perps_paper.sqlite3"),
     )).expanduser()
-    backup_interval = backup_interval_hours or _positive_int_env(
-        "PERPS_BACKUP_INTERVAL_HOURS", 6, 1, 168
+    backup_interval = (
+        _positive_int_env("PERPS_BACKUP_INTERVAL_HOURS", 6, 1, 168)
+        if backup_interval_hours is None else backup_interval_hours
     )
-    if not 1 <= backup_interval <= 168:
-        raise ValueError("backup_interval_hours must be between 1 and 168")
-    retain_backups = backup_retain or _positive_int_env(
-        "PERPS_BACKUP_RETAIN", 30, 1, 365
+    if isinstance(backup_interval, bool) or not isinstance(backup_interval, int) or not 1 <= backup_interval <= 168:
+        raise ValueError("backup_interval_hours must be an integer between 1 and 168")
+    retain_backups = (
+        _positive_int_env("PERPS_BACKUP_RETAIN", 30, 1, 365)
+        if backup_retain is None else backup_retain
     )
-    if not 1 <= retain_backups <= 365:
-        raise ValueError("backup_retain must be between 1 and 365")
+    if isinstance(retain_backups, bool) or not isinstance(retain_backups, int) or not 1 <= retain_backups <= 365:
+        raise ValueError("backup_retain must be an integer between 1 and 365")
     chosen_backup_directory = Path(backup_directory or os.getenv(
         "PERPS_BACKUP_DIRECTORY",
         str(Path(os.getenv("DATA_DIR", "data")) / "backups"),
@@ -247,7 +249,9 @@ def run_worker(
             raise ValueError("ENABLE_PERPS_PAPER_ENGINE must be exactly true or false")
         engine_enabled = paper_raw == "true"
     else:
-        engine_enabled = bool(paper_engine_enabled)
+        if not isinstance(paper_engine_enabled, bool):
+            raise ValueError("paper_engine_enabled must be a boolean")
+        engine_enabled = paper_engine_enabled
     current_engine = paper_engine
     engine_created = False
     if engine_enabled and current_engine is None:

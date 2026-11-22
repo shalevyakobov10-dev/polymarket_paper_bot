@@ -96,8 +96,10 @@ class PerpsMarketDataTests(unittest.TestCase):
         self.assertEqual(result["risk_tiers"][1]["max_leverage"], "10")
         self.assertFalse(result["close_only"])
 
-    def test_skips_close_only_and_settled_instruments(self):
-        self.assertIsNone(_normalize_instrument(instrument(close_only=True)))
+    def test_normalizes_close_only_for_position_management_but_skips_settled(self):
+        close_only = _normalize_instrument(instrument(close_only=True))
+        self.assertIsNotNone(close_only)
+        self.assertTrue(close_only["close_only"])
         retired = instrument()
         retired["settlement"] = {"price": "100"}
         self.assertIsNone(_normalize_instrument(retired))
@@ -197,14 +199,18 @@ class PerpsMarketDataTests(unittest.TestCase):
             ["/v1/info/instruments", "/v1/info/tickers", "/v1/info/book"],
         )
 
-    def test_provider_skips_close_only_and_stale_instruments(self):
+    def test_provider_retains_close_only_for_exits_and_skips_stale_books(self):
+        close_only = {**instrument(7, close_only=True)}
+        stale = {**instrument(8), "symbol": "ETH-PERP"}
         provider = FakePerpsProvider(
-            [instrument(7, close_only=True), {**instrument(8), "symbol": "ETH-PERP"}],
-            [ticker(8, timestamp=NOW_MS - 11_000)],
-            {8: book(8)},
+            [close_only, stale],
+            [ticker(7), {**ticker(8, timestamp=NOW_MS - 11_000), "symbol": "ETH-PERP"}],
+            {7: book(7), 8: book(8)},
         )
-        with self.assertRaises(PerpsNoUsableMarkets):
-            provider.load(now=NOW)
+        result = provider.load(now=NOW)
+        self.assertEqual(len(result), 1)
+        self.assertTrue(result[0]["instrument"]["close_only"])
+        self.assertEqual(result[0]["instrument"]["symbol"], "BTC-PERP")
 
     def test_provider_limits_market_book_requests(self):
         instruments = []

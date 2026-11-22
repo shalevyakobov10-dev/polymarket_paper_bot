@@ -134,6 +134,80 @@ class PerpsMarketHistoryStoreTests(unittest.TestCase):
                 self.assertIn("ticker", rows[0])
                 self.assertIn("bids", rows[0])
 
+    def test_history_as_of_filters_before_limit_to_prevent_lookahead(self):
+        with tempfile.TemporaryDirectory() as directory:
+            with PerpsMarketHistoryStore(Path(directory) / "perps.sqlite3") as store:
+                base = datetime(2026, 11, 22, 8, 0, 0, tzinfo=timezone.utc)
+                snapshots = []
+                for sequence, seconds in enumerate((0, 30, 60, 90), start=1):
+                    timestamp = base + timedelta(seconds=seconds)
+                    snapshot = sample_snapshot(11, received_at=timestamp.isoformat())
+                    timestamp_ms = int(timestamp.timestamp() * 1000)
+                    snapshot["ticker"]["timestamp_ms"] = timestamp_ms
+                    snapshot["book"]["timestamp_ms"] = timestamp_ms
+                    snapshot["book"]["sequence"] = sequence
+                    snapshots.append(snapshot)
+                store.record_snapshots(snapshots)
+
+                rows = store.history(
+                    11,
+                    limit=1,
+                    as_of_received_at=base + timedelta(seconds=30),
+                )
+
+                self.assertEqual(len(rows), 1)
+                self.assertEqual(rows[0]["book_sequence"], 2)
+
+    def test_snapshots_returns_bounded_chronological_replay_window(self):
+        with tempfile.TemporaryDirectory() as directory:
+            with PerpsMarketHistoryStore(Path(directory) / "perps.sqlite3") as store:
+                base = datetime(2026, 11, 22, 8, 0, 0, tzinfo=timezone.utc)
+                rows = []
+                for seconds in (60, 0, 30):
+                    timestamp = base + timedelta(seconds=seconds)
+                    snapshot = sample_snapshot(11, received_at=timestamp.isoformat())
+                    timestamp_ms = int(timestamp.timestamp() * 1000)
+                    snapshot["ticker"]["timestamp_ms"] = timestamp_ms
+                    snapshot["book"]["timestamp_ms"] = timestamp_ms
+                    snapshot["book"]["sequence"] = seconds // 30 + 1
+                    rows.append(snapshot)
+                store.record_snapshots(rows)
+
+                replay_rows = store.snapshots(
+                    start_received_at=base,
+                    end_received_at=base + timedelta(seconds=30),
+                    limit=2,
+                )
+
+                self.assertEqual([row["book_sequence"] for row in replay_rows], [1, 2])
+                with self.assertRaisesRegex(ValueError, "safety limit"):
+                    store.snapshots(limit=1)
+
+    def test_funding_as_of_excludes_settlements_received_after_decision_time(self):
+        with tempfile.TemporaryDirectory() as directory:
+            with PerpsMarketHistoryStore(Path(directory) / "perps.sqlite3") as store:
+                settlement_ms = 1795334400000
+                store.record_funding_history(
+                    11,
+                    [{
+                        "instrument_id": 11,
+                        "timestamp_ms": settlement_ms,
+                        "funding_rate": "0.000125",
+                    }],
+                    received_at="2026-11-22T08:00:10+00:00",
+                )
+                self.assertIsNone(store.funding_rate_at(
+                    11,
+                    settlement_ms,
+                    as_of_received_at="2026-11-22T08:00:09+00:00",
+                ))
+                visible = store.funding_rate_at(
+                    11,
+                    settlement_ms,
+                    as_of_received_at="2026-11-22T08:00:10+00:00",
+                )
+                self.assertEqual(visible["funding_rate"], "0.000125")
+
     def test_history_rejects_invalid_instrument_id_and_limit(self):
         with tempfile.TemporaryDirectory() as directory:
             with PerpsMarketHistoryStore(Path(directory) / "perps.sqlite3") as store:

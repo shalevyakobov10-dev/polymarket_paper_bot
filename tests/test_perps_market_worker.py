@@ -302,6 +302,57 @@ class PerpsMarketWorkerTests(unittest.TestCase):
             self.assertTrue(safe["perps_order_journal_backed_up"])
             self.assertEqual(safe["backup_consecutive_failures"], 0)
 
+    def test_worker_keeps_the_optional_uninitialized_perps_journal_out_of_backup_sources(self):
+        import os
+        from unittest.mock import patch
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            paper_db = root / "perps_paper.sqlite3"
+            market_db = root / "perps_market_history.sqlite3"
+            journal_db = root / "perps_order_journal.sqlite3"
+            paper_db.write_bytes(b"paper database placeholder")
+            market_db.write_bytes(b"market history placeholder")
+            calls = []
+
+            def fake_backup(paths, backup_directory, *, retain):
+                calls.append(list(paths))
+                return {
+                    "created_at": "2026-11-22T08:00:00+00:00",
+                    "manifest_name": "perps-backup-manifest.json",
+                    "files": [
+                        {"source_name": paper_db.name, "backup_name": "paper.sqlite3"},
+                        {"source_name": market_db.name, "backup_name": "history.sqlite3"},
+                    ],
+                    "skipped_missing_sources": [],
+                }
+
+            with patch.dict(os.environ, {
+                "PERPS_PAPER_DB": str(paper_db),
+                "PERPS_MARKET_HISTORY_DB": str(market_db),
+                "PERPS_ORDER_JOURNAL_DB": str(journal_db),
+            }, clear=False):
+                result = run_worker(
+                    provider=FakeProvider(),
+                    store=FakeStore(),
+                    paper_engine=FakePaperEngine(),
+                    paper_engine_enabled=True,
+                    backup_function=fake_backup,
+                    stop_event=FakeStopEvent(),
+                    status_path=root / "status.json",
+                    poll_interval_seconds=15,
+                    max_cycles=1,
+                )
+
+            self.assertEqual(result, 0)
+            self.assertEqual(calls, [[paper_db, market_db]])
+            status = read_perps_worker_status(root / "status.json")
+            self.assertFalse(status["perps_order_journal_present"])
+            self.assertFalse(status["perps_order_journal_backed_up"])
+            self.assertEqual(status["backup_files_last_run"], 2)
+            self.assertEqual(status["backup_files_expected_last_run"], 2)
+            self.assertIsNone(status["backup_error_type"])
+
     def test_worker_fetches_and_persists_exact_funding_before_engine_processing(self):
         class OrderedProvider(FakeProvider):
             def __init__(self):

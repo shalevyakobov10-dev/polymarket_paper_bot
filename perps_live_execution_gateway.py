@@ -271,12 +271,31 @@ class PerpsLiveExecutionGateway:
             observations = preflight_report.get("observations")
             if not isinstance(observations, dict):
                 return self._blocked("account_preflight_observations_missing", client_order_id=identifier)
+            if observations.get("fee_schedule_fresh") is not True:
+                return self._blocked("account_fee_schedule_not_fresh_or_verified", client_order_id=identifier)
+            fee_tier = observations.get("account_fee_tier")
+            if isinstance(fee_tier, bool) or not isinstance(fee_tier, int) or fee_tier < 0:
+                return self._blocked("account_fee_tier_not_verified", client_order_id=identifier)
             try:
                 margin_available = _decimal(observations.get("margin_available"), "available_order_margin")
+                account_taker_fee_rate = _decimal(
+                    observations.get("effective_taker_fee_rate"),
+                    "account_effective_taker_fee_rate",
+                )
+                max_round_trip_fee_budget = _decimal(
+                    risk_decision.get("max_round_trip_fee_usd"),
+                    "max_round_trip_fee_usd",
+                )
             except ValueError:
-                return self._blocked("available_order_margin_invalid", client_order_id=identifier)
-            if required_margin > margin_available:
-                return self._blocked("insufficient_available_initial_margin", client_order_id=identifier)
+                return self._blocked("account_fee_or_margin_observation_invalid", client_order_id=identifier)
+            if account_taker_fee_rate >= Decimal("1"):
+                return self._blocked("account_taker_fee_rate_out_of_bounds", client_order_id=identifier)
+            estimated_entry_fee = order_notional * account_taker_fee_rate
+            estimated_round_trip_fee = estimated_entry_fee * Decimal("2")
+            if max_round_trip_fee_budget < estimated_round_trip_fee:
+                return self._blocked("risk_fee_budget_below_current_taker_fee_estimate", client_order_id=identifier)
+            if required_margin + estimated_entry_fee > margin_available:
+                return self._blocked("insufficient_available_initial_margin_and_entry_fee", client_order_id=identifier)
 
             # Confirm the target instrument's own margin mode and leverage.
             try:

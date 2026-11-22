@@ -1071,6 +1071,49 @@ class PerpsPaperBackupHealthTests(unittest.TestCase):
         }
         self.assertEqual(app.perps_backup_health_component(failed, now)["status"], "degraded")
 
+    def test_existing_perps_order_journal_must_be_in_the_verified_backup_set(self):
+        now = datetime(2026, 11, 22, 12, 0, tzinfo=timezone.utc)
+        base = {
+            "backup_interval_hours": 6,
+            "last_backup_at": (now - timedelta(minutes=10)).isoformat(),
+            "last_backup_manifest_name": "perps-backup-manifest.json",
+            "backup_consecutive_failures": 0,
+            "perps_order_journal_present": True,
+            "perps_order_journal_backed_up": False,
+            "backup_files_last_run": 2,
+            "backup_files_expected_last_run": 2,
+        }
+        missing_journal_copy = app.perps_backup_health_component(base, now)
+        self.assertEqual(missing_journal_copy["status"], "degraded")
+        self.assertTrue(missing_journal_copy["perps_order_journal_present"])
+        self.assertFalse(missing_journal_copy["perps_order_journal_backed_up"])
+
+        complete = {
+            **base,
+            "perps_order_journal_backed_up": True,
+            "backup_files_last_run": 3,
+            "backup_files_expected_last_run": 3,
+        }
+        verified = app.perps_backup_health_component(complete, now)
+        self.assertEqual(verified["status"], "healthy")
+        self.assertEqual(verified["backup_files_last_run"], 3)
+        self.assertEqual(verified["backup_files_expected_last_run"], 3)
+
+    def test_order_journal_appearing_after_previous_two_database_backup_is_degraded(self):
+        now = datetime(2026, 11, 22, 12, 0, tzinfo=timezone.utc)
+        snapshot = {
+            "backup_interval_hours": 6,
+            "last_backup_at": (now - timedelta(minutes=10)).isoformat(),
+            "last_backup_manifest_name": "perps-backup-manifest.json",
+            "backup_consecutive_failures": 0,
+            "backup_files_last_run": 2,
+            "backup_files_expected_last_run": 2,
+            "perps_order_journal_present": True,
+            "perps_order_journal_backed_up": False,
+        }
+        result = app.perps_backup_health_component(snapshot, now)
+        self.assertEqual(result["status"], "degraded")
+
     def test_future_dated_backup_is_invalid(self):
         now = datetime(2026, 11, 22, 12, 0, tzinfo=timezone.utc)
         result = app.perps_backup_health_component({

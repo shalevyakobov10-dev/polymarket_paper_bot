@@ -340,6 +340,14 @@ class PerpsPaperEngine:
                 "current_next_funding_ms": current_next,
             })
             return False
+        if current_next == old_next and int(now.timestamp() * 1000) > old_next + 5_000:
+            self._halt("funding_schedule_not_advanced")
+            self._event(snapshot_key, int(position["instrument_id"]), "FUNDING_RECONCILIATION_REQUIRED", now, {
+                "previous_next_funding_ms": old_next,
+                "current_next_funding_ms": current_next,
+                "reason": "funding time passed but API schedule did not advance",
+            })
+            return False
         if current_next > old_next:
             delta = current_next - old_next
             if delta != interval:
@@ -661,14 +669,23 @@ class PerpsPaperEngine:
                 raise ValueError("book is crossed or locked")
             if abs(book_ms - ticker_ms) > self.max_data_age_seconds * 1000:
                 raise ValueError("ticker and book timestamps are too far apart")
-            age_ms = abs(int(received.timestamp() * 1000) - book_ms)
-            if age_ms > self.max_data_age_seconds * 1000:
+            captured_now = now
+            if captured_now is not None:
+                if captured_now.tzinfo is None or captured_now.utcoffset() is None:
+                    raise ValueError("now must be timezone-aware")
+                captured_now = captured_now.astimezone(timezone.utc)
+            else:
+                captured_now = received
+            capture_ms = int(captured_now.timestamp() * 1000)
+            book_age_ms = capture_ms - book_ms
+            ticker_age_ms = capture_ms - ticker_ms
+            maximum_age_ms = self.max_data_age_seconds * 1000
+            if book_age_ms < -2_000 or ticker_age_ms < -2_000:
+                raise ValueError("snapshot exchange timestamp is future-dated")
+            if book_age_ms > maximum_age_ms or ticker_age_ms > maximum_age_ms:
                 raise ValueError("snapshot exchange timestamp is stale relative to capture")
-            captured_now = now.astimezone(timezone.utc) if now else received
         except (KeyError, ValueError, TypeError, OverflowError) as exc:
             raise ValueError(f"invalid or stale Perps snapshot: {str(exc)[:160]}") from None
-        if captured_now.tzinfo is None or captured_now.utcoffset() is None:
-            raise ValueError("now must be timezone-aware")
         snapshot_key = f"{instrument_id}:{book_ms}:{int(book.get('sequence', 0))}"
 
         with self._lock, self.db:
@@ -752,9 +769,11 @@ class PerpsPaperEngine:
                 (self._unrealized(row, Decimal(row["last_mark"])) for row in positions),
                 ZERO,
             )
-            closed = self.db.execute(
-                "SELECT COUNT(*) AS count, COALESCE(SUM(CAST(net_pnl AS REAL)),0) AS net_pnl FROM perps_paper_positions WHERE status IN ('CLOSED','LIQUIDATED')"
-            ).fetchone()
+            closed_rows = self.db.execute(
+                "SELECT net_pnl FROM perps_paper_positions WHERE status IN ('CLOSED','LIQUIDATED')"
+            ).fetchall()
+            closed_count = len(closed_rows)
+            closed_net_pnl = sum((Decimal(row["net_pnl"]) for row in closed_rows), ZERO)
             events = self.db.execute(
                 "SELECT event_type, COUNT(*) AS count FROM perps_paper_events GROUP BY event_type"
             ).fetchall()
@@ -768,8 +787,8 @@ class PerpsPaperEngine:
                 "isolated_margin_reserved": str(margin),
                 "unrealized_pnl": str(unrealized),
                 "open_positions": len(positions),
-                "closed_positions": int(closed["count"]),
-                "closed_net_pnl": str(Decimal(str(closed["net_pnl"]))),
+                "closed_positions": closed_count,
+                "closed_net_pnl": str(closed_net_pnl),
                 "halted": bool(account["halted"]),
                 "halt_reason": account["halt_reason"],
                 "utc_day": account["utc_day"],

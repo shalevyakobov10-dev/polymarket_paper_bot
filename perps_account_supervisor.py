@@ -426,6 +426,7 @@ class PerpsAccountSupervisor:
                         "blocked_reasons": ["submission_lock_unavailable"],
                         "observations": {},
                     })
+                    failures = 0
                 else:
                     try:
                         if not recovery_completed:

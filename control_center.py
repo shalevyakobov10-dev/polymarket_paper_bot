@@ -67,7 +67,16 @@ function addStatus(container,value){const node=document.createElement("div");nod
 function metricEntries(id,d){
  if(id==="system"){
   const components=d.components||{};const failures=d.required_component_failures||[];
-  const rows=[["Overall",d.status],["Required failures",failures.length?failures:"None"],["Last success",d.last_success_at],["Last error",d.last_error]];
+  const backup=components.perps_paper_backup||{};
+  const rows=[
+   ["Overall",d.status],
+   ["Required failures",failures.length?failures:"None"],
+   ["Last success",d.last_success_at],
+   ["Perps journal present",backup.perps_order_journal_present],
+   ["Perps journal included in backup",backup.perps_order_journal_backed_up],
+   ["Perps backup files",String(backup.backup_files_last_run??"—")+"/"+String(backup.backup_files_expected_last_run??"—")],
+   ["Last error",d.last_error]
+  ];
   return {status:d.status||"unknown",rows,extra:Object.entries(components).map(([name,c])=>[name,c&&c.status||"unknown"])};
  }
  if(id==="perps-market")return {status:d.worker_state,rows:[["Enabled",d.enabled],["Markets observed",d.markets_in_last_snapshot],["Fee schedule verified",d.markets_with_verified_fee_schedule],["Fee coverage",d.fee_coverage_status],["Last success",d.last_success_at],["Last error",d.last_error]]};

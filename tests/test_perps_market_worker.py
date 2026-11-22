@@ -125,7 +125,7 @@ class PerpsMarketWorkerTests(unittest.TestCase):
             raw = json.loads(target.read_text(encoding="utf-8"))
             self.assertEqual(raw["worker_state"], "healthy")
             self.assertEqual(raw["markets_in_last_snapshot"], 1)
-            self.assertEqual(raw["heartbeat_timeout_seconds"], 205)
+            self.assertEqual(raw["heartbeat_timeout_seconds"], 285)
             self.assertEqual(raw["markets_with_fee_schedule"], 0)
             self.assertEqual(raw["history_rows"], 1)
             self.assertFalse(raw["live_execution_enabled"])

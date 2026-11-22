@@ -149,7 +149,8 @@ class PerpsWalkForwardEvaluationTests(unittest.TestCase):
                 [row["test_start"] for row in folds],
             )
             self.assertTrue(all(call.kwargs["start_received_at"] == BASE for call in calls))
-            self.assertTrue(all(call.kwargs["end_received_at"] <= report["last_capture_at"] for call in calls))
+            last_capture = datetime.fromisoformat(report["last_capture_at"].replace("Z", "+00:00"))
+            self.assertTrue(all(call.kwargs["end_received_at"] <= last_capture for call in calls))
 
     def test_insufficient_closed_trade_sample_does_not_pass_consistency_gate(self):
         with tempfile.TemporaryDirectory() as directory:

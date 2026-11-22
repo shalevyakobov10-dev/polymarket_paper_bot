@@ -77,7 +77,7 @@ class PerpsAutoCancelGuardTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(result["new_order_permission"])
         self.assertEqual(result["execution"], "none")
         self.assertEqual(self.session.arm_calls, [])
-        self.assertEqual(self.session.status_calls, [])
+        self.assertEqual(self.session.status_calls, 0)
 
     async def test_enabled_and_manually_armed_switch_is_verified_against_server(self):
         result = await self.guard().arm_once(now=NOW)

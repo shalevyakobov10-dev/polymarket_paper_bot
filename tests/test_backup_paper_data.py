@@ -6,6 +6,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from backup_paper_data import create_paper_data_backups
+from perps_order_journal import PerpsOrderJournal
 
 
 class PaperDataBackupTests(unittest.TestCase):
@@ -64,6 +65,48 @@ class PaperDataBackupTests(unittest.TestCase):
                 )
             backups = list((root / "backups").glob("paper-*.sqlite3"))
             self.assertEqual(len(backups), 1)
+
+    def test_perps_order_journal_backup_can_be_reopened_and_reconciled(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            paper = root / "paper.sqlite3"
+            history = root / "history.sqlite3"
+            perps_path = root / "perps_order_journal.sqlite3"
+            self._database(paper, "paper")
+            self._database(history, "market")
+            journal = PerpsOrderJournal(perps_path)
+            journal.create_intent(
+                client_order_id="a" * 32,
+                instrument_id=17,
+                side="buy",
+                quantity="0.5",
+                position_intent="open_long",
+                time_in_force="ioc",
+            )
+            journal.begin_submission("a" * 32)
+
+            result = create_paper_data_backups(
+                [paper, history, perps_path],
+                root / "backups",
+                now=datetime(2026, 11, 22, 10, 0, tzinfo=timezone.utc),
+            )
+            perps_item = next(
+                item for item in result["files"]
+                if item["source_name"] == perps_path.name
+            )
+            backup_path = root / "backups" / perps_item["backup_name"]
+            restored = PerpsOrderJournal(backup_path)
+            state = restored.get_intent("a" * 32)
+            self.assertEqual(state["status"], "submission_pending")
+            self.assertEqual(state["instrument_id"], 17)
+            self.assertFalse(state["automatic_retry_permitted"])
+            self.assertEqual(
+                [event["event_type"] for event in restored.list_events("a" * 32)],
+                ["INTENT_PREPARED", "SUBMISSION_STARTED"],
+            )
+            self.assertTrue(restored.integrity_check()["integrity_ok"])
+            self.assertEqual(perps_item["integrity_check"], "ok")
+            self.assertEqual(len(perps_item["sha256"]), 64)
 
     def test_corrupt_database_is_not_published_as_backup(self):
         with tempfile.TemporaryDirectory() as directory:

@@ -29,6 +29,7 @@ from execution_readiness import execution_readiness_payload
 from resilience import exponential_backoff_seconds, parse_retry_after
 from supervisor_status import read_supervisor_status
 from event_paper_worker import read_event_paper_worker_status
+from perps_market_worker import read_perps_worker_status
 
 GAMMA_URL = "https://gamma-api.polymarket.com/markets"
 POLL_SECONDS = max(15, int(os.getenv("POLL_SECONDS", "60")))
@@ -55,6 +56,10 @@ except (ValueError, TypeError):
 DATA_DIR = Path(os.getenv("DATA_DIR", "data"))
 SUPERVISOR_STATUS_FILE = Path(os.getenv("SERVICE_SUPERVISOR_STATUS_FILE", str(DATA_DIR / "service_supervisor_status.json")))
 EVENT_PAPER_WORKER_STATUS_FILE = Path(os.getenv("EVENT_PAPER_WORKER_STATUS_FILE", str(DATA_DIR / "event_paper_worker_status.json")))
+PERPS_MARKET_WORKER_STATUS_FILE = Path(os.getenv(
+    "PERPS_MARKET_WORKER_STATUS_FILE",
+    str(DATA_DIR / "perps_market_worker_status.json"),
+))
 SNAPSHOTS = DATA_DIR / "market_snapshots.jsonl"
 SIGNALS = DATA_DIR / "candidate_signals.jsonl"
 ORDERBOOK_SNAPSHOTS = DATA_DIR / "orderbook_snapshots.jsonl"
@@ -1305,7 +1310,7 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def do_GET(self):
-        if self.path in ("/", "/status", "/health", "/paper", "/news", "/matches", "/market-stream", "/resolutions", "/forecast-evaluation", "/research-features", "/independent-model-evaluation", "/model-forecasts", "/learning", "/execution-readiness", "/service-supervisor", "/event-paper"):
+        if self.path in ("/", "/status", "/health", "/paper", "/news", "/matches", "/market-stream", "/resolutions", "/forecast-evaluation", "/research-features", "/independent-model-evaluation", "/model-forecasts", "/learning", "/execution-readiness", "/service-supervisor", "/event-paper", "/perps-market"):
             with _lock:
                 snapshot = dict(_state)
             if self.path == "/health":
@@ -1332,6 +1337,48 @@ class Handler(BaseHTTPRequestHandler):
                     learning_snapshot=learning_snapshot,
                     paper_worker_snapshot=paper_worker_snapshot,
                 )
+                if supervisor_snapshot.get("perps_market_worker_enabled") is True:
+                    perps_snapshot = read_perps_worker_status(PERPS_MARKET_WORKER_STATUS_FILE)
+                    perps_age = None
+                    perps_status = "starting"
+                    try:
+                        perps_stamp = datetime.fromisoformat(
+                            str(perps_snapshot.get("last_heartbeat_at") or "").replace("Z", "+00:00")
+                        )
+                        if perps_stamp.tzinfo is not None and perps_stamp.utcoffset() is not None:
+                            perps_age = max(0.0, (
+                                datetime.now(timezone.utc) - perps_stamp.astimezone(timezone.utc)
+                            ).total_seconds())
+                    except (TypeError, ValueError, OverflowError):
+                        perps_age = None
+                    stale_after = max(
+                        90,
+                        int(perps_snapshot.get("poll_interval_seconds") or 30) * 3,
+                    )
+                    if perps_snapshot.get("worker_state") == "healthy" and perps_age is not None:
+                        perps_status = "healthy" if perps_age <= stale_after else "stale"
+                    elif perps_snapshot.get("worker_state") == "degraded":
+                        perps_status = "degraded"
+                    elif perps_snapshot.get("worker_state") == "stopped":
+                        perps_status = "stopped"
+                    perps_component = {
+                        "name": "perps_market_data",
+                        "status": perps_status,
+                        "worker_running": perps_snapshot.get("worker_state") in {"healthy", "degraded"},
+                        "last_success_at": perps_snapshot.get("last_success_at"),
+                        "last_heartbeat_at": perps_snapshot.get("last_heartbeat_at"),
+                        "seconds_since_heartbeat": round(perps_age, 1) if perps_age is not None else None,
+                        "stale_after_seconds": stale_after,
+                        "last_error": perps_snapshot.get("last_error"),
+                    }
+                    payload["components"]["perps_market_data"] = perps_component
+                    payload["required_components"].append("perps_market_data")
+                    if perps_status != "healthy":
+                        healthy = False
+                        payload["ok"] = False
+                        payload["status"] = "unhealthy"
+                        payload["required_component_failures"].append("perps_market_data")
+                    payload["health_policy"] += "; perps_market_data_is_required_when_enabled"
                 self._send(200 if healthy else 503, payload)
             elif self.path == "/paper":
                 self._send(200, get_paper_trader().snapshot())
@@ -1409,9 +1456,33 @@ class Handler(BaseHTTPRequestHandler):
                     "execution": "none",
                 })
                 self._send(200, worker_snapshot)
+            elif self.path == "/perps-market":
+                supervisor_snapshot = read_supervisor_status(SUPERVISOR_STATUS_FILE)
+                if supervisor_snapshot.get("perps_market_worker_enabled") is True:
+                    worker_snapshot = read_perps_worker_status(PERPS_MARKET_WORKER_STATUS_FILE)
+                else:
+                    worker_snapshot = {
+                        "enabled": False,
+                        "worker_state": "disabled",
+                        "last_heartbeat_at": None,
+                        "last_success_at": None,
+                        "last_error": None,
+                        "research_only": True,
+                        "live_execution_enabled": False,
+                        "execution": "none",
+                    }
+                worker_snapshot.update({
+                    "mode": "POLYMARKET_PERPS_PUBLIC_MARKET_DATA",
+                    "research_only": True,
+                    "live_execution_enabled": False,
+                    "order_submission_allowed": False,
+                    "execution": "none",
+                })
+                self._send(200, worker_snapshot)
             elif self.path == "/service-supervisor":
                 payload = read_supervisor_status(SUPERVISOR_STATUS_FILE)
                 payload["event_paper_worker"] = read_event_paper_worker_status(EVENT_PAPER_WORKER_STATUS_FILE)
+                payload["perps_market_worker"] = read_perps_worker_status(PERPS_MARKET_WORKER_STATUS_FILE)
                 payload.update({
                     "read_only": True,
                     "order_submission_allowed": False,

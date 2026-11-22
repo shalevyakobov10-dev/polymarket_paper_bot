@@ -372,6 +372,44 @@ class PerpsPublicMarketDataProvider:
         except (UnicodeDecodeError, json.JSONDecodeError):
             raise PerpsAPIError("Perps API returned invalid JSON") from None
 
+    def load_fee_schedule_snapshot(
+        self,
+        *,
+        retrieved_at: datetime | None = None,
+    ) -> dict[str, Any]:
+        """Return the full current public Perps fee-tier ladder for account preflight.
+
+        This read-only endpoint contains no account credentials or personal data.
+        Preserve the published tier list: collapsing it to a single conservative
+        base rate would not let an authenticated account fee_tier be resolved.
+        """
+        captured = retrieved_at or datetime.now(timezone.utc)
+        if captured.tzinfo is None or captured.utcoffset() is None:
+            raise ValueError("retrieved_at must be timezone-aware")
+        captured = captured.astimezone(timezone.utc)
+        raw = self._get_json("/v1/info/fees")
+        if not isinstance(raw, dict) or not isinstance(raw.get("fee_schedule"), list):
+            raise PerpsAPIError("Perps fee schedule response is missing fee_schedule")
+        rows = raw["fee_schedule"]
+        perps_rows = [
+            row for row in rows
+            if isinstance(row, dict)
+            and str(row.get("instrument_type") or "").strip().lower() == "perpetual"
+        ]
+        if not perps_rows:
+            raise PerpsAPIError("Perps fee schedule contains no perpetual entries")
+        # Reuse the public collector's strict fee-rate and threshold validation;
+        # the full raw ladder is returned separately for the private account's
+        # exact fee_tier index to select its effective rates.
+        _normalize_fee_schedule(raw, captured)
+        return {
+            "retrieved_at": captured.isoformat(),
+            "fee_schedule": json.loads(json.dumps(perps_rows, allow_nan=False)),
+            "source": "public_perps_fee_schedule",
+            "research_only": True,
+            "execution": "none",
+        }
+
     def load(
         self,
         *,

@@ -13,6 +13,8 @@ class CompatibleSecureClient:
 class CompatiblePerpsSession:
     def fetch_balances(self): pass
     def fetch_portfolio(self): pass
+    def fetch_auto_cancel_status(self): pass
+    def fetch_account_config(self, *, instrument_id=None): pass
     def fetch_open_orders(self, *, instrument_id=None): pass
     def fetch_orders(self, *, client_order_id=None): pass
     def list_fills(self, *, instrument_id=None, start=None, end=None, sort=None): pass

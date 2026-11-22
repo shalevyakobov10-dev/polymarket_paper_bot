@@ -150,6 +150,63 @@ class PerpsMarketHistoryStoreTests(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     store.record_snapshots([invalid])
 
+    def test_persists_and_restores_public_fee_metadata(self):
+        with tempfile.TemporaryDirectory() as directory:
+            with PerpsMarketHistoryStore(Path(directory) / "perps.sqlite3") as store:
+                snapshot = sample_snapshot()
+                snapshot["fees"] = {
+                    "taker_fee_rate": "0.0004",
+                    "maker_fee_rate": "0.0001",
+                    "source": "public_perps_fee_schedule",
+                    "retrieved_at": "2026-11-22T08:00:00+00:00",
+                }
+                store.record_snapshots([snapshot])
+                latest = store.latest()[0]
+                history = store.history(11)[0]
+                self.assertEqual(latest["fees"]["taker_fee_rate"], "0.0004")
+                self.assertEqual(history["fees"]["source"], "public_perps_fee_schedule")
+
+    def test_allows_missing_fee_schedule_for_exit_only_market_data(self):
+        with tempfile.TemporaryDirectory() as directory:
+            with PerpsMarketHistoryStore(Path(directory) / "perps.sqlite3") as store:
+                snapshot = sample_snapshot()
+                snapshot["fees"] = {}
+                result = store.record_snapshots([snapshot])
+                self.assertEqual(result["inserted"], 1)
+                self.assertEqual(store.latest()[0]["fees"], {})
+
+    def test_records_idempotent_published_funding_settlements(self):
+        with tempfile.TemporaryDirectory() as directory:
+            with PerpsMarketHistoryStore(Path(directory) / "perps.sqlite3") as store:
+                rows = [
+                    {"instrument_id": 11, "timestamp_ms": 1795334400000, "funding_rate": "0.000125"},
+                    {"instrument_id": 11, "timestamp_ms": 1795338000000, "funding_rate": "-0.00005"},
+                ]
+                first = store.record_funding_history(11, rows)
+                repeated = store.record_funding_history(11, rows)
+                self.assertEqual(first, {"received": 2, "inserted": 2, "duplicates": 0})
+                self.assertEqual(repeated, {"received": 2, "inserted": 0, "duplicates": 2})
+                self.assertEqual(
+                    store.funding_rate_at(11, 1795334400000)["funding_rate"],
+                    "0.000125",
+                )
+                self.assertIsNone(store.funding_rate_at(11, 1795335000000, tolerance_ms=1000))
+
+    def test_rejects_mismatched_or_duplicate_funding_settlement_rows(self):
+        with tempfile.TemporaryDirectory() as directory:
+            with PerpsMarketHistoryStore(Path(directory) / "perps.sqlite3") as store:
+                with self.assertRaisesRegex(ValueError, "ID mismatch"):
+                    store.record_funding_history(11, [{
+                        "instrument_id": 12, "timestamp_ms": 1795334400000,
+                        "funding_rate": "0.0001",
+                    }])
+                duplicate = [
+                    {"instrument_id": 11, "timestamp_ms": 1795334400000, "funding_rate": "0.0001"},
+                    {"instrument_id": 11, "timestamp_ms": 1795334400000, "funding_rate": "0.0002"},
+                ]
+                with self.assertRaisesRegex(ValueError, "duplicate funding timestamp"):
+                    store.record_funding_history(11, duplicate)
+
     def test_prunes_only_observations_older_than_retention_cutoff(self):
         with tempfile.TemporaryDirectory() as directory:
             with PerpsMarketHistoryStore(Path(directory) / "perps.sqlite3") as store:

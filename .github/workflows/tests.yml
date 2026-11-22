@@ -18,7 +18,7 @@ jobs:
       - name: Install runtime dependencies
         run: python -m pip install -r requirements.txt
       - name: Compile
-        run: python -m py_compile app.py paper_trading.py news_monitor.py market_data.py market_quality.py market_stream.py global_news.py risk_manager.py resilience.py backtest.py forecast_evaluation.py resolution_tracker.py research_features.py independent_model_evaluation.py learning_journal.py model_governance.py publisher_identity.py paper_fees.py execution_readiness.py account_risk_policy.py backup_order_journal.py restore_order_journal.py live_order_preflight.py order_lifecycle.py order_journal.py user_order_stream.py order_staging.py service_supervisor.py supervisor_status.py event_paper_worker.py paper_performance.py backup_paper_data.py polymarket_geo.py live_execution_gateway.py news_sentiment.py adaptive_paper_risk.py paper_parameter_tuner.py market_snapshot_provider.py live_market_snapshot_provider.py market_history_store.py historical_replay.py resolved_event_evaluation.py paper_orderbook_execution.py event_outcome.py offline_news_paper_bot.py
+        run: python -m py_compile app.py paper_trading.py news_monitor.py market_data.py market_quality.py market_stream.py global_news.py risk_manager.py resilience.py backtest.py forecast_evaluation.py resolution_tracker.py research_features.py independent_model_evaluation.py learning_journal.py model_governance.py publisher_identity.py paper_fees.py execution_readiness.py account_risk_policy.py backup_order_journal.py restore_order_journal.py live_order_preflight.py order_lifecycle.py order_journal.py user_order_stream.py order_staging.py service_supervisor.py supervisor_status.py event_paper_worker.py paper_performance.py backup_paper_data.py polymarket_geo.py live_execution_gateway.py news_sentiment.py adaptive_paper_risk.py paper_parameter_tuner.py market_snapshot_provider.py live_market_snapshot_provider.py market_history_store.py historical_replay.py resolved_event_evaluation.py paper_orderbook_execution.py event_outcome.py offline_news_paper_bot.py perps_market_data.py perps_market_history_store.py perps_market_worker.py
       - name: Unit tests
         run: python -m unittest discover -s tests -v
       - name: Build Docker image
@@ -29,6 +29,7 @@ jobs:
           docker run -d --rm --name polymarket-paper-bot-smoke \
             -e DATA_DIR=/tmp/polymarket-smoke-data \
             -e ENABLE_EVENT_PAPER_WORKER=false \
+            -e ENABLE_PERPS_MARKET_DATA_WORKER=false \
             -p 18080:8080 polymarket-paper-bot:ci
           cleanup() { docker stop polymarket-paper-bot-smoke >/dev/null 2>&1 || true; }
           trap cleanup EXIT
@@ -56,6 +57,7 @@ jobs:
           curl --silent --show-error --fail http://127.0.0.1:18080/execution-readiness > /tmp/paper-execution-readiness.json
           curl --silent --show-error --fail http://127.0.0.1:18080/service-supervisor > /tmp/paper-service-supervisor.json
           curl --silent --show-error --fail http://127.0.0.1:18080/event-paper > /tmp/event-paper.json
+          curl --silent --show-error --fail http://127.0.0.1:18080/perps-market > /tmp/perps-market.json
           python - <<'PY'
           import json
           from pathlib import Path
@@ -75,6 +77,7 @@ jobs:
           execution_readiness = json.loads(Path("/tmp/paper-execution-readiness.json").read_text())
           supervisor = json.loads(Path("/tmp/paper-service-supervisor.json").read_text())
           event_paper = json.loads(Path("/tmp/event-paper.json").read_text())
+          perps_market = json.loads(Path("/tmp/perps-market.json").read_text())
           assert "items" in news and "feeds_configured" in news, "news endpoint schema mismatch"
           assert health.get("mode") == "paper_only", "health endpoint must remain paper-only"
           assert health.get("status") in {"healthy", "degraded", "unhealthy"}, "health endpoint status schema mismatch"
@@ -120,6 +123,12 @@ jobs:
           assert event_paper.get("research_only") is True, "event paper endpoint must be research-only"
           assert event_paper.get("live_execution_enabled") is False, "event paper endpoint must never enable live execution"
           assert event_paper.get("execution") == "none", "event paper endpoint must not submit orders"
+          assert perps_market.get("mode") == "POLYMARKET_PERPS_PUBLIC_MARKET_DATA", "Perps endpoint mode mismatch"
+          assert perps_market.get("worker_state") == "disabled", "Perps worker must remain disabled in CI container smoke test"
+          assert perps_market.get("research_only") is True, "Perps public data must remain research-only"
+          assert perps_market.get("live_execution_enabled") is False, "Perps live execution must remain disabled"
+          assert perps_market.get("order_submission_allowed") is False, "Perps orders must remain blocked"
+          assert perps_market.get("execution") == "none", "Perps endpoint must not submit orders"
           assert "POLYMARKET_PRIVATE_KEY" not in supervisor, "supervisor status must not expose secrets"
           print("Container smoke check passed: research, learning, execution-readiness, and sanitized supervisor status endpoints returned valid JSON.")
           PY

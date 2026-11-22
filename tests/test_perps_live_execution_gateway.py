@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import asyncio
 import tempfile
 import unittest
+from unittest.mock import patch
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
@@ -33,6 +35,7 @@ class FakeSession:
         self.placed_client_id = None
         self.returned_client_id = None
         self.raise_on_place = False
+        self.hang_on_place = False
         self.omit_order_id = False
         self.remote_status = "accepted"
         self.orders = {}
@@ -44,6 +47,8 @@ class FakeSession:
 
     async def place_order(self, **kwargs):
         self.place_calls.append(kwargs)
+        if self.hang_on_place:
+            await asyncio.Event().wait()
         if self.raise_on_place:
             raise TimeoutError("simulated ambiguous transport outcome")
         client_id = kwargs["client_order_id"]
@@ -134,6 +139,12 @@ class PerpsLiveExecutionGatewayTests(unittest.IsolatedAsyncioTestCase):
         )
         self.preflight = FakePreflight()
         self.guard = FakeGuard()
+        self.release_gate_patch = patch(
+            "perps_live_execution_gateway.evaluate_perps_live_release_gate",
+            return_value={"eligible_for_separate_gateway_review": True},
+        )
+        self.release_gate_patch.start()
+        self.addCleanup(self.release_gate_patch.stop)
 
     def gateway(self, **overrides):
         options = {
@@ -192,6 +203,18 @@ class PerpsLiveExecutionGatewayTests(unittest.IsolatedAsyncioTestCase):
             self.gateway(dry_run=True)
         with self.assertRaisesRegex(ValueError, "acknowledgement"):
             self.gateway(acknowledgement="yes")
+
+    async def test_source_controlled_release_gate_cannot_be_overridden_by_runtime_flags(self):
+        with patch(
+            "perps_live_execution_gateway.evaluate_perps_live_release_gate",
+            return_value={"eligible_for_separate_gateway_review": False},
+        ):
+            result = await self.submit()
+        self.assertEqual(result["reason_code"], "source_controlled_perps_release_gate_closed")
+        self.assertFalse(result["order_placement_attempted"])
+        self.assertEqual(self.guard.calls, 0)
+        self.assertEqual(self.preflight.calls, 0)
+        self.assertEqual(self.session.place_calls, [])
 
     async def test_local_kill_switch_blocks_before_auto_cancel_or_preflight(self):
         self.kill_file.write_text("{}", encoding="utf-8")
@@ -294,6 +317,19 @@ class PerpsLiveExecutionGatewayTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(first["automatic_retry_permitted"])
         self.session.raise_on_place = False
         second = await self.submit()
+        self.assertEqual(second["reason_code"], "client_order_id_already_used_or_not_prepared")
+        self.assertEqual(len(self.session.place_calls), 1)
+        self.assertEqual(self.journal.get_intent("a" * 32)["submission_attempts"], 1)
+
+    async def test_submission_timeout_is_ambiguous_and_never_retried(self):
+        gateway = self.gateway(submission_timeout_seconds=0.05)
+        self.session.hang_on_place = True
+        first = await self.submit(gateway)
+        self.assertEqual(first["state"], "submission_unknown")
+        self.assertEqual(first["reason_code"], "sdk_submission_timeout_outcome_unknown")
+        self.assertFalse(first["automatic_retry_permitted"])
+        self.session.hang_on_place = False
+        second = await self.submit(gateway)
         self.assertEqual(second["reason_code"], "client_order_id_already_used_or_not_prepared")
         self.assertEqual(len(self.session.place_calls), 1)
         self.assertEqual(self.journal.get_intent("a" * 32)["submission_attempts"], 1)

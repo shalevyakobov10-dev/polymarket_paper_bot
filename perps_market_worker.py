@@ -82,7 +82,8 @@ def _sanitize_paper_summary(value: Any) -> dict[str, Any] | None:
     }
     amount_fields = (
         "cash", "equity", "peak_equity", "isolated_margin_reserved",
-        "unrealized_pnl", "closed_net_pnl", "daily_start_equity",
+        "unrealized_pnl", "open_notional", "effective_leverage",
+        "peak_drawdown_pct", "daily_pnl_pct", "closed_net_pnl", "daily_start_equity",
         "max_leverage", "max_position_notional", "max_total_notional",
         "max_entry_impact_bps", "taker_fee_rate_assumption", "liquidation_fee_rate_assumption",
     )

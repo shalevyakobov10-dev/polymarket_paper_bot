@@ -1,5 +1,6 @@
 import tempfile
 import unittest
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from perps_market_history_store import PerpsMarketHistoryStore
@@ -105,11 +106,14 @@ class PerpsMarketHistoryStoreTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             with PerpsMarketHistoryStore(Path(directory) / "perps.sqlite3") as store:
                 snapshots = []
+                base_time = datetime(2026, 11, 22, 8, 0, 0, tzinfo=timezone.utc)
+                base_timestamp_ms = int(base_time.timestamp() * 1000)
                 for sequence, second in enumerate((0, 30, 60, 90), start=1):
+                    snapshot_time = base_time + timedelta(seconds=second)
                     snapshot = sample_snapshot(
-                        11, received_at=f"2026-11-22T08:00:{second:02d}+00:00"
+                        11, received_at=snapshot_time.isoformat()
                     )
-                    timestamp_ms = 1795334400000 + second * 1000
+                    timestamp_ms = base_timestamp_ms + second * 1000
                     snapshot["ticker"]["timestamp_ms"] = timestamp_ms
                     snapshot["book"]["timestamp_ms"] = timestamp_ms
                     snapshot["book"]["sequence"] = sequence

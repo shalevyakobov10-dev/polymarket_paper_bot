@@ -1,0 +1,37 @@
+name: Perps SDK contract
+
+on:
+  push:
+    paths:
+      - "requirements.txt"
+      - "perps_sdk_contract.py"
+      - "perps_sdk_reconciler.py"
+      - "tests/test_perps_sdk_contract.py"
+      - ".github/workflows/perps-sdk-contract.yml"
+  pull_request:
+    paths:
+      - "requirements.txt"
+      - "perps_sdk_contract.py"
+      - "perps_sdk_reconciler.py"
+      - "tests/test_perps_sdk_contract.py"
+      - ".github/workflows/perps-sdk-contract.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  contract:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+      - name: Install pinned runtime dependencies
+        run: python -m pip install -r requirements.txt
+      - name: Verify official Perps SDK contract (offline)
+        run: python perps_sdk_contract.py
+      - name: Run contract unit tests
+        run: python -m unittest tests.test_perps_sdk_contract -v

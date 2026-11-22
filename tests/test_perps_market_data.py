@@ -244,6 +244,42 @@ class PerpsMarketDataTests(unittest.TestCase):
         self.assertTrue(result[0]["instrument"]["close_only"])
         self.assertEqual(result[0]["instrument"]["symbol"], "BTC-PERP")
 
+    def test_provider_prioritizes_open_positions_beyond_discovery_limit(self):
+        instruments = []
+        tickers = []
+        books = {}
+        for instrument_id in range(1, 5):
+            instruments.append({
+                **instrument(instrument_id),
+                "symbol": f"COIN{instrument_id}-PERP",
+            })
+            tickers.append({
+                **ticker(instrument_id),
+                "symbol": f"COIN{instrument_id}-PERP",
+            })
+            books[instrument_id] = book(instrument_id)
+        provider = FakePerpsProvider(instruments, tickers, books, market_limit=2)
+
+        result = provider.load(now=NOW, priority_instrument_ids=[4])
+
+        self.assertEqual(
+            [row["instrument"]["instrument_id"] for row in result],
+            [4, 1, 2],
+        )
+        book_requests = [
+            params["instrument_id"]
+            for path, params in provider.calls
+            if path == "/v1/info/book"
+        ]
+        self.assertEqual(book_requests, [4, 1, 2])
+
+    def test_provider_rejects_invalid_or_excessive_priority_ids(self):
+        provider = FakePerpsProvider([instrument()], [ticker()], {7: book()})
+        with self.assertRaisesRegex(ValueError, "nonnegative integers"):
+            provider.load(now=NOW, priority_instrument_ids=[True])
+        with self.assertRaisesRegex(ValueError, "at most ten"):
+            provider.load(now=NOW, priority_instrument_ids=list(range(11)))
+
     def test_provider_limits_market_book_requests(self):
         instruments = []
         tickers = []

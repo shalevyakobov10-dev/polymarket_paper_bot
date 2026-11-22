@@ -1602,6 +1602,11 @@ class Handler(BaseHTTPRequestHandler):
                     engine_enabled = worker_snapshot.get("paper_engine_enabled") is True
                     engine_state = worker_snapshot.get("paper_engine_state", "unknown")
                 else:
+                    worker_snapshot = {
+                        "paper_engine_degraded_reason": None,
+                        "markets_in_last_snapshot": 0,
+                        "markets_with_fee_schedule": 0,
+                    }
                     engine_summary = None
                     engine_enabled = False
                     engine_state = "disabled"

@@ -22,13 +22,16 @@ SDK_CANCELLED = {
 }
 SDK_REJECTED = {
     "post_only_rejected", "fok_unfilled", "ioc_no_fill", "zero_quantity",
-    "duplicate_order", "reduce_only_invalid", "reduce_only_expired",
+    "reduce_only_invalid", "reduce_only_expired",
     "sweep_cap_exceeded", "resting_order_limit_exceeded", "below_min_notional",
     "instrument_disabled", "instrument_close_only", "instrument_settled",
-    "insufficient_margin_at_fill", "mark_price_unavailable", "order_not_found",
-    "order_already_terminal",
+    "insufficient_margin_at_fill", "mark_price_unavailable",
 }
+# The SDK paginator is instrument-filtered, not order-filtered. Bound every
+# scanned fill row as well as matching rows so old/high-volume accounts cannot
+# cause an unbounded reconciliation cycle.
 MAX_FILL_ROWS_PER_ORDER = 1000
+MAX_SCANNED_FILL_ROWS_PER_ORDER = 10_000
 
 
 def _decimal(value: Any, field: str) -> Decimal:
@@ -75,6 +78,7 @@ class PerpsSdkReconciler:
         journal: PerpsOrderJournal,
         session: Any,
         max_fill_rows: int = MAX_FILL_ROWS_PER_ORDER,
+        max_scanned_fill_rows: int = MAX_SCANNED_FILL_ROWS_PER_ORDER,
     ) -> None:
         if not callable(getattr(session, "fetch_orders", None)):
             raise ValueError("session must expose fetch_orders")
@@ -82,28 +86,46 @@ class PerpsSdkReconciler:
             raise ValueError("session must expose list_fills")
         if isinstance(max_fill_rows, bool) or not isinstance(max_fill_rows, int) or not 1 <= max_fill_rows <= 10_000:
             raise ValueError("max_fill_rows must be between 1 and 10000")
+        if (
+            isinstance(max_scanned_fill_rows, bool)
+            or not isinstance(max_scanned_fill_rows, int)
+            or not 1 <= max_scanned_fill_rows <= 100_000
+        ):
+            raise ValueError("max_scanned_fill_rows must be between 1 and 100000")
         self.journal = journal
         self.session = session
         self.max_fill_rows = max_fill_rows
+        self.max_scanned_fill_rows = max_scanned_fill_rows
 
     async def _average_fill_price(self, order: Any, order_id: int, expected_quantity: Decimal) -> Decimal:
         instrument_id = _field(order, "instrument_id")
         created_at = _field(order, "created_at")
+        updated_at = _field(order, "updated_at")
         if isinstance(instrument_id, bool) or not isinstance(instrument_id, int):
             raise ValueError("fill_history_instrument_invalid")
         if created_at is None:
             raise ValueError("fill_history_start_time_missing")
+        if updated_at is None:
+            raise ValueError("fill_history_end_time_missing")
         paginator = self.session.list_fills(
             instrument_id=instrument_id,
             start=created_at,
+            end=updated_at,
             sort="asc",
         )
         total_quantity = Decimal("0")
         total_value = Decimal("0")
         rows = 0
+        scanned_rows = 0
         async for fill in paginator:
+            scanned_rows += 1
+            if scanned_rows > self.max_scanned_fill_rows:
+                raise ValueError("fill_history_scan_limit_exceeded")
             if _field(fill, "order_id") != order_id:
                 continue
+            fill_instrument_id = _field(fill, "instrument_id")
+            if fill_instrument_id != instrument_id:
+                raise ValueError("fill_history_instrument_mismatch")
             rows += 1
             if rows > self.max_fill_rows:
                 raise ValueError("fill_history_row_limit_exceeded")

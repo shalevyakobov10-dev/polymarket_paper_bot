@@ -112,6 +112,9 @@ class PerpsAccountPreflight:
             "auto_cancel_seconds_remaining": None,
             "cross_margin_positions": 0,
             "over_leveraged_positions": 0,
+            "position_integrity_errors": 0,
+            "high_adl_risk_positions": 0,
+            "account_maintenance_margin_ratio": None,
             "unknown_remote_open_orders": 0,
             "missing_remote_open_orders": 0,
             "execution": "none",
@@ -190,14 +193,48 @@ class PerpsAccountPreflight:
             reasons.append("account_in_liquidation_or_state_unknown")
 
         margin = _field(portfolio, "margin")
-        available_margin = _field(margin, "available_order_margin")
-        try:
-            available = _finite_decimal(available_margin)
+        margin_fields = (
+            "total_account_value",
+            "available_order_margin",
+            "total_initial_margin",
+            "total_maintenance_margin",
+            "total_position_value",
+        )
+        parsed_margin: dict[str, Decimal] = {}
+        for name in margin_fields:
+            try:
+                parsed_margin[name] = _finite_decimal(_field(margin, name))
+                if parsed_margin[name] < 0:
+                    raise ValueError("negative")
+            except ValueError:
+                reasons.append("account_margin_summary_invalid")
+                break
+        if len(parsed_margin) == len(margin_fields):
+            account_value = parsed_margin["total_account_value"]
+            maintenance = parsed_margin["total_maintenance_margin"]
+            available = parsed_margin["available_order_margin"]
             observations["margin_available"] = str(available)
+            if account_value <= 0:
+                reasons.append("account_equity_nonpositive")
+            elif maintenance >= account_value:
+                reasons.append("account_maintenance_margin_exceeds_equity")
+            else:
+                observations["account_maintenance_margin_ratio"] = str(
+                    (maintenance / account_value).quantize(Decimal("0.0001"))
+                )
             if available <= 0:
                 reasons.append("no_available_order_margin")
+        else:
+            reasons.append("account_margin_summary_invalid")
+        try:
+            withdrawable = _finite_decimal(_field(portfolio, "withdrawable"))
+            if withdrawable < 0:
+                raise ValueError("negative withdrawable")
         except ValueError:
-            reasons.append("available_order_margin_invalid")
+            reasons.append("account_withdrawable_invalid")
+        fee_tier = _field(portfolio, "fee_tier")
+        if isinstance(fee_tier, bool) or not isinstance(fee_tier, int) or fee_tier < 0:
+            reasons.append("account_fee_tier_invalid")
 
         positions = _field(portfolio, "positions")
         if not isinstance(positions, (tuple, list)):
@@ -207,13 +244,50 @@ class PerpsAccountPreflight:
         if len(positions) > self.max_open_positions:
             reasons.append("max_open_positions_exceeded")
 
+        seen_position_instruments: set[int] = set()
         for position in positions:
+            instrument_id = _field(position, "instrument_id")
+            if (
+                isinstance(instrument_id, bool)
+                or not isinstance(instrument_id, int)
+                or instrument_id <= 0
+                or instrument_id in seen_position_instruments
+            ):
+                observations["position_integrity_errors"] += 1
+            elif isinstance(instrument_id, int):
+                seen_position_instruments.add(instrument_id)
+            symbol = _field(position, "symbol")
+            if not isinstance(symbol, str) or not symbol.strip():
+                observations["position_integrity_errors"] += 1
+            for field_name, allow_zero in (
+                ("size", False),
+                ("entry_price", False),
+                ("initial_margin", True),
+                ("maintenance_margin", True),
+                ("position_value", False),
+                ("liquidation_price", False),
+            ):
+                try:
+                    amount = _finite_decimal(_field(position, field_name))
+                    if (allow_zero and amount < 0) or (not allow_zero and amount == 0):
+                        raise ValueError("outside position bounds")
+                except ValueError:
+                    observations["position_integrity_errors"] += 1
+            adl_index = _field(position, "adl_index")
+            if isinstance(adl_index, bool) or not isinstance(adl_index, int) or adl_index not in {0, 1, 2, 3}:
+                observations["position_integrity_errors"] += 1
+            elif adl_index >= 2:
+                observations["high_adl_risk_positions"] += 1
             cross = _field(position, "cross")
             if cross is not False:
                 observations["cross_margin_positions"] += 1
             leverage = _field(position, "leverage")
             if isinstance(leverage, bool) or not isinstance(leverage, int) or leverage > self.max_leverage or leverage < 1:
                 observations["over_leveraged_positions"] += 1
+        if observations["position_integrity_errors"]:
+            reasons.append("account_position_data_invalid")
+        if observations["high_adl_risk_positions"]:
+            reasons.append("position_adl_risk_elevated")
         if observations["cross_margin_positions"]:
             reasons.append("cross_margin_position_detected")
         if observations["over_leveraged_positions"]:
@@ -274,7 +348,12 @@ class PerpsAccountPreflight:
                 venue_order_id = _field(order, "id")
                 if str(venue_order_id) != local["venue_order_id"]:
                     raise ValueError("venue_order_id")
-                if int(_field(order, "instrument_id")) != local["instrument_id"]:
+                remote_instrument_id = _field(order, "instrument_id")
+                if (
+                    isinstance(remote_instrument_id, bool)
+                    or not isinstance(remote_instrument_id, int)
+                    or remote_instrument_id != local["instrument_id"]
+                ):
                     raise ValueError("instrument")
                 side_value = _field(order, "side")
                 if not isinstance(side_value, str) or side_value.lower() != local["side"]:

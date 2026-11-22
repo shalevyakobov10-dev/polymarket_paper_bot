@@ -430,13 +430,17 @@ class SupervisorTests(unittest.TestCase):
 
     def test_perps_account_supervisor_secret_file_permissions_must_be_private(self):
         with tempfile.TemporaryDirectory() as directory:
-            secret_path = self._account_supervisor_secret_file(directory, mode=0o644)
-            with self.assertRaisesRegex(ValueError, "permissions are unsafe"):
-                build_supervisor_config({
-                    "ENABLE_PERPS_ACCOUNT_SUPERVISOR": "true",
-                    "ENABLE_PERPS_MARKET_DATA_WORKER": "true",
-                    "PERPS_ACCOUNT_SUPERVISOR_SECRETS_FILE": str(secret_path),
-                })
+            for mode in (0o640, 0o644, 0o660):
+                with self.subTest(mode=oct(mode)):
+                    secret_path = self._account_supervisor_secret_file(
+                        directory, mode=mode
+                    )
+                    with self.assertRaisesRegex(ValueError, "permissions are unsafe"):
+                        build_supervisor_config({
+                            "ENABLE_PERPS_ACCOUNT_SUPERVISOR": "true",
+                            "ENABLE_PERPS_MARKET_DATA_WORKER": "true",
+                            "PERPS_ACCOUNT_SUPERVISOR_SECRETS_FILE": str(secret_path),
+                        })
 
     def test_perps_account_supervisor_rejects_executable_secret_file(self):
         with tempfile.TemporaryDirectory() as directory:

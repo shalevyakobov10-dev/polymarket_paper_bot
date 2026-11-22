@@ -125,6 +125,8 @@ python backtest.py --markets 20 --days 30 --fidelity 5 --train-ratio 0.7 --sensi
 
 הגיבוי של Perps רץ מיד לאחר מחזור Paper תקין ראשון ולאחר מכן כל שש שעות. הוא מגבה יחד את perps_paper.sqlite3 ואת perps_market_history.sqlite3 (כולל Funding ונתוני העמלות), מאמת PRAGMA integrity_check ו־foreign_key_check, ומייצר SHA-256 ו־manifest. ברירת המחדל היא /app/data/perps_backups, ושומרים עד 30 גיבויים לכל מסד. בדיקת /health דורשת גיבוי זוגי תקין ורענן; כשלי גיבוי מדווחים ומפעילים retry עם backoff. תקלות נתוני Perps מקבלות retry עם backoff; לאחר עשרה מחזורים כושלים ברציפות התהליך יוצא כדי שה־Supervisor יפעיל אותו מחדש. הגיבויים נשמרים באותו Persistent Volume של Railway, ולכן הם אינם גיבוי Off-site ואינם מגנים מכשל או מחיקה של ה־Volume עצמו.
 
+לניתוח היסטורי ניתן להריץ `python perps_historical_replay.py --database /app/data/perps_market_history.sqlite3 --max-snapshots 10000` מתוך סביבת ה־Paper. ה־Replay משתמש באותן הגדרות `PERPS_PAPER_*` של ה־worker, יוצר תיק זמני ואינו משנה את תיק ההשקעות הפעיל. הוא מספק תוצאה מחקרית בלבד ומסמן תמיד `out_of_sample_validated=false` ו־`live_execution_eligible=false`.
+
 **אין כאן מסחר אמיתי ב־Perps.** לא קיימים עדיין אימות חשבון, חתימה, שליחת/ביטול פקודות Perps, מודל Cross-Margin מלא או בדיקת התאמה מלאה למנוע החיסול של הבורסה. אין לחבר מפתחות או להפעיל מסחר חי לפני הוכחת יתרון מחוץ למדגם, שחזור Funding מלא, סימולציית ביצוע ארוכה, סקירת אבטחה ובדיקת זכאות/רגולציה. ה־IaC עדיין מצביע על ענף `main`; עד למיזוג מורשה ופריסה מאומתת, השינויים בענף ה־PR אינם רצים בשירות Railway.
 
 

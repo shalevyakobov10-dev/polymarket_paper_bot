@@ -156,6 +156,7 @@ def read_perps_worker_status(path: str | Path) -> dict[str, Any]:
             "backup_error_type": str(raw.get("backup_error_type") or "")[:80] or None,
             "backup_consecutive_failures": _status_count(raw.get("backup_consecutive_failures", 0), "backup_consecutive_failures"),
             "backup_retry_delay_seconds": _status_count(raw.get("backup_retry_delay_seconds", 0), "backup_retry_delay_seconds"),
+            "backup_interval_hours": _status_count(raw.get("backup_interval_hours", 6), "backup_interval_hours", minimum=1),
             "research_only": True,
             "live_execution_enabled": False,
             "execution": "none",
@@ -296,6 +297,7 @@ def run_worker(
         "backup_error_type": None,
         "backup_consecutive_failures": 0,
         "backup_retry_delay_seconds": 0,
+        "backup_interval_hours": backup_interval,
         "research_only": True, "live_execution_enabled": False, "execution": "none",
     }
     cycles = 0

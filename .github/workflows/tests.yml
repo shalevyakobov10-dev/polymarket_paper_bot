@@ -31,7 +31,20 @@ jobs:
             -e ENABLE_EVENT_PAPER_WORKER=false \
             -e ENABLE_PERPS_MARKET_DATA_WORKER=false \
             -p 18080:8080 polymarket-paper-bot:ci
-          cleanup() { docker stop polymarket-paper-bot-smoke >/dev/null 2>&1 || true; }
+          cleanup() {
+            exit_code=$?
+            trap - EXIT
+            if [ "$exit_code" -ne 0 ]; then
+              echo "::group::Container logs after smoke-test failure"
+              docker logs polymarket-paper-bot-smoke 2>&1 || true
+              echo "::endgroup::"
+              echo "::group::Container exit state"
+              docker inspect polymarket-paper-bot-smoke --format '{{json .State}}' 2>&1 || true
+              echo "::endgroup::"
+            fi
+            docker stop polymarket-paper-bot-smoke >/dev/null 2>&1 || true
+            return "$exit_code"
+          }
           trap cleanup EXIT
           ready=0
           for _ in $(seq 1 20); do

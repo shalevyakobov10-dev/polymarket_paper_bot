@@ -86,6 +86,7 @@ class PerpsPaperEngine:
         daily_drawdown_pct: Any = "0.03",
         maximum_drawdown_pct: Any = "0.10",
         max_data_age_seconds: int = 15,
+        max_entry_impact_bps: Any = "50",
     ) -> None:
         self.initial_equity = _decimal(initial_equity, "initial_equity", positive=True)
         self.max_position_notional = _decimal(max_position_notional, "max_position_notional", positive=True)
@@ -97,6 +98,7 @@ class PerpsPaperEngine:
         self.taker_fee_rate = _decimal(taker_fee_rate, "taker_fee_rate")
         self.liquidation_fee_rate = _decimal(liquidation_fee_rate, "liquidation_fee_rate")
         self.max_spread_bps = _decimal(max_spread_bps, "max_spread_bps", positive=True)
+        self.max_entry_impact_bps = _decimal(max_entry_impact_bps, "max_entry_impact_bps", positive=True)
         self.momentum_threshold_bps = _decimal(momentum_threshold_bps, "momentum_threshold_bps", positive=True)
         self.daily_drawdown_pct = _decimal(daily_drawdown_pct, "daily_drawdown_pct", positive=True)
         self.maximum_drawdown_pct = _decimal(maximum_drawdown_pct, "maximum_drawdown_pct", positive=True)
@@ -492,7 +494,19 @@ class PerpsPaperEngine:
         entry_fee = Decimal(position["entry_fee"])
         funding_paid = Decimal(position["funding_paid"])
         net = gross - entry_fee - exit_fee - liquidation_fee - funding_paid
-        released = Decimal(position["margin_balance"]) + gross - exit_fee - liquidation_fee
+        margin_balance = Decimal(position["margin_balance"])
+        funding_paid = Decimal(position["funding_paid"])
+        initial_margin = margin_balance + funding_paid
+        released_before_isolated_cap = margin_balance + gross - exit_fee - liquidation_fee
+        isolated_margin_shortfall = max(ZERO, -released_before_isolated_cap)
+        if isolated_margin_shortfall > ZERO:
+            # Isolated losses cannot consume the account's free collateral or
+            # other positions. Cap the loss at this position's initial allocation.
+            released = ZERO
+            net = -initial_margin - entry_fee
+            self._halt("isolated_margin_exhausted")
+        else:
+            released = released_before_isolated_cap
         account = self._account()
         new_cash = Decimal(account["cash"]) + released
         self.db.execute(
@@ -524,6 +538,8 @@ class PerpsPaperEngine:
             "funding_paid": str(funding_paid),
             "liquidation_fee_rate": str(liquidation_fee_rate),
             "liquidation_fee": str(liquidation_fee),
+            "isolated_margin_shortfall": str(isolated_margin_shortfall),
+            "free_collateral_used": False,
             "net_pnl": str(net),
             "reason": reason,
         })
@@ -652,12 +668,29 @@ class PerpsPaperEngine:
             self._event(snapshot_key, instrument_id, "ENTRY_BLOCKED", now, {"reason": "insufficient_visible_depth"})
             return
         entry_price, entry_notional = fill
-        if entry_notional < min_notional or entry_notional > max_market_notional:
+        best_execution_price = _decimal(
+            levels[0].get("price") if isinstance(levels[0], dict) else None,
+            "best executable entry price", positive=True,
+        )
+        entry_impact_bps = abs(entry_price - best_execution_price) / best_execution_price * BPS
+        if entry_impact_bps > self.max_entry_impact_bps:
             self._event(snapshot_key, instrument_id, "ENTRY_BLOCKED", now, {
-                "reason": "instrument_notional_constraint",
+                "reason": "entry_impact_too_high",
+                "entry_impact_bps": str(entry_impact_bps),
+                "maximum_entry_impact_bps": str(self.max_entry_impact_bps),
+            })
+            return
+        if (
+            entry_notional < min_notional
+            or entry_notional > max_market_notional
+            or entry_notional > self.max_position_notional
+        ):
+            self._event(snapshot_key, instrument_id, "ENTRY_BLOCKED", now, {
+                "reason": "instrument_or_position_notional_constraint",
                 "notional": str(entry_notional),
                 "min_notional": str(min_notional),
                 "max_market_notional": str(max_market_notional),
+                "max_position_notional": str(self.max_position_notional),
             })
             return
         tier_max = self._tier_leverage(instrument, entry_notional)
@@ -708,6 +741,7 @@ class PerpsPaperEngine:
             "leverage": str(leverage),
             "isolated_margin": str(margin),
             "entry_fee": str(entry_fee),
+            "entry_impact_bps": str(entry_impact_bps),
             "taker_fee_rate": str(taker_fee_rate),
             "liquidation_fee_rate": str(liquidation_fee_rate),
             "maintenance_margin_rate": str(Decimal("0.5") / max_instrument_leverage),
@@ -754,15 +788,21 @@ class PerpsPaperEngine:
                     raise ValueError("now must be timezone-aware")
                 captured_now = captured_now.astimezone(timezone.utc)
             else:
-                captured_now = received
+                captured_now = datetime.now(timezone.utc)
             capture_ms = int(captured_now.timestamp() * 1000)
+            received_ms = int(received.timestamp() * 1000)
             book_age_ms = capture_ms - book_ms
             ticker_age_ms = capture_ms - ticker_ms
+            received_age_ms = capture_ms - received_ms
             maximum_age_ms = self.max_data_age_seconds * 1000
-            if book_age_ms < -2_000 or ticker_age_ms < -2_000:
-                raise ValueError("snapshot exchange timestamp is future-dated")
-            if book_age_ms > maximum_age_ms or ticker_age_ms > maximum_age_ms:
-                raise ValueError("snapshot exchange timestamp is stale relative to capture")
+            if book_age_ms < -2_000 or ticker_age_ms < -2_000 or received_age_ms < -2_000:
+                raise ValueError("snapshot exchange or receipt timestamp is future-dated")
+            if (
+                book_age_ms > maximum_age_ms
+                or ticker_age_ms > maximum_age_ms
+                or received_age_ms > maximum_age_ms
+            ):
+                raise ValueError("snapshot exchange or receipt timestamp is stale relative to current time")
         except (KeyError, ValueError, TypeError, OverflowError) as exc:
             raise ValueError(f"invalid or stale Perps snapshot: {str(exc)[:160]}") from None
         snapshot_key = f"{instrument_id}:{book_ms}:{int(book.get('sequence', 0))}"
@@ -901,6 +941,12 @@ class PerpsPaperEngine:
                 "max_leverage": str(self.max_leverage),
                 "max_position_notional": str(self.max_position_notional),
                 "max_total_notional": str(self.max_total_notional),
+                "max_entry_impact_bps": str(self.max_entry_impact_bps),
+                "margin_mode": "isolated",
+                "cross_margin_supported": False,
+                "maintenance_margin_rule": "0.5 / instrument_max_leverage",
+                "liquidation_is_venue_exact": False,
+                "liquidation_model_limitations": "no insurance-fund backstop or auto-deleveraging simulation",
                 "fee_rate_source": "public_perps_fee_schedule_highest_published_category_rate",
                 "liquidation_fee_source": "instrument_liquidation_fee_rate",
                 "event_counts": {row["event_type"]: int(row["count"]) for row in events},

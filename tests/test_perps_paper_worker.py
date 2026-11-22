@@ -3,6 +3,7 @@ import json
 from pathlib import Path
 import tempfile
 import unittest
+from unittest.mock import patch
 
 from perps_paper_worker import read_perps_worker_status, run_worker
 
@@ -64,11 +65,38 @@ class FakeEngine:
         self.processed.append(snapshot["symbol"])
         return {"status": "PAPER_MARK_RECORDED", "open_position": False}
 
+    def recent_snapshots(self, instrument_id, *, limit=12000):
+        return [{"instrument_id": instrument_id, "symbol": "BTC-PERP"}]
+
+    def claim_strategy_bar(self, instrument_id, bar_close_ms, *, now=None):
+        self.claimed = (instrument_id, bar_close_ms)
+        return True
+
+    def open_position(self, snapshot, **kwargs):
+        self.opened = kwargs
+        return {"status": "PAPER_POSITION_OPEN", "trade_id": "paper-trade-1"}
+
+    def record_strategy_decision(self, instrument_id, bar_close_ms, **kwargs):
+        self.recorded = (instrument_id, bar_close_ms, kwargs)
+
     def account_metrics(self):
         return {
             "open_positions": 0,
             "cash_balance": "100",
             "equity": "100",
+        }
+
+
+class FakeSignalStrategy:
+    def evaluate(self, history, *, current_snapshot, now):
+        return {
+            "signal": True,
+            "side": "LONG",
+            "reason": "bullish_ema_crossover_confirmed",
+            "bar_close_ms": int(now.timestamp() * 1000) // 60_000 * 60_000,
+            "entry_notional_usd": "5",
+            "stop_loss_distance_pct": "0.005",
+            "reward_risk_multiple": "2",
         }
 
 
@@ -97,6 +125,31 @@ class PerpsPaperWorkerTests(unittest.TestCase):
             self.assertEqual(status["execution"], "none")
             raw = json.loads(path.read_text())
             self.assertEqual(raw["strategy_status"], "disabled")
+
+    def test_opt_in_autonomous_strategy_routes_signal_through_paper_engine_only(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "perps-worker.json"
+            provider = FakeProvider([[sample_snapshot()]])
+            engine = FakeEngine()
+            with patch.dict("os.environ", {"PERPS_AUTO_ENTRY_ENABLED": "true"}):
+                with patch("perps_paper_worker.strategy_from_env", return_value=FakeSignalStrategy()):
+                    result = run_worker(
+                        provider_factory=lambda: provider,
+                        engine_factory=lambda: engine,
+                        stop_event=StopAfterWaits(1),
+                        status_path=path,
+                        poll_seconds=1,
+                        backup_function=None,
+                    )
+            self.assertEqual(result, 0)
+            self.assertEqual(engine.opened["side"], "LONG")
+            self.assertEqual(engine.opened["requested_notional"], "5")
+            self.assertEqual(engine.opened["stop_loss_distance_pct"], "0.005")
+            self.assertEqual(engine.recorded[2]["decision_status"], "entry_opened")
+            status = read_perps_worker_status(path)
+            self.assertEqual(status["strategy_status"], "active")
+            self.assertEqual(status["signals_last_cycle"], 1)
+            self.assertEqual(status["entries_opened_last_cycle"], 1)
 
     def test_retries_a_transient_provider_error_then_recovers(self):
         with tempfile.TemporaryDirectory() as directory:

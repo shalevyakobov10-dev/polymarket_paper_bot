@@ -57,13 +57,14 @@ class FakeProvider:
 
 
 class FakeEngine:
-    def __init__(self):
+    def __init__(self, outcome=None):
         self.database_path = Path("unused.sqlite3")
         self.processed = []
+        self.outcome = outcome or {"status": "PAPER_MARK_RECORDED", "open_position": False}
 
     def process_snapshot(self, snapshot):
         self.processed.append(snapshot["symbol"])
-        return {"status": "PAPER_MARK_RECORDED", "open_position": False}
+        return dict(self.outcome)
 
     def recent_snapshots(self, instrument_id, *, limit=12000):
         return [{"instrument_id": instrument_id, "symbol": "BTC-PERP"}]
@@ -150,6 +151,26 @@ class PerpsPaperWorkerTests(unittest.TestCase):
             self.assertEqual(status["strategy_status"], "active")
             self.assertEqual(status["signals_last_cycle"], 1)
             self.assertEqual(status["entries_opened_last_cycle"], 1)
+
+    def test_blocked_protective_exit_marks_worker_degraded(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "perps-worker.json"
+            provider = FakeProvider([[sample_snapshot()]])
+            engine = FakeEngine({"status": "PAPER_EXIT_BLOCKED", "reason": "insufficient_visible_depth"})
+            result = run_worker(
+                provider_factory=lambda: provider,
+                engine_factory=lambda: engine,
+                stop_event=StopAfterWaits(1),
+                status_path=path,
+                poll_seconds=1,
+                backup_function=None,
+            )
+            self.assertEqual(result, 0)
+            raw = json.loads(path.read_text())
+            self.assertEqual(raw["last_cycle_warning"], "protective_exit_blocked")
+            self.assertEqual(raw["exit_blocks_last_cycle"], 1)
+            self.assertEqual(raw["last_exit_block_reason"], "insufficient_visible_depth")
+            self.assertEqual(read_perps_worker_status(path)["last_exit_block_reason"], "insufficient_visible_depth")
 
     def test_retries_a_transient_provider_error_then_recovers(self):
         with tempfile.TemporaryDirectory() as directory:

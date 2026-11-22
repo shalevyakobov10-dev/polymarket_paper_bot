@@ -110,7 +110,7 @@ class PerpsAccountPreflight:
             reasons.append("local_order_journal_exceeds_reconciliation_bound")
         else:
             for intent in intents:
-                if intent["status"] in RECONCILABLE_STATUSES:
+                if intent["status"] in RECONCILABLE_STATUSES or intent["status"] == "submission_pending":
                     try:
                         await self.reconciler.reconcile(intent["client_order_id"])
                     except Exception:

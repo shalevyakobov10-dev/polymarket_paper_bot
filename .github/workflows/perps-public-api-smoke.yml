@@ -53,3 +53,36 @@ jobs:
           assert status["execution"] == "none", status
           print(f"Public Perps market-data smoke passed: {status['markets_in_last_snapshot']} instruments.")
           PY
+      - name: Verify public Perps funding history window (epoch milliseconds)
+        run: |
+          python - <<'PY'
+          from datetime import datetime, timedelta, timezone
+
+          from perps_market_data import PerpsPublicMarketDataProvider
+
+          provider = PerpsPublicMarketDataProvider(
+              market_limit=1,
+              max_age_seconds=10,
+              depth=10,
+          )
+          snapshots = provider.load()
+          assert snapshots, "No fresh public Perps snapshot available for funding smoke test"
+          instrument = snapshots[0]["instrument"]
+          end = datetime.now(timezone.utc)
+          start = end - timedelta(hours=6)
+          start_ms = int(start.timestamp() * 1000)
+          end_ms = int(end.timestamp() * 1000)
+          settlements = provider.load_funding_history(
+              instrument["instrument_id"],
+              start_timestamp_ms=start_ms,
+              end_timestamp_ms=end_ms,
+          )
+          timestamps = [row["timestamp_ms"] for row in settlements]
+          assert timestamps == sorted(timestamps), settlements
+          assert all(start_ms - 1000 <= stamp <= end_ms + 1000 for stamp in timestamps), settlements
+          assert settlements, "Public Perps funding-history endpoint returned no recent settlements"
+          print(
+              f"Public Perps funding-history smoke passed: "
+              f"{instrument['symbol']} returned {len(settlements)} settlement rows."
+          )
+          PY

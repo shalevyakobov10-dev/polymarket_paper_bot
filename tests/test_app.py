@@ -318,6 +318,76 @@ class ParserTests(unittest.TestCase):
         self.assertFalse(healthy)
         self.assertEqual(payload["components"]["event_paper_worker"]["status"], "stale")
 
+    def test_health_requires_read_only_perps_account_supervisor_when_enabled(self):
+        now = datetime(2026, 11, 22, 18, 0, tzinfo=timezone.utc)
+        core = {
+            "worker_running": True,
+            "last_success_at": (now - timedelta(seconds=30)).isoformat(),
+            "last_error": None,
+        }
+        account = {
+            "enabled": True,
+            "worker_state": "healthy",
+            "process_supervisor_state": "running",
+            "heartbeat_fresh": True,
+            "heartbeat_age_seconds": 2.0,
+            "read_only_preflight_passed": True,
+            "blocked_reasons": [],
+            "recovered_interrupted_submissions": 0,
+            "observations": {
+                "unresolved_order_count": 0,
+                "unknown_remote_open_orders": 0,
+                "missing_remote_open_orders": 0,
+            },
+            "process_restart_count": 0,
+        }
+        healthy, payload = app.health_payload(
+            core, now, perps_account_supervisor_snapshot=account
+        )
+        self.assertTrue(healthy)
+        self.assertIn("perps_account_supervisor", payload["required_components"])
+        self.assertEqual(
+            payload["components"]["perps_account_supervisor"]["status"],
+            "healthy",
+        )
+
+        blocked = {
+            **account,
+            "worker_state": "degraded",
+            "read_only_preflight_passed": False,
+            "blocked_reasons": ["unmanaged_or_mismatched_remote_open_orders"],
+            "observations": {
+                "unresolved_order_count": 0,
+                "unknown_remote_open_orders": 1,
+                "missing_remote_open_orders": 0,
+            },
+        }
+        healthy, payload = app.health_payload(
+            core, now, perps_account_supervisor_snapshot=blocked
+        )
+        self.assertFalse(healthy)
+        self.assertIn(
+            "perps_account_supervisor",
+            payload["required_component_failures"],
+        )
+        self.assertEqual(
+            payload["components"]["perps_account_supervisor"]["unknown_remote_open_orders"],
+            1,
+        )
+
+        restarting = {
+            **account,
+            "process_supervisor_state": "restarting",
+        }
+        healthy, payload = app.health_payload(
+            core, now, perps_account_supervisor_snapshot=restarting
+        )
+        self.assertFalse(healthy)
+        self.assertEqual(
+            payload["components"]["perps_account_supervisor"]["status"],
+            "restarting",
+        )
+
     def test_health_reports_model_learning_worker_freshness(self):
         now = datetime(2026, 11, 3, 12, tzinfo=timezone.utc)
         core = {

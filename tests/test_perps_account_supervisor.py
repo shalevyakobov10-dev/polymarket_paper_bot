@@ -272,7 +272,7 @@ class PerpsAccountSupervisorTests(unittest.IsolatedAsyncioTestCase):
             max_consecutive_failures=2,
             sleep=fake_sleep,
         )
-        result = await supervisor.run(stop_event=ContinueStopEvent())
+        result = await supervisor.run()
 
         self.assertEqual(result, 1)
         self.assertEqual(self.journal.calls, 1)

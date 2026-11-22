@@ -10,7 +10,7 @@ import threading
 import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 from perps_market_data import PerpsPublicMarketDataProvider
 from perps_market_history_store import PerpsMarketHistoryStore
@@ -65,7 +65,11 @@ def read_perps_worker_status(path: str | Path) -> dict[str, Any]:
     target = Path(path).expanduser()
     try:
         raw = json.loads(target.read_text(encoding="utf-8"))
-        if not isinstance(raw, dict) or raw.get("schema_version") != 1:
+        if (
+            not isinstance(raw, dict)
+            or isinstance(raw.get("schema_version"), bool)
+            or raw.get("schema_version") != 1
+        ):
             raise ValueError("invalid Perps worker status schema")
         status = {
             "schema_version": 1,
@@ -105,6 +109,7 @@ def read_perps_worker_status(path: str | Path) -> dict[str, Any]:
             "last_error": "status_file_invalid", "consecutive_failures": 0,
             "markets_in_last_snapshot": 0, "snapshots_inserted_total": 0,
             "history_rows": 0, "poll_interval_seconds": None,
+            "history_retention_days": None, "expired_rows_pruned_total": 0,
             "research_only": True, "live_execution_enabled": False, "execution": "none",
         }
 
@@ -117,7 +122,6 @@ def run_worker(
     status_path: str | Path | None = None,
     poll_interval_seconds: int | None = None,
     history_retention_days: int | None = None,
-    sleeper: Callable[[float], None] = time.sleep,
     max_cycles: int | None = None,
 ) -> int:
     """Poll read-only Perps market data, archive it, and retry with bounded backoff."""
@@ -184,7 +188,7 @@ def run_worker(
                 state["consecutive_failures"] = 0
                 state["markets_in_last_snapshot"] = len(snapshots)
                 state["snapshots_inserted_total"] += int(recorded["inserted"])
-                state["history_rows"] = int(recorded["total_snapshots"])
+                state["history_rows"] = int(current_store.count())
                 state["last_heartbeat_at"] = _utc_now()
                 _write_status(status_file, state)
                 cycles += 1

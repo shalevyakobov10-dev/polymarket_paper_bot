@@ -19,8 +19,10 @@ class FakeResponse:
     def __exit__(self, *args):
         return False
 
-    def read(self):
-        return json.dumps(self.payload).encode("utf-8")
+    def read(self, limit=None):
+        self.last_read_limit = limit
+        raw = json.dumps(self.payload).encode("utf-8")
+        return raw if limit is None else raw[:limit]
 
 
 def market():
@@ -165,6 +167,175 @@ class LiveMarketSnapshotProviderTests(unittest.TestCase):
                 rows = live.LiveClobMarketSnapshotProvider(market_limit=5).load(now=now)
         self.assertEqual(len(rows), 1)
         fetch.assert_called_once_with([{"token_id": "yes-token"}, {"token_id": "no-token"}])
+
+
+    def test_exchange_timestamps_must_be_present_for_both_books_or_neither(self):
+        now = datetime(2026, 11, 7, 10, 0, tzinfo=timezone.utc)
+        stamp = now.isoformat()
+        books = {
+            "yes-token": book("yes-token", 0.50, 0.52, stamp, stamp),
+            "no-token": book("no-token", 0.48, 0.50, stamp, None),
+        }
+        with patch.object(live, "urlopen", return_value=FakeResponse([market()])):
+            with patch.object(live, "fetch_order_books", return_value=books):
+                rows = live.LiveClobMarketSnapshotProvider(market_limit=1).load(now=now)
+        self.assertEqual(rows, [])
+
+    def test_rejects_timezone_naive_local_receipt_timestamps(self):
+        now = datetime(2026, 11, 7, 10, 0, tzinfo=timezone.utc)
+        books = {
+            "yes-token": book("yes-token", 0.50, 0.52, "2026-11-07T10:00:00"),
+            "no-token": book("no-token", 0.48, 0.50, now.isoformat()),
+        }
+        with patch.object(live, "urlopen", return_value=FakeResponse([market()])):
+            with patch.object(live, "fetch_order_books", return_value=books):
+                rows = live.LiveClobMarketSnapshotProvider(market_limit=1).load(now=now)
+        self.assertEqual(rows, [])
+
+    def test_rejects_locked_crossed_and_out_of_range_quotes(self):
+        now = datetime(2026, 11, 7, 10, 0, tzinfo=timezone.utc)
+        stamp = now.isoformat()
+        invalid_quotes = (
+            (0.52, 0.52, 0.48, 0.50),
+            (0.53, 0.52, 0.48, 0.50),
+            (0.50, 0.52, 0.48, 1.0),
+            (0.50, 0.52, -0.01, 0.50),
+        )
+        for quotes in invalid_quotes:
+            with self.subTest(quotes=quotes):
+                yes_bid, yes_ask, no_bid, no_ask = quotes
+                books = {
+                    "yes-token": book("yes-token", yes_bid, yes_ask, stamp),
+                    "no-token": book("no-token", no_bid, no_ask, stamp),
+                }
+                with patch.object(live, "urlopen", return_value=FakeResponse([market()])):
+                    with patch.object(live, "fetch_order_books", return_value=books):
+                        rows = live.LiveClobMarketSnapshotProvider(market_limit=1).load(now=now)
+                self.assertEqual(rows, [])
+
+    def test_rejects_timezone_naive_now_argument(self):
+        with patch.object(live, "urlopen", return_value=FakeResponse([market()])):
+            with self.assertRaisesRegex(ValueError, "timezone-aware"):
+                live.LiveClobMarketSnapshotProvider(market_limit=1).load(
+                    now=datetime(2026, 11, 7, 10, 0)
+                )
+
+    def test_sorts_binary_markets_by_volume_before_applying_market_limit(self):
+        now = datetime(2026, 11, 7, 10, 0, tzinfo=timezone.utc)
+        stamp = now.isoformat()
+        low = market()
+        low.update({
+            "conditionId": "low-volume",
+            "clobTokenIds": '["low-yes", "low-no"]',
+            "volume24hr": "10",
+        })
+        high = market()
+        high.update({
+            "conditionId": "high-volume",
+            "clobTokenIds": '["high-yes", "high-no"]',
+            "volume24hr": "9000",
+        })
+        books = {
+            "high-yes": book("high-yes", 0.50, 0.52, stamp),
+            "high-no": book("high-no", 0.48, 0.50, stamp),
+        }
+        provider = live.LiveClobMarketSnapshotProvider(market_limit=1)
+        with patch.object(provider, "_discover_markets", return_value=[low, high]):
+            with patch.object(live, "fetch_order_books", return_value=books) as fetch:
+                rows = provider.load(now=now)
+        self.assertEqual([row["market_id"] for row in rows], ["high-volume"])
+        fetch.assert_called_once_with([
+            {"token_id": "high-yes"}, {"token_id": "high-no"}
+        ])
+        self.assertEqual(provider.last_diagnostics["markets_selected"], 1)
+
+    def test_gamma_discovery_uses_bounded_pagination_and_response_reads(self):
+        first_page = [
+            {
+                "conditionId": f"market-{index}",
+                "question": f"Question {index}",
+                "outcomes": ["Yes", "No"],
+                "clobTokenIds": [f"yes-{index}", f"no-{index}"],
+            }
+            for index in range(20)
+        ]
+        second_page = [{"conditionId": "last", "question": "Last market"}]
+        first = FakeResponse(first_page)
+        second = FakeResponse(second_page)
+        with patch.object(live, "urlopen", side_effect=[first, second]) as request:
+            results = live.fetch_active_gamma_markets(page_size=20, max_pages=5)
+        self.assertEqual(len(results), 21)
+        self.assertEqual(request.call_count, 2)
+        self.assertEqual(first.last_read_limit, live.MAX_GAMMA_RESPONSE_BYTES + 1)
+        self.assertEqual(second.last_read_limit, live.MAX_GAMMA_RESPONSE_BYTES + 1)
+        first_url = request.call_args_list[0].args[0].full_url
+        second_url = request.call_args_list[1].args[0].full_url
+        self.assertIn("offset=0", first_url)
+        self.assertIn("offset=20", second_url)
+
+    def test_gamma_discovery_rejects_oversized_and_non_list_responses(self):
+        class OversizedResponse:
+            status = 200
+            def __enter__(self):
+                return self
+            def __exit__(self, *_):
+                return False
+            def read(self, limit):
+                return b"x" * limit
+
+        with patch.object(live, "urlopen", return_value=OversizedResponse()):
+            with self.assertRaisesRegex(ValueError, "3 MB"):
+                live.fetch_active_gamma_markets(page_size=20, max_pages=1)
+
+        with patch.object(live, "urlopen", return_value=FakeResponse({"markets": []})):
+            with self.assertRaisesRegex(ValueError, "must be a list"):
+                live.fetch_active_gamma_markets(page_size=20, max_pages=1)
+
+    def test_binary_market_parser_rejects_extra_outcomes_and_disabled_orderbooks(self):
+        invalid_markets = []
+        extra = market()
+        extra["outcomes"] = '["Yes", "No", "Draw"]'
+        extra["clobTokenIds"] = '["yes-token", "no-token", "draw-token"]'
+        invalid_markets.append(extra)
+        disabled = market()
+        disabled["enableOrderBook"] = False
+        invalid_markets.append(disabled)
+        not_accepting = market()
+        not_accepting["acceptingOrders"] = False
+        invalid_markets.append(not_accepting)
+
+        provider = live.LiveClobMarketSnapshotProvider(market_limit=5)
+        with patch.object(provider, "_discover_markets", return_value=invalid_markets):
+            with patch.object(live, "fetch_order_books") as fetch:
+                rows = provider.load(now=datetime(2026, 11, 7, 10, 0, tzinfo=timezone.utc))
+        self.assertEqual(rows, [])
+        fetch.assert_not_called()
+
+    def test_snapshot_keeps_legacy_source_contract_and_adds_diagnostics(self):
+        now = datetime(2026, 11, 7, 10, 0, tzinfo=timezone.utc)
+        stamp = now.isoformat()
+        books = {
+            "yes-token": book("yes-token", 0.50, 0.52, stamp),
+            "no-token": book("no-token", 0.48, 0.50, stamp),
+        }
+        provider = live.LiveClobMarketSnapshotProvider(market_limit=1)
+        with patch.object(provider, "_discover_markets", return_value=[market()]):
+            with patch.object(live, "fetch_order_books", return_value=books):
+                rows = provider.load(now=now)
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["market_source"], "public_gamma_api")
+        self.assertEqual(rows[0]["book_source"], "official_polymarket_python_sdk")
+        self.assertEqual(rows[0]["source"], "gamma_plus_public_clob_orderbook")
+        self.assertEqual(rows[0]["market_data_mode"], "read_only_live_public")
+        self.assertEqual(provider.last_diagnostics["snapshots_returned"], 1)
+        self.assertEqual(provider.last_diagnostics["orderbooks_usable"], 2)
+        self.assertTrue(rows[0]["research_only"])
+        self.assertEqual(rows[0]["execution"], "none")
+
+    def test_gamma_environment_bounds_are_validated_not_silently_clamped(self):
+        with patch.dict("os.environ", {"PAPER_GAMMA_PAGE_SIZE": "201"}):
+            with self.assertRaisesRegex(ValueError, "PAPER_GAMMA_PAGE_SIZE"):
+                live.LiveClobMarketSnapshotProvider()
 
 
 if __name__ == "__main__":

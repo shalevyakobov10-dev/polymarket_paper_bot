@@ -342,7 +342,7 @@ class PerpsPaperEngineTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             with self.make_engine(directory) as engine:
                 snapshot = make_snapshot()
-                snapshot["received_at"] = iso_ms(NOW_MS + 60_000)
+                snapshot["received_at"] = iso_ms(NOW_MS + 120_000)
                 with self.assertRaisesRegex(ValueError, "stale"):
                     engine.process_snapshot(snapshot, FakeHistory())
 

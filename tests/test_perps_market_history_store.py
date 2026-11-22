@@ -109,6 +109,23 @@ class PerpsMarketHistoryStoreTests(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     store.record_snapshots([invalid])
 
+    def test_prunes_only_observations_older_than_retention_cutoff(self):
+        with tempfile.TemporaryDirectory() as directory:
+            with PerpsMarketHistoryStore(Path(directory) / "perps.sqlite3") as store:
+                old = sample_snapshot(11, "2026-10-01T00:00:00+00:00")
+                new = sample_snapshot(12, "2026-11-22T08:00:00+00:00")
+                store.record_snapshots([old, new])
+                result = store.prune_before("2026-11-01T00:00:00+00:00")
+                self.assertEqual(result, {"deleted": 1, "remaining": 1})
+                self.assertEqual(store.count(), 1)
+                self.assertEqual(store.latest()[0]["symbol"], "ASSET12-PERP")
+
+    def test_retention_cutoff_must_be_timezone_aware(self):
+        with tempfile.TemporaryDirectory() as directory:
+            with PerpsMarketHistoryStore(Path(directory) / "perps.sqlite3") as store:
+                with self.assertRaisesRegex(ValueError, "timezone-aware"):
+                    store.prune_before("2026-11-01T00:00:00")
+
 
 if __name__ == "__main__":
     unittest.main()

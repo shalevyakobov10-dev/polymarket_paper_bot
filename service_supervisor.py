@@ -189,6 +189,9 @@ def build_supervisor_config(
     perps_worker_env["PERPS_MARKET_HISTORY_DB"] = str(
         source.get("PERPS_MARKET_HISTORY_DB", str(data_dir / "perps_market_history.sqlite3"))
     )
+    perps_worker_env["PERPS_ORDER_JOURNAL_DB"] = str(
+        source.get("PERPS_ORDER_JOURNAL_DB", str(data_dir / "perps_order_journal.sqlite3"))
+    )
     perps_worker_status_path = Path(source.get(
         "PERPS_MARKET_WORKER_STATUS_FILE",
         str(data_dir / "perps_market_worker_status.json"),

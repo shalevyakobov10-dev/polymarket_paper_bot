@@ -215,6 +215,13 @@ def read_perps_worker_status(path: str | Path) -> dict[str, Any]:
             "last_backup_at": raw.get("last_backup_at"),
             "last_backup_manifest_name": str(raw.get("last_backup_manifest_name") or "")[:200] or None,
             "backup_files_last_run": _status_count(raw.get("backup_files_last_run", 0), "backup_files_last_run"),
+            "backup_files_expected_last_run": _status_count(
+                raw.get("backup_files_expected_last_run", 2),
+                "backup_files_expected_last_run",
+                minimum=2,
+            ),
+            "perps_order_journal_present": raw.get("perps_order_journal_present") is True,
+            "perps_order_journal_backed_up": raw.get("perps_order_journal_backed_up") is True,
             "backup_error_type": str(raw.get("backup_error_type") or "")[:80] or None,
             "backup_consecutive_failures": _status_count(raw.get("backup_consecutive_failures", 0), "backup_consecutive_failures"),
             "backup_retry_delay_seconds": _status_count(raw.get("backup_retry_delay_seconds", 0), "backup_retry_delay_seconds"),
@@ -315,6 +322,10 @@ def run_worker(
         "PERPS_PAPER_DB",
         str(Path(os.getenv("DATA_DIR", "data")) / "perps_paper.sqlite3"),
     )).expanduser()
+    perps_order_journal_database = Path(os.getenv(
+        "PERPS_ORDER_JOURNAL_DB",
+        str(Path(os.getenv("DATA_DIR", "data")) / "perps_order_journal.sqlite3"),
+    )).expanduser()
     backup_interval = (
         _positive_int_env("PERPS_BACKUP_INTERVAL_HOURS", 6, 1, 168)
         if backup_interval_hours is None else backup_interval_hours
@@ -374,6 +385,9 @@ def run_worker(
         "last_backup_at": None,
         "last_backup_manifest_name": None,
         "backup_files_last_run": 0,
+        "backup_files_expected_last_run": 2,
+        "perps_order_journal_present": perps_order_journal_database.is_file(),
+        "perps_order_journal_backed_up": False,
         "backup_error_type": None,
         "backup_consecutive_failures": 0,
         "backup_retry_delay_seconds": 0,
@@ -528,15 +542,33 @@ def run_worker(
                     if backup_due and retry_ready:
                         last_backup_attempt_at = backup_now
                         try:
+                            backup_paths = [paper_database, database]
+                            journal_present = perps_order_journal_database.is_file()
+                            if journal_present:
+                                backup_paths.append(perps_order_journal_database)
+                            expected_source_names = {path.name for path in backup_paths}
+                            state["perps_order_journal_present"] = journal_present
+                            state["perps_order_journal_backed_up"] = False
+                            state["backup_files_expected_last_run"] = len(backup_paths)
                             backup_result = backup_function(
-                                [paper_database, database],
+                                backup_paths,
                                 chosen_backup_directory,
                                 retain=retain_backups,
                             )
                             files = backup_result.get("files") or []
                             manifest_name = str(backup_result.get("manifest_name") or "").strip()
-                            if backup_result.get("skipped_missing_sources") or len(files) != 2 or not manifest_name:
-                                raise RuntimeError("both Perps databases and their verified manifest must be backed up")
+                            backed_up_source_names = {
+                                item.get("source_name")
+                                for item in files
+                                if isinstance(item, dict) and isinstance(item.get("source_name"), str)
+                            }
+                            if (
+                                backup_result.get("skipped_missing_sources")
+                                or len(files) != len(backup_paths)
+                                or backed_up_source_names != expected_source_names
+                                or not manifest_name
+                            ):
+                                raise RuntimeError("all expected Perps databases and their verified manifest must be backed up")
                             manifest_time = datetime.fromisoformat(
                                 str(backup_result.get("created_at") or "").replace("Z", "+00:00")
                             )
@@ -545,7 +577,13 @@ def run_worker(
                             state.update({
                                 "last_backup_at": manifest_time.astimezone(timezone.utc).isoformat(),
                                 "last_backup_manifest_name": manifest_name[:200],
-                                "backup_files_last_run": 2,
+                                "backup_files_last_run": len(files),
+                                "backup_files_expected_last_run": len(backup_paths),
+                                "perps_order_journal_present": journal_present,
+                                "perps_order_journal_backed_up": (
+                                    not journal_present
+                                    or perps_order_journal_database.name in backed_up_source_names
+                                ),
                                 "backup_error_type": None,
                                 "backup_consecutive_failures": 0,
                                 "backup_retry_delay_seconds": 0,

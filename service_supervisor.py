@@ -7,6 +7,7 @@ the main service process whose failure exits the container.
 """
 from __future__ import annotations
 
+import json
 import logging
 import math
 import os
@@ -44,6 +45,8 @@ class SupervisorConfig:
     poll_interval_seconds: float = 1.0
     monitor_restart_base_seconds: float = 2.0
     monitor_restart_max_seconds: float = 60.0
+    perps_worker_status_path: Path | None = None
+    perps_worker_heartbeat_timeout_seconds: float = 180.0
 
 
 def _positive_finite(value: Any, name: str) -> float:
@@ -55,6 +58,54 @@ def _positive_finite(value: Any, name: str) -> float:
         raise ValueError(f"{name} must be a positive finite number") from None
     if not math.isfinite(parsed) or parsed <= 0:
         raise ValueError(f"{name} must be a positive finite number")
+    return parsed
+
+
+def _perps_worker_heartbeat_age(
+    status_path: Path,
+    *,
+    worker_started_at: datetime,
+    now: datetime | None = None,
+) -> float:
+    """Return heartbeat age, using process uptime until this instance publishes."""
+    current = now or datetime.now(timezone.utc)
+    if current.tzinfo is None or current.utcoffset() is None:
+        raise ValueError("now must be timezone-aware")
+    if worker_started_at.tzinfo is None or worker_started_at.utcoffset() is None:
+        raise ValueError("worker_started_at must be timezone-aware")
+    started = worker_started_at.astimezone(timezone.utc)
+    current = current.astimezone(timezone.utc)
+    process_age = max(0.0, (current - started).total_seconds())
+    try:
+        raw = json.loads(Path(status_path).read_text(encoding="utf-8"))
+        stamp_text = raw.get("last_heartbeat_at") if isinstance(raw, dict) else None
+        if not isinstance(stamp_text, str) or not stamp_text.strip():
+            return process_age
+        stamp = datetime.fromisoformat(stamp_text.replace("Z", "+00:00"))
+        if stamp.tzinfo is None or stamp.utcoffset() is None:
+            return process_age
+        stamp = stamp.astimezone(timezone.utc)
+    except (OSError, UnicodeError, ValueError, TypeError, json.JSONDecodeError):
+        return process_age
+    # A heartbeat from an earlier process must not make a restarted child look live.
+    if stamp < started - timedelta(seconds=2):
+        return process_age
+    age = (current - stamp).total_seconds()
+    # A materially future-dated heartbeat is corrupt and must fail closed.
+    if age < -2:
+        return float("inf")
+    return max(0.0, age)
+
+
+def _bounded_integer(value: Any, name: str, *, minimum: int, maximum: int) -> int:
+    if isinstance(value, bool):
+        raise ValueError(f"{name} must be an integer between {minimum} and {maximum}")
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError, OverflowError):
+        raise ValueError(f"{name} must be an integer between {minimum} and {maximum}") from None
+    if str(value).strip() != str(parsed) or not minimum <= parsed <= maximum:
+        raise ValueError(f"{name} must be an integer between {minimum} and {maximum}")
     return parsed
 
 
@@ -135,11 +186,41 @@ def build_supervisor_config(
     perps_worker_env["PERPS_MARKET_HISTORY_DB"] = str(
         source.get("PERPS_MARKET_HISTORY_DB", str(data_dir / "perps_market_history.sqlite3"))
     )
-    perps_worker_env["PERPS_MARKET_WORKER_STATUS_FILE"] = str(
-        source.get("PERPS_MARKET_WORKER_STATUS_FILE", str(data_dir / "perps_market_worker_status.json"))
+    perps_worker_status_path = Path(source.get(
+        "PERPS_MARKET_WORKER_STATUS_FILE",
+        str(data_dir / "perps_market_worker_status.json"),
+    )).expanduser()
+    perps_worker_env["PERPS_MARKET_WORKER_STATUS_FILE"] = str(perps_worker_status_path)
+    perps_poll_interval = _bounded_integer(
+        source.get("PERPS_POLL_INTERVAL_SECONDS", "30"),
+        "PERPS_POLL_INTERVAL_SECONDS",
+        minimum=15,
+        maximum=300,
     )
-    perps_worker_env.setdefault("PERPS_POLL_INTERVAL_SECONDS", "30")
-    perps_worker_env.setdefault("PERPS_MARKET_LIMIT", "10")
+    perps_market_limit = _bounded_integer(
+        source.get("PERPS_MARKET_LIMIT", "10"),
+        "PERPS_MARKET_LIMIT",
+        minimum=1,
+        maximum=50,
+    )
+    minimum_heartbeat_timeout = max(
+        180,
+        perps_poll_interval * 3 + perps_market_limit * 8 + 80,
+    )
+    configured_heartbeat_timeout = source.get("PERPS_WORKER_HEARTBEAT_TIMEOUT_SECONDS")
+    perps_heartbeat_timeout = (
+        minimum_heartbeat_timeout
+        if configured_heartbeat_timeout is None
+        else _bounded_integer(
+            configured_heartbeat_timeout,
+            "PERPS_WORKER_HEARTBEAT_TIMEOUT_SECONDS",
+            minimum=minimum_heartbeat_timeout,
+            maximum=7200,
+        )
+    )
+    perps_worker_env["PERPS_POLL_INTERVAL_SECONDS"] = str(perps_poll_interval)
+    perps_worker_env["PERPS_MARKET_LIMIT"] = str(perps_market_limit)
+    perps_worker_env["PERPS_WORKER_HEARTBEAT_TIMEOUT_SECONDS"] = str(perps_heartbeat_timeout)
     perps_worker_env["ENABLE_PERPS_PAPER_ENGINE"] = "true" if perps_paper_enabled else "false"
     perps_worker_env["PERPS_PAPER_DB"] = str(
         source.get("PERPS_PAPER_DB", str(data_dir / "perps_paper.sqlite3"))
@@ -198,6 +279,8 @@ def build_supervisor_config(
         perps_worker_env=perps_worker_env if perps_worker_enabled else None,
         status_path=status_path,
         poll_interval_seconds=min(poll_interval, 10.0),
+        perps_worker_status_path=perps_worker_status_path,
+        perps_worker_heartbeat_timeout_seconds=float(perps_heartbeat_timeout),
     )
 
 
@@ -253,6 +336,7 @@ def run_supervisor(
     monitor_process = None
     paper_worker_process = None
     perps_worker_process = None
+    perps_worker_started_at: datetime | None = None
     app_process = None
     monitor_failures = 0
     paper_worker_failures = 0
@@ -332,6 +416,7 @@ def run_supervisor(
                 list(config.perps_worker_command or ()),
                 env=dict(config.perps_worker_env or {}),
             )
+            perps_worker_started_at = datetime.now(timezone.utc)
             perps_worker_state = "running"
             log.info("started public Perps market-data worker")
         else:
@@ -398,6 +483,26 @@ def run_supervisor(
 
             if perps_worker_process is not None:
                 perps_code = perps_worker_process.poll()
+                if (
+                    perps_code is None
+                    and config.perps_worker_status_path is not None
+                    and perps_worker_started_at is not None
+                ):
+                    heartbeat_age = _perps_worker_heartbeat_age(
+                        config.perps_worker_status_path,
+                        worker_started_at=perps_worker_started_at,
+                    )
+                    if heartbeat_age >= config.perps_worker_heartbeat_timeout_seconds:
+                        log.error(
+                            "Perps market-data worker heartbeat stale for %.1f seconds "
+                            "(limit %.1f); terminating and restarting",
+                            heartbeat_age,
+                            config.perps_worker_heartbeat_timeout_seconds,
+                        )
+                        _stop_child(perps_worker_process)
+                        perps_code = perps_worker_process.poll()
+                        if perps_code is None:
+                            perps_code = -signal.SIGKILL
                 if perps_code is not None:
                     perps_worker_failures += 1
                     last_perps_worker_exit_code = int(perps_code)
@@ -423,6 +528,7 @@ def run_supervisor(
                         list(config.perps_worker_command or ()),
                         env=dict(config.perps_worker_env or {}),
                     )
+                    perps_worker_started_at = datetime.now(timezone.utc)
                     perps_worker_state = "running"
                     perps_worker_next_restart_at = None
                     publish_status()

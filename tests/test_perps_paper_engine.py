@@ -136,6 +136,7 @@ class PerpsPaperEngineTests(unittest.TestCase):
             with self.make_engine(directory) as engine:
                 result = process_snapshot_at_capture(engine, make_snapshot(), FakeHistory())
                 self.assertEqual(result["open_positions"], 1)
+                self.assertEqual(engine.open_instrument_ids(), [7])
                 self.assertEqual(result["worker_state"], "healthy")
                 self.assertLess(Decimal(result["cash"]), Decimal("1000"))
                 self.assertGreater(Decimal(result["isolated_margin_reserved"]), 0)
@@ -153,6 +154,32 @@ class PerpsPaperEngineTests(unittest.TestCase):
                 self.assertLessEqual(
                     Decimal(row["quantity"]) * Decimal(row["entry_price"]),
                     Decimal("25"),
+                )
+
+    def test_snapshot_cannot_open_new_risk_when_open_position_market_data_is_incomplete(self):
+        with tempfile.TemporaryDirectory() as directory:
+            with self.make_engine(directory) as engine:
+                snapshot = make_snapshot()
+                timestamp_ms = int(snapshot["book"]["timestamp_ms"])
+                captured = datetime.fromtimestamp(
+                    timestamp_ms / 1000, tz=timezone.utc
+                )
+                result = engine.process_snapshot(
+                    snapshot,
+                    FakeHistory(),
+                    now=captured,
+                    allow_new_entries=False,
+                )
+                self.assertEqual(result["open_positions"], 0)
+                self.assertEqual(engine.open_instrument_ids(), [])
+                event = engine.db.execute(
+                    "SELECT event_type, details_json FROM perps_paper_events "
+                    "ORDER BY event_id DESC LIMIT 1"
+                ).fetchone()
+                self.assertEqual(event["event_type"], "ENTRY_BLOCKED")
+                self.assertIn(
+                    "open_position_market_data_incomplete",
+                    event["details_json"],
                 )
 
     def test_opens_short_on_negative_momentum(self):

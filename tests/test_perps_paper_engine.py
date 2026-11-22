@@ -1,3 +1,4 @@
+from decimal import Decimal
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 import tempfile
@@ -244,6 +245,43 @@ class PerpsPaperEngineTests(unittest.TestCase):
             another, side="LONG", requested_notional="5", now=later,
         )
         self.assertEqual(blocked["reason"], "existing_position_funding_gap")
+
+    def test_volatility_adjusted_stop_and_reward_multiple_are_persisted(self):
+        result = self.engine.open_position(
+            self.snap,
+            side="LONG",
+            requested_notional="9.5",
+            now=BASE_TIME,
+            stop_loss_distance_pct="0.006",
+            reward_risk_multiple="2.5",
+        )
+        self.assertEqual(result["status"], "PAPER_POSITION_OPEN")
+        self.assertEqual(result["stop_loss_distance_pct"], "0.006")
+        self.assertEqual(result["reward_risk_multiple"], "2.5")
+        entry = Decimal(result["entry_price"])
+        self.assertEqual(Decimal(result["stop_price"]), entry * Decimal("0.994"))
+        self.assertEqual(Decimal(result["take_profit_price"]), entry * Decimal("1.015"))
+
+    def test_strategy_bar_claim_is_idempotent_and_auditable(self):
+        self.engine.process_snapshot(self.snap, now=BASE_TIME)
+        history = self.engine.recent_snapshots(1)
+        self.assertEqual(len(history), 1)
+        self.assertEqual(history[0]["symbol"], "BTC-PERP")
+        bar_close_ms = BASE_MS + 60_000
+        self.assertTrue(self.engine.claim_strategy_bar(1, bar_close_ms, now=BASE_TIME))
+        self.assertFalse(self.engine.claim_strategy_bar(1, bar_close_ms, now=BASE_TIME))
+        self.engine.record_strategy_decision(
+            1,
+            bar_close_ms,
+            decision_status="no_signal",
+            reason="no_confirmed_ema_crossover",
+            metrics={"completed_bars": 60, "signal": False},
+            now=BASE_TIME,
+        )
+        summary = self.engine.strategy_decision_summary()
+        self.assertEqual(summary["decisions_total"], 1)
+        self.assertEqual(summary["signals_opened"], 0)
+        self.assertEqual(summary["latest"]["decision_status"], "no_signal")
 
     def test_snapshot_history_and_status_are_research_only(self):
         self.engine.process_snapshot(self.snap, now=BASE_TIME)

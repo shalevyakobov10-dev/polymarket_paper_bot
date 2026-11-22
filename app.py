@@ -1079,14 +1079,23 @@ def perps_backup_health_component(
         status = "stale"
     elif snapshot.get("backup_error_type"):
         status = "degraded"
-    elif (
-        snapshot.get("backup_files_last_run") != 2
-        or not snapshot.get("last_backup_manifest_name")
-        or snapshot.get("backup_consecutive_failures", 0) != 0
-    ):
-        status = "degraded"
     else:
-        status = "healthy"
+        journal_present = snapshot.get("perps_order_journal_present") is True
+        expected_files = 3 if journal_present else 2
+        reported_expected = snapshot.get("backup_files_expected_last_run", expected_files)
+        journal_backup_missing = (
+            journal_present and snapshot.get("perps_order_journal_backed_up") is not True
+        )
+        if (
+            snapshot.get("backup_files_last_run") != expected_files
+            or reported_expected != expected_files
+            or journal_backup_missing
+            or not snapshot.get("last_backup_manifest_name")
+            or snapshot.get("backup_consecutive_failures", 0) != 0
+        ):
+            status = "degraded"
+        else:
+            status = "healthy"
     return {
         "name": "perps_paper_backup",
         "status": status,
@@ -1094,6 +1103,9 @@ def perps_backup_health_component(
         "seconds_since_backup": round(max(0.0, age), 1) if age is not None else None,
         "stale_after_seconds": stale_after,
         "backup_files_last_run": snapshot.get("backup_files_last_run", 0),
+        "backup_files_expected_last_run": snapshot.get("backup_files_expected_last_run", 2),
+        "perps_order_journal_present": snapshot.get("perps_order_journal_present") is True,
+        "perps_order_journal_backed_up": snapshot.get("perps_order_journal_backed_up") is True,
         "backup_manifest_name": snapshot.get("last_backup_manifest_name"),
         "backup_interval_hours": interval_hours,
         "backup_error_type": snapshot.get("backup_error_type"),

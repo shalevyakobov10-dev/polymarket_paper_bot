@@ -127,12 +127,10 @@ def load_perps_account_secrets(path: str | Path) -> dict[str, Any]:
         expiry = datetime.fromisoformat(perps["expires_at"].replace("Z", "+00:00"))
     except (TypeError, ValueError, OverflowError):
         raise PerpsAccountSecretsError("perps_account_session_expiry_invalid") from None
-    if (
-        expiry.tzinfo is None
-        or expiry.utcoffset() is None
-        or expiry.astimezone(timezone.utc) <= datetime.now(timezone.utc)
-    ):
-        raise PerpsAccountSecretsError("perps_account_session_credentials_expired_or_invalid")
+    if expiry.tzinfo is None or expiry.utcoffset() is None:
+        raise PerpsAccountSecretsError("perps_account_session_expiry_invalid")
+    if expiry.astimezone(timezone.utc) <= datetime.now(timezone.utc):
+        raise PerpsAccountSecretsError("perps_account_session_credentials_expired")
 
     # Return a fresh object, not the caller-owned JSON object. Callers must keep
     # this value in memory only and must never log, serialize or persist it.

@@ -87,6 +87,8 @@ class PerpsPaperEngine:
         maximum_drawdown_pct: Any = "0.10",
         max_data_age_seconds: int = 15,
         max_entry_impact_bps: Any = "50",
+        funding_schedule_grace_seconds: int = 60,
+        max_post_funding_mark_delay_seconds: int = 45,
     ) -> None:
         self.initial_equity = _decimal(initial_equity, "initial_equity", positive=True)
         self.max_position_notional = _decimal(max_position_notional, "max_position_notional", positive=True)
@@ -124,6 +126,20 @@ class PerpsPaperEngine:
         self.lookback_observations = lookback_observations
         self.minimum_history_span_seconds = minimum_history_span_seconds
         self.max_data_age_seconds = max_data_age_seconds
+        if (
+            isinstance(funding_schedule_grace_seconds, bool)
+            or not isinstance(funding_schedule_grace_seconds, int)
+            or not 5 <= funding_schedule_grace_seconds <= 300
+        ):
+            raise ValueError("funding_schedule_grace_seconds must be between 5 and 300")
+        if (
+            isinstance(max_post_funding_mark_delay_seconds, bool)
+            or not isinstance(max_post_funding_mark_delay_seconds, int)
+            or not 15 <= max_post_funding_mark_delay_seconds <= 120
+        ):
+            raise ValueError("max_post_funding_mark_delay_seconds must be between 15 and 120")
+        self.funding_schedule_grace_seconds = funding_schedule_grace_seconds
+        self.max_post_funding_mark_delay_seconds = max_post_funding_mark_delay_seconds
 
         self.path = Path(database_path).expanduser()
         self.path.parent.mkdir(parents=True, exist_ok=True)
@@ -389,7 +405,9 @@ class PerpsPaperEngine:
                 "current_next_funding_ms": current_next,
             })
             return False
-        if current_next == old_next and int(now.timestamp() * 1000) > old_next + 5_000:
+        if current_next == old_next and int(now.timestamp() * 1000) > (
+            old_next + self.funding_schedule_grace_seconds * 1000
+        ):
             self._halt("funding_schedule_not_advanced")
             self._event(snapshot_key, int(position["instrument_id"]), "FUNDING_RECONCILIATION_REQUIRED", now, {
                 "previous_next_funding_ms": old_next,
@@ -411,12 +429,16 @@ class PerpsPaperEngine:
                 return False
             now_ms = int(now.timestamp() * 1000)
             ticker_ms = ticker.get("timestamp_ms")
-            if isinstance(ticker_ms, bool) or not isinstance(ticker_ms, int) or not 0 <= ticker_ms - old_next <= 15_000:
+            if (
+                isinstance(ticker_ms, bool)
+                or not isinstance(ticker_ms, int)
+                or not 0 <= ticker_ms - old_next <= self.max_post_funding_mark_delay_seconds * 1000
+            ):
                 self._halt("funding_mark_observation_missing")
                 self._event(snapshot_key, int(position["instrument_id"]), "FUNDING_RECONCILIATION_REQUIRED", now, {
                     "scheduled_funding_timestamp_ms": old_next,
                     "ticker_timestamp_ms": ticker_ms,
-                    "reason": "no fresh Mark Price observation within 15 seconds after settlement",
+                    "reason": f"no fresh Mark Price observation within {self.max_post_funding_mark_delay_seconds} seconds after settlement",
                 })
                 return False
             settled = history_store.funding_rate_at(

@@ -1,6 +1,6 @@
 import tempfile
 import unittest
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
 
@@ -114,10 +114,11 @@ class FakeHistory:
         }
 
 
-def process_snapshot_at_capture(engine, snapshot, history):
-    timestamp_ms = int(snapshot["book"]["timestamp_ms"])
-    captured_at = datetime.fromtimestamp(timestamp_ms / 1000, tz=timezone.utc)
-    return engine.process_snapshot(snapshot, history, now=captured_at)
+def process_snapshot_at_capture(engine, snapshot, history, *, now=None):
+    if now is None:
+        timestamp_ms = int(snapshot["book"]["timestamp_ms"])
+        now = datetime.fromtimestamp(timestamp_ms / 1000, tz=timezone.utc)
+    return engine.process_snapshot(snapshot, history, now=now)
 
 
 class PerpsPaperEngineTests(unittest.TestCase):
@@ -499,6 +500,65 @@ class PerpsPaperEngineTests(unittest.TestCase):
                 self.assertEqual(row["close_reason"], "maintenance_margin_breached")
                 self.assertLess(Decimal(row["net_pnl"]), 0)
 
+    def test_entry_impact_guard_blocks_depth_sweep_beyond_limit(self):
+        with tempfile.TemporaryDirectory() as directory:
+            with self.make_engine(directory, max_entry_impact_bps="5") as engine:
+                snapshot = make_snapshot()
+                snapshot["book"]["asks"] = [
+                    {"price": "100.41", "quantity": "0.01"},
+                    {"price": "100.51", "quantity": "5"},
+                ]
+                result = process_snapshot_at_capture(engine, snapshot, FakeHistory())
+                self.assertEqual(result["open_positions"], 0)
+                event = engine.db.execute(
+                    "SELECT details_json FROM perps_paper_events WHERE event_type='ENTRY_BLOCKED'"
+                ).fetchone()
+                self.assertIn("entry_impact_too_high", event["details_json"])
+
+    def test_post_fill_notional_cannot_exceed_position_or_risk_budget(self):
+        with tempfile.TemporaryDirectory() as directory:
+            with self.make_engine(directory, max_entry_impact_bps="1000") as engine:
+                snapshot = make_snapshot()
+                snapshot["book"]["asks"] = [
+                    {"price": "100.41", "quantity": "0.01"},
+                    {"price": "110.00", "quantity": "5"},
+                ]
+                result = process_snapshot_at_capture(engine, snapshot, FakeHistory())
+                self.assertEqual(result["open_positions"], 0)
+                event = engine.db.execute(
+                    "SELECT details_json FROM perps_paper_events WHERE event_type='ENTRY_BLOCKED'"
+                ).fetchone()
+                self.assertIn("instrument_or_position_notional_constraint", event["details_json"])
+
+    def test_isolated_liquidation_cannot_spend_free_collateral(self):
+        with tempfile.TemporaryDirectory() as directory:
+            with self.make_engine(directory) as engine:
+                process_snapshot_at_capture(engine, make_snapshot(), FakeHistory())
+                cash_after_entry = Decimal(engine.summary()["cash"])
+                liquidation_snapshot = make_snapshot(
+                    mark="1.00", sequence=4, timestamp_ms=NOW_MS + 90_000,
+                    bid="0.99", ask="1.01",
+                )
+                result = process_snapshot_at_capture(engine, liquidation_snapshot, FakeHistory())
+                self.assertEqual(result["open_positions"], 0)
+                self.assertTrue(result["halted"])
+                self.assertEqual(result["halt_reason"], "isolated_margin_exhausted")
+                self.assertEqual(Decimal(result["cash"]), cash_after_entry)
+                event = engine.db.execute(
+                    "SELECT details_json FROM perps_paper_events WHERE event_type='LIQUIDATED'"
+                ).fetchone()
+                details = __import__("json").loads(event["details_json"])
+                self.assertFalse(details["free_collateral_used"])
+                self.assertGreater(Decimal(details["isolated_margin_shortfall"]), 0)
+
+    def test_old_archived_snapshot_cannot_certify_itself_as_fresh(self):
+        with tempfile.TemporaryDirectory() as directory:
+            with self.make_engine(directory) as engine:
+                stale_ms = int((datetime.now(timezone.utc) - timedelta(seconds=120)).timestamp() * 1000)
+                snapshot = make_snapshot(timestamp_ms=stale_ms)
+                with self.assertRaisesRegex(ValueError, "stale"):
+                    engine.process_snapshot(snapshot, FakeHistory())
+
     def test_stale_exchange_timestamp_is_rejected(self):
         with tempfile.TemporaryDirectory() as directory:
             with self.make_engine(directory) as engine:
@@ -508,7 +568,7 @@ class PerpsPaperEngineTests(unittest.TestCase):
                     snapshot["book"]["timestamp_ms"] / 1000, tz=timezone.utc
                 )
                 with self.assertRaisesRegex(ValueError, "future-dated"):
-                    engine.process_snapshot(snapshot, FakeHistory(), now=captured_at)
+                    process_snapshot_at_capture(engine, snapshot, FakeHistory(), now=captured_at)
 
     def test_invalid_configuration_fails_closed(self):
         with tempfile.TemporaryDirectory() as directory:

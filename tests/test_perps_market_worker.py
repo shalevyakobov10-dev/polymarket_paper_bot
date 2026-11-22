@@ -327,9 +327,13 @@ class PerpsMarketWorkerTests(unittest.TestCase):
                     "end_timestamp_ms": 1795338000000,
                 }]
 
-            def process_snapshot(self, snapshot, history_store):
+            def process_snapshot(self, snapshot, history_store, *, allow_new_entries=True):
                 self.order.append("process_snapshot")
-                super().process_snapshot(snapshot, history_store)
+                super().process_snapshot(
+                    snapshot,
+                    history_store,
+                    allow_new_entries=allow_new_entries,
+                )
 
         with tempfile.TemporaryDirectory() as directory:
             order = []

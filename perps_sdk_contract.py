@@ -1,7 +1,9 @@
 """Offline compatibility contract for the pinned official Polymarket Perps SDK.
 
-This module imports public SDK types only. It does not create clients, load
-credentials, open a session, make network requests, sign, or submit orders.
+This module inspects signatures and model fields only. It does not create
+clients, load credentials, open a session, make network requests, sign, or
+submit orders. It also pins the small private construction hook used to avoid
+the SDK public factory's automatic credential derivation/wallet-readiness path.
 """
 
 from __future__ import annotations
@@ -16,7 +18,13 @@ EXPECTED_DISTRIBUTION = "polymarket-client"
 EXPECTED_VERSION = "0.20.1"
 
 ASYNC_SECURE_METHODS: dict[str, set[str]] = {
+    "_create": {"private_key", "wallet", "credentials", "validate_credentials"},
     "open_perps_session": {"credentials", "expires_in"},
+}
+
+CREDENTIAL_MODEL_FIELDS: dict[str, set[str]] = {
+    "ApiKeyCreds": {"key", "secret", "passphrase"},
+    "PerpsCredentials": {"proxy", "private_key", "secret", "expires_at"},
 }
 
 PERPS_SESSION_METHODS: dict[str, set[str]] = {
@@ -67,17 +75,47 @@ def _check_methods(
     return failures
 
 
+def _check_credential_model(
+    owner: type[Any],
+    required_fields: set[str],
+) -> list[str]:
+    fields = getattr(owner, "model_fields", None)
+    if not isinstance(fields, dict):
+        failures = ["model_fields_unavailable"]
+    else:
+        failures = sorted(required_fields - set(fields))
+    if not callable(getattr(owner, "model_validate", None)):
+        failures.append("model_validate_missing")
+    return failures
+
+
 def evaluate_sdk_contract(
     *,
     installed_version: str,
     async_secure_client: type[Any],
     perps_session: type[Any],
+    api_key_credentials: type[Any],
+    perps_credentials: type[Any],
 ) -> dict[str, Any]:
     """Evaluate a supplied SDK surface; safe to call with test doubles."""
     version_matches = installed_version == EXPECTED_VERSION
     async_failures = _check_methods(async_secure_client, ASYNC_SECURE_METHODS)
     session_failures = _check_methods(perps_session, PERPS_SESSION_METHODS)
-    compatible = version_matches and not async_failures and not session_failures
+    model_failures = {
+        "ApiKeyCreds": _check_credential_model(
+            api_key_credentials, CREDENTIAL_MODEL_FIELDS["ApiKeyCreds"]
+        ),
+        "PerpsCredentials": _check_credential_model(
+            perps_credentials, CREDENTIAL_MODEL_FIELDS["PerpsCredentials"]
+        ),
+    }
+    model_failures = {name: failures for name, failures in model_failures.items() if failures}
+    compatible = (
+        version_matches
+        and not async_failures
+        and not session_failures
+        and not model_failures
+    )
     return {
         "schema_version": 1,
         "distribution": EXPECTED_DISTRIBUTION,
@@ -87,6 +125,8 @@ def evaluate_sdk_contract(
         "compatible": compatible,
         "async_secure_method_failures": async_failures,
         "perps_session_method_failures": session_failures,
+        "credential_model_failures": model_failures,
+        "read_only_session_creation_mode": "existing_credentials_only",
         "perps_api_experimental": True,
         "account_adapter_mode": "injected_read_only_session",
         "client_created": False,
@@ -119,7 +159,7 @@ def inspect_installed_sdk() -> dict[str, Any]:
         }
 
     try:
-        from polymarket import AsyncSecureClient
+        from polymarket import ApiKeyCreds, AsyncSecureClient, PerpsCredentials
         from polymarket.perps import PerpsSession
     except Exception as error:
         return {
@@ -142,6 +182,8 @@ def inspect_installed_sdk() -> dict[str, Any]:
         installed_version=installed_version,
         async_secure_client=AsyncSecureClient,
         perps_session=PerpsSession,
+        api_key_credentials=ApiKeyCreds,
+        perps_credentials=PerpsCredentials,
     )
 
 

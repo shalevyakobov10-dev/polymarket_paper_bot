@@ -68,11 +68,18 @@ class PerpsStrategyConfig:
     max_signal_age_seconds: int = 120
 
     def __post_init__(self) -> None:
-        for name in ("fast_ema_period", "slow_ema_period", "minimum_completed_bars",
-                     "momentum_bars", "volatility_lookback", "max_signal_age_seconds"):
+        integer_bounds = {
+            "fast_ema_period": (2, 50),
+            "slow_ema_period": (3, 200),
+            "minimum_completed_bars": (60, 500),
+            "momentum_bars": (2, 30),
+            "volatility_lookback": (2, 100),
+            "max_signal_age_seconds": (30, 300),
+        }
+        for name, (minimum, maximum) in integer_bounds.items():
             value = getattr(self, name)
-            if isinstance(value, bool) or not isinstance(value, int) or value < 1:
-                raise ValueError(f"{name} must be a positive integer")
+            if isinstance(value, bool) or not isinstance(value, int) or not minimum <= value <= maximum:
+                raise ValueError(f"{name} must be between {minimum} and {maximum}")
         if self.fast_ema_period >= self.slow_ema_period:
             raise ValueError("fast_ema_period_must_be_less_than_slow_ema_period")
         if self.minimum_completed_bars < max(
@@ -88,8 +95,13 @@ class PerpsStrategyConfig:
             value = getattr(self, name)
             if not isinstance(value, Decimal) or not value.is_finite() or value <= ZERO:
                 raise ValueError(f"{name} must be a positive Decimal")
-        if self.maximum_abs_volatility_pct < self.minimum_abs_volatility_pct:
+        if (
+            self.maximum_abs_volatility_pct < self.minimum_abs_volatility_pct
+            or self.maximum_abs_volatility_pct > Decimal("0.05")
+        ):
             raise ValueError("invalid_volatility_band")
+        if self.volatility_stop_multiple > Decimal("10"):
+            raise ValueError("volatility_stop_multiple_too_large")
         if self.minimum_stop_distance_pct < MIN_STOP or self.maximum_stop_distance_pct > MAX_STOP:
             raise ValueError("stop_distance_must_remain_within_0.5_to_1.5_percent")
         if self.maximum_stop_distance_pct < self.minimum_stop_distance_pct:

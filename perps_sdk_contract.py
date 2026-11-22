@@ -36,6 +36,7 @@ PERPS_SESSION_METHODS: dict[str, set[str]] = {
     "fetch_orders": {"client_order_id"},
     "list_fills": {"instrument_id", "start", "end", "sort"},
     "list_funding_payments": {"instrument_id", "start", "end"},
+    "close": set(),
     "place_order": {
         "instrument_id",
         "side",

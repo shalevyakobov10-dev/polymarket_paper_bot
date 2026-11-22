@@ -226,8 +226,10 @@ def run_worker(
             risk_per_trade_pct=os.getenv("PERPS_PAPER_RISK_PER_TRADE_PCT", "0.0025"),
             stop_loss_pct=os.getenv("PERPS_PAPER_STOP_LOSS_PCT", "0.0075"),
             take_profit_pct=os.getenv("PERPS_PAPER_TAKE_PROFIT_PCT", "0.015"),
-            taker_fee_rate=os.getenv("PERPS_PAPER_TAKER_FEE_RATE", "0.0005"),
-            liquidation_fee_rate=os.getenv("PERPS_PAPER_LIQUIDATION_FEE_RATE", "0.01"),
+            # Legacy assumptions are used only to migrate positions created by
+            # pre-fee-schedule versions. New positions require a fresh public fee schedule.
+            taker_fee_rate=os.getenv("PERPS_PAPER_LEGACY_TAKER_FEE_RATE", "0.0005"),
+            liquidation_fee_rate=os.getenv("PERPS_PAPER_LEGACY_LIQUIDATION_FEE_RATE", "0.01"),
             max_spread_bps=os.getenv("PERPS_PAPER_MAX_SPREAD_BPS", "20"),
             lookback_observations=_positive_int_env("PERPS_PAPER_LOOKBACK_OBSERVATIONS", 10, 3, 500),
             momentum_threshold_bps=os.getenv("PERPS_PAPER_MOMENTUM_THRESHOLD_BPS", "20"),
@@ -269,6 +271,23 @@ def run_worker(
                 if int(recorded["inserted"]) < 0:
                     raise RuntimeError("history store returned an invalid insert count")
                 if current_engine is not None:
+                    funding_requirements = current_engine.funding_requirements(snapshots)
+                    for requirement in funding_requirements:
+                        try:
+                            settlements = current_provider.load_funding_history(
+                                requirement["instrument_id"],
+                                start_timestamp_ms=requirement["start_timestamp_ms"],
+                                end_timestamp_ms=requirement["end_timestamp_ms"],
+                            )
+                            current_store.record_funding_history(
+                                requirement["instrument_id"],
+                                settlements,
+                                received_at=datetime.now(timezone.utc),
+                            )
+                        except Exception:
+                            # The engine detects missing/ambiguous published
+                            # settlements and halts new entries; exits still run.
+                            continue
                     for market_snapshot in snapshots:
                         current_engine.process_snapshot(market_snapshot, current_store)
                     paper_summary = current_engine.summary()

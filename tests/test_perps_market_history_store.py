@@ -101,6 +101,43 @@ class PerpsMarketHistoryStoreTests(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, "snapshot"):
                     store.record_snapshots(["not-a-snapshot"])
 
+    def test_history_returns_latest_bounded_rows_in_chronological_order(self):
+        with tempfile.TemporaryDirectory() as directory:
+            with PerpsMarketHistoryStore(Path(directory) / "perps.sqlite3") as store:
+                snapshots = []
+                for sequence, second in enumerate((0, 30, 60, 90), start=1):
+                    snapshot = sample_snapshot(
+                        11, received_at=f"2026-11-22T08:00:{second:02d}+00:00"
+                    )
+                    timestamp_ms = 1795334400000 + second * 1000
+                    snapshot["ticker"]["timestamp_ms"] = timestamp_ms
+                    snapshot["book"]["timestamp_ms"] = timestamp_ms
+                    snapshot["book"]["sequence"] = sequence
+                    snapshots.append(snapshot)
+                store.record_snapshots(snapshots)
+
+                rows = store.history(11, limit=2)
+
+                self.assertEqual(len(rows), 2)
+                self.assertEqual(
+                    [row["book_sequence"] for row in rows],
+                    [3, 4],
+                )
+                self.assertEqual(
+                    [row["book_timestamp_ms"] for row in rows],
+                    sorted(row["book_timestamp_ms"] for row in rows),
+                )
+                self.assertIn("ticker", rows[0])
+                self.assertIn("bids", rows[0])
+
+    def test_history_rejects_invalid_instrument_id_and_limit(self):
+        with tempfile.TemporaryDirectory() as directory:
+            with PerpsMarketHistoryStore(Path(directory) / "perps.sqlite3") as store:
+                with self.assertRaisesRegex(ValueError, "instrument_id"):
+                    store.history(-1)
+                with self.assertRaisesRegex(ValueError, "limit"):
+                    store.history(11, limit="not-an-integer")
+
     def test_rejects_json_nan_in_book_levels(self):
         with tempfile.TemporaryDirectory() as directory:
             with PerpsMarketHistoryStore(Path(directory) / "perps.sqlite3") as store:

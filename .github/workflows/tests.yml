@@ -18,7 +18,7 @@ jobs:
       - name: Install runtime dependencies
         run: python -m pip install -r requirements.txt
       - name: Compile
-        run: python -m py_compile app.py paper_trading.py news_monitor.py market_data.py market_quality.py market_stream.py global_news.py risk_manager.py resilience.py backtest.py forecast_evaluation.py resolution_tracker.py research_features.py independent_model_evaluation.py learning_journal.py model_governance.py publisher_identity.py paper_fees.py execution_readiness.py account_risk_policy.py backup_order_journal.py restore_order_journal.py live_order_preflight.py order_lifecycle.py order_journal.py user_order_stream.py order_staging.py service_supervisor.py supervisor_status.py event_paper_worker.py paper_performance.py backup_paper_data.py polymarket_geo.py live_execution_gateway.py news_sentiment.py adaptive_paper_risk.py paper_parameter_tuner.py market_snapshot_provider.py live_market_snapshot_provider.py market_history_store.py historical_replay.py resolved_event_evaluation.py paper_orderbook_execution.py event_outcome.py offline_news_paper_bot.py perps_market_data.py perps_market_history_store.py perps_market_worker.py perps_paper_engine.py perps_paper_config.py perps_historical_replay.py perps_order_journal.py perps_sdk_reconciler.py perps_account_preflight.py perps_auto_cancel_guard.py perps_live_execution_gateway.py
+        run: python -m py_compile app.py paper_trading.py news_monitor.py market_data.py market_quality.py market_stream.py global_news.py risk_manager.py resilience.py backtest.py forecast_evaluation.py resolution_tracker.py research_features.py independent_model_evaluation.py learning_journal.py model_governance.py publisher_identity.py paper_fees.py execution_readiness.py account_risk_policy.py backup_order_journal.py restore_order_journal.py live_order_preflight.py order_lifecycle.py order_journal.py user_order_stream.py order_staging.py service_supervisor.py supervisor_status.py event_paper_worker.py paper_performance.py backup_paper_data.py polymarket_geo.py live_execution_gateway.py news_sentiment.py adaptive_paper_risk.py paper_parameter_tuner.py market_snapshot_provider.py live_market_snapshot_provider.py market_history_store.py historical_replay.py resolved_event_evaluation.py paper_orderbook_execution.py event_outcome.py offline_news_paper_bot.py perps_market_data.py perps_market_history_store.py perps_market_worker.py perps_paper_engine.py perps_paper_config.py perps_historical_replay.py perps_order_journal.py perps_sdk_reconciler.py perps_account_preflight.py perps_auto_cancel_guard.py perps_live_execution_gateway.py control_center.py
       - name: Unit tests
         run: python -m unittest discover -s tests -v
       - name: Build Docker image
@@ -86,6 +86,13 @@ jobs:
           fetch_json event-paper /event-paper /tmp/event-paper.json
           fetch_json perps-market /perps-market /tmp/perps-market.json
           fetch_json perps-paper /perps-paper /tmp/perps-paper.json
+          curl --silent --show-error --fail --max-time 10 \
+            --dump-header /tmp/control-center-headers.txt \
+            http://127.0.0.1:18080/control-center > /tmp/control-center.html
+          grep -Fq "Polymarket Bot Control Center" /tmp/control-center.html
+          grep -Fq "Live order submission and signing remain disabled" /tmp/control-center.html
+          grep -Fiq "Content-Security-Policy:" /tmp/control-center-headers.txt
+          grep -Fq "frame-ancestors 'none'" /tmp/control-center-headers.txt
           python - <<'PY'
           import json
           from pathlib import Path

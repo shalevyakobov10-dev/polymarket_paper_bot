@@ -153,7 +153,7 @@ def run_worker(
     poll_interval_seconds: int | None = None,
     history_retention_days: int | None = None,
     max_cycles: int | None = None,
-    max_consecutive_failures: int = 8,
+    max_consecutive_failures: int | None = None,
     paper_engine: Any | None = None,
     paper_engine_factory: Any | None = None,
     paper_engine_enabled: bool | None = None,
@@ -174,7 +174,10 @@ def run_worker(
     )
     if not 1 <= retention_days <= 365:
         raise ValueError("history_retention_days must be between 1 and 365")
-    if isinstance(max_consecutive_failures, bool) or not isinstance(max_consecutive_failures, int) or not 1 <= max_consecutive_failures <= 50:
+    failure_limit = max_consecutive_failures if max_consecutive_failures is not None else _positive_int_env(
+        "PERPS_MAX_CONSECUTIVE_FAILURES", 8, 1, 50
+    )
+    if isinstance(failure_limit, bool) or not isinstance(failure_limit, int) or not 1 <= failure_limit <= 50:
         raise ValueError("max_consecutive_failures must be between 1 and 50")
     current_provider = provider or PerpsPublicMarketDataProvider(
         market_limit=_positive_int_env("PERPS_MARKET_LIMIT", 10, 1, 50),
@@ -317,7 +320,7 @@ def run_worker(
                 state["worker_state"] = "degraded" if paper_warning or state.get("backup_error_type") else "healthy"
                 state["last_success_at"] = _utc_now()
                 state["last_error"] = (
-                    "paper_funding_gap_or_snapshot_rejection" if paper_warning else None
+                    "paper_funding_gap_exit_block_or_snapshot_rejection" if paper_warning else None
                 )
                 state["consecutive_failures"] = 0
                 state["markets_in_last_snapshot"] = len(snapshots)
@@ -371,7 +374,7 @@ def run_worker(
                 state["consecutive_failures"] = failures
                 state["last_heartbeat_at"] = _utc_now()
                 _write_status(status_file, state)
-                if max_cycles is not None or failures >= max_consecutive_failures:
+                if max_cycles is not None or failures >= failure_limit:
                     return 1
                 if stopping.wait(delay):
                     break

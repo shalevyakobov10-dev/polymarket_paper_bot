@@ -199,9 +199,12 @@ def _normalize_ticker(raw: Any, instrument_id: int, current: datetime, max_age: 
     timestamp_ms = _epoch_ms(raw.get("timestamp"), "ticker.timestamp")
     if not _age_is_acceptable(timestamp_ms, current, max_age):
         raise ValueError("ticker timestamp is stale or future-dated")
+    ticker_symbol = str(raw.get("symbol") or "").strip()
+    if not ticker_symbol:
+        raise ValueError("ticker symbol is required")
     result = {
         "instrument_id": instrument_id,
-        "symbol": str(raw.get("symbol") or ""),
+        "symbol": ticker_symbol,
         "index_price": str(_decimal(_field(raw, "index_price", "indexPrice"), "ticker.index_price", positive=True)),
         "mark_price": str(_decimal(_field(raw, "mark_price", "markPrice"), "ticker.mark_price", positive=True)),
         "last_price": str(_decimal(_field(raw, "last_price", "lastPrice"), "ticker.last_price", positive=True)),
@@ -218,6 +221,72 @@ def _normalize_ticker(raw: Any, instrument_id: int, current: datetime, max_age: 
     if volume is not None:
         result["volume_24h"] = str(_decimal(volume, "ticker.volume_24h"))
     return result
+
+
+
+
+def _normalize_fee_schedule(raw: Any, retrieved_at: datetime) -> dict[str, dict[str, str]]:
+    """Validate public perpetual fee schedules and choose a conservative base rate.
+
+    The public endpoint does not disclose the user's authenticated 30-day tier.
+    Paper mode therefore uses the highest published taker rate for each category,
+    never an assumed volume discount.
+    """
+    if not isinstance(raw, dict) or not isinstance(raw.get("fee_schedule"), list):
+        raise PerpsAPIError("Perps fee schedule response is missing fee_schedule")
+    result: dict[str, dict[str, str]] = {}
+    for entry in raw["fee_schedule"]:
+        if not isinstance(entry, dict) or str(entry.get("instrument_type", "")).lower() != "perpetual":
+            continue
+        category = str(entry.get("category") or "").strip().lower()
+        if not category:
+            raise PerpsAPIError("Perps fee schedule category is missing")
+        base_taker = _decimal(entry.get("taker_fee_rate"), "fee_schedule.taker_fee_rate")
+        base_maker = _decimal(entry.get("maker_fee_rate"), "fee_schedule.maker_fee_rate")
+        if not ZERO <= base_taker < 1 or not ZERO <= base_maker < 1:
+            raise PerpsAPIError("Perps fee schedule rates must be in [0, 1)")
+        taker_rates = [base_taker]
+        maker_rates = [base_maker]
+        tiers = entry.get("tiers", [])
+        if not isinstance(tiers, list):
+            raise PerpsAPIError("Perps fee schedule tiers must be a list")
+        prior_volume = Decimal("-1")
+        for tier in tiers:
+            if not isinstance(tier, dict):
+                raise PerpsAPIError("Perps fee tier must be an object")
+            volume = _decimal(tier.get("min_volume_30d"), "fee_tier.min_volume_30d")
+            taker_rate = _decimal(tier.get("taker_fee_rate"), "fee_tier.taker_fee_rate")
+            maker_rate = _decimal(tier.get("maker_fee_rate"), "fee_tier.maker_fee_rate")
+            if volume < 0 or volume <= prior_volume:
+                raise PerpsAPIError("Perps fee tier volume thresholds must be strictly increasing")
+            if not ZERO <= taker_rate < 1 or not ZERO <= maker_rate < 1:
+                raise PerpsAPIError("Perps fee tier rates must be in [0, 1)")
+            prior_volume = volume
+            taker_rates.append(taker_rate)
+            maker_rates.append(maker_rate)
+        if category in result:
+            raise PerpsAPIError(f"duplicate Perps fee schedule category: {category}")
+        result[category] = {
+            "taker_fee_rate": str(max(taker_rates)),
+            "maker_fee_rate": str(max(maker_rates)),
+            "tier_assumption": "highest_published_rate_no_volume_discount",
+            "source": "public_perps_fee_schedule",
+            "retrieved_at": retrieved_at.astimezone(timezone.utc).isoformat(),
+        }
+    if not result:
+        raise PerpsAPIError("Perps fee schedule contains no perpetual categories")
+    return result
+
+
+def _funding_timestamp_ms(value: Any) -> int:
+    parsed = _integer(value, "funding.timestamp", minimum=1)
+    # The endpoint has returned Unix seconds in documented examples and may
+    # expose milliseconds in SDK-normalized responses; accept both explicitly.
+    if 1_000_000_000 <= parsed <= 9_999_999_999:
+        return parsed * 1000
+    if 1_000_000_000_000 <= parsed <= 9_999_999_999_999:
+        return parsed
+    raise ValueError("funding timestamp must be Unix seconds or milliseconds")
 
 
 def _normalize_book(raw: Any, instrument_id: int, current: datetime, max_age: float) -> dict[str, Any]:
@@ -308,8 +377,12 @@ class PerpsPublicMarketDataProvider:
 
         raw_instruments = self._get_json("/v1/info/instruments")
         raw_tickers = self._get_json("/v1/info/tickers")
+        raw_fees = self._get_json("/v1/info/fees")
         if not isinstance(raw_instruments, list) or not isinstance(raw_tickers, list):
             raise PerpsAPIError("Perps instruments and tickers responses must be arrays")
+        fee_schedule = _normalize_fee_schedule(
+            raw_fees, current if fixed_time else datetime.now(timezone.utc)
+        )
 
         instruments: list[dict[str, Any]] = []
         for raw in raw_instruments:
@@ -351,12 +424,16 @@ class PerpsPublicMarketDataProvider:
                 book = _normalize_book(
                     raw_book, instrument_id, book_check_time, self.max_age_seconds
                 )
-                if ticker["symbol"] and ticker["symbol"] != instrument["symbol"]:
+                if ticker["symbol"] != instrument["symbol"]:
                     raise ValueError("ticker symbol does not match instrument metadata")
+                market_fees = fee_schedule.get(instrument["category"])
+                if market_fees is None:
+                    raise ValueError("no current fee schedule for instrument category")
                 snapshots.append({
                     "instrument": instrument,
                     "ticker": ticker,
                     "book": book,
+                    "fees": market_fees,
                     "received_at": (current if fixed_time else datetime.now(timezone.utc)).isoformat(),
                     "research_only": True,
                     "execution": "none",
@@ -366,4 +443,48 @@ class PerpsPublicMarketDataProvider:
         if not snapshots:
             detail = "; ".join(failures[:3]) if failures else "no active instrument had a fresh ticker"
             raise PerpsNoUsableMarkets(f"No fresh Perps market snapshots: {detail}")
+
+    def load_funding_history(
+        self,
+        instrument_id: int,
+        *,
+        start_timestamp_ms: int,
+        end_timestamp_ms: int,
+    ) -> list[dict[str, Any]]:
+        """Fetch exact published settlement rates for one bounded time range."""
+        if isinstance(instrument_id, bool) or not isinstance(instrument_id, int) or instrument_id < 0:
+            raise ValueError("instrument_id must be a nonnegative integer")
+        start_ms = _epoch_ms(start_timestamp_ms, "start_timestamp_ms")
+        end_ms = _epoch_ms(end_timestamp_ms, "end_timestamp_ms")
+        if start_ms > end_ms:
+            raise ValueError("funding history start must not exceed end")
+        payload = self._get_json("/v1/info/funding", {
+            "instrument_id": instrument_id,
+            "start_timestamp": start_ms // 1000,
+            "end_timestamp": end_ms // 1000,
+        })
+        if not isinstance(payload, dict) or not isinstance(payload.get("data"), list):
+            raise PerpsAPIError("Perps funding history response is missing data")
+        more = payload.get("more", False)
+        if not isinstance(more, bool):
+            raise PerpsAPIError("Perps funding history more flag must be boolean")
+        if more:
+            raise PerpsAPIError("Perps funding history was truncated; refusing incomplete settlement data")
+        result: dict[int, dict[str, Any]] = {}
+        for row in payload["data"]:
+            if not isinstance(row, dict):
+                raise PerpsAPIError("Perps funding history row must be an object")
+            timestamp_ms = _funding_timestamp_ms(row.get("timestamp"))
+            rate = _decimal(row.get("funding_rate"), "funding.funding_rate")
+            if timestamp_ms < start_ms - 1000 or timestamp_ms > end_ms + 1000:
+                continue
+            if timestamp_ms in result:
+                raise PerpsAPIError("duplicate Perps funding settlement timestamp")
+            result[timestamp_ms] = {
+                "instrument_id": instrument_id,
+                "timestamp_ms": timestamp_ms,
+                "funding_rate": str(rate),
+            }
+        return [result[key] for key in sorted(result)]
+
         return snapshots

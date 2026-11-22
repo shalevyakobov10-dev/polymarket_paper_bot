@@ -64,6 +64,6 @@ def perps_engine_options_from_env(
             env, "PERPS_PAPER_FUNDING_SCHEDULE_GRACE_SECONDS", 60, 5, 300
         ),
         "max_post_funding_mark_delay_seconds": _bounded_int(
-            env, "PERPS_PAPER_MAX_POST_FUNDING_MARK_DELAY_SECONDS", 45, 15, 120
+            env, "PERPS_PAPER_MAX_POST_FUNDING_MARK_DELAY_SECONDS", 90, 15, 120
         ),
     }

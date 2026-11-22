@@ -250,6 +250,17 @@ class PerpsLiveExecutionGatewayTests(unittest.IsolatedAsyncioTestCase):
         invalid = await self.submit(risk_decision=self.risk_decision(required_initial_margin_usd=None))
         self.assertEqual(invalid["reason_code"], "risk_snapshot_missing_or_invalid")
 
+    async def test_risk_snapshot_must_have_a_fresh_timestamp(self):
+        missing = await self.submit(risk_decision=self.risk_decision(captured_at=None))
+        self.assertEqual(missing["reason_code"], "risk_snapshot_timestamp_missing")
+        stale = await self.submit(
+            risk_decision=self.risk_decision(
+                captured_at=(NOW - timedelta(seconds=6)).isoformat()
+            ),
+        )
+        self.assertEqual(stale["reason_code"], "risk_decision_stale_or_future_dated")
+        self.assertEqual(self.session.place_calls, [])
+
     async def test_auto_cancel_and_account_preflight_must_both_pass(self):
         self.guard.report["state"] = "blocked"
         blocked_guard = await self.submit()

@@ -173,6 +173,10 @@ class SupervisorTests(unittest.TestCase):
                 "LIVE_EXECUTION_ENABLED": "true",
                 "LIVE_TRADING_ENABLED": "true",
                 "POLYMARKET_PRIVATE_KEY": "synthetic-private-key",
+                "PERPS_API_KEY": "synthetic-perps-api-key",
+                "PERPS_PRIVATE_KEY": "synthetic-perps-private-key",
+                "PERPS_SECRET": "synthetic-perps-secret",
+                "ENABLE_PERPS_PAPER_ENGINE": "true",
                 "PERPS_POLL_INTERVAL_SECONDS": "45",
                 "PERPS_MARKET_LIMIT": "8",
             },
@@ -183,6 +187,15 @@ class SupervisorTests(unittest.TestCase):
         self.assertEqual(config.perps_worker_env["LIVE_EXECUTION_ENABLED"], "false")
         self.assertNotIn("LIVE_TRADING_ENABLED", config.perps_worker_env)
         self.assertNotIn("POLYMARKET_PRIVATE_KEY", config.perps_worker_env)
+        self.assertNotIn("PERPS_API_KEY", config.perps_worker_env)
+        self.assertNotIn("PERPS_PRIVATE_KEY", config.perps_worker_env)
+        self.assertNotIn("PERPS_SECRET", config.perps_worker_env)
+        self.assertEqual(config.perps_worker_env["ENABLE_PERPS_PAPER_ENGINE"], "true")
+        self.assertEqual(
+            config.perps_worker_env["PERPS_PAPER_DATABASE_PATH"],
+            "/persist/data/perps_paper.sqlite3",
+        )
+        self.assertEqual(config.perps_worker_env["PERPS_BACKUP_DIRECTORY"], "/persist/data/backups")
         self.assertEqual(
             config.perps_worker_env["PERPS_MARKET_HISTORY_DB"],
             "/persist/data/perps_market_history.sqlite3",

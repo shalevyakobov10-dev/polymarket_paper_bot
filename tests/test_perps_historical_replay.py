@@ -105,6 +105,20 @@ class PerpsHistoricalReplayTests(unittest.TestCase):
             self.assertFalse(result["live_execution_enabled"])
             self.assertFalse(result["live_execution_eligible"])
 
+    def test_future_exchange_timestamp_is_excluded_even_when_received_early(self):
+        with tempfile.TemporaryDirectory() as directory:
+            history_path = Path(directory) / "perps-history.sqlite3"
+            with PerpsMarketHistoryStore(history_path) as store:
+                future = market_snapshot(1, 0, "100.00")
+                future_ms = int((BASE + timedelta(seconds=5)).timestamp() * 1000)
+                future["ticker"]["timestamp_ms"] = future_ms
+                future["book"]["timestamp_ms"] = future_ms
+                store.record_snapshots([future])
+
+                history = PointInTimePerpsHistory(store, BASE).history(7)
+
+                self.assertEqual(history, [])
+
     def test_late_funding_settlement_is_hidden_at_earlier_replay_time(self):
         with tempfile.TemporaryDirectory() as directory:
             history_path = Path(directory) / "perps-history.sqlite3"

@@ -260,12 +260,12 @@ def run_worker(
     exit_code = 0
     backup_due_at = 0.0
     backup_failures = 0
-    auto_entry_raw = os.getenv("PERPS_AUTO_ENTRY_ENABLED", "false").strip().lower()
-    if auto_entry_raw not in {"true", "false"}:
-        raise ValueError("PERPS_AUTO_ENTRY_ENABLED must be exactly true or false")
-    auto_entry_enabled = auto_entry_raw == "true"
     strategy = None
     try:
+        auto_entry_raw = os.getenv("PERPS_AUTO_ENTRY_ENABLED", "false").strip().lower()
+        if auto_entry_raw not in {"true", "false"}:
+            raise ValueError("PERPS_AUTO_ENTRY_ENABLED must be exactly true or false")
+        auto_entry_enabled = auto_entry_raw == "true"
         if auto_entry_enabled:
             strategy = strategy_from_env()
             status["strategy_status"] = "warming_up"
@@ -297,6 +297,7 @@ def run_worker(
                 entries_opened = 0
                 entry_blocks = 0
                 strategy_last_reason = None
+                strategy_cycle_status = "warming_up" if strategy is not None else "disabled"
                 for snapshot in snapshots:
                     outcome = engine.process_snapshot(snapshot)
                     processed += 1
@@ -314,6 +315,13 @@ def run_worker(
                             current_snapshot=snapshot,
                             now=strategy_now,
                         )
+                        decision_reason = str(decision.get("reason") or "unknown")
+                        if decision_reason == "warming_up_insufficient_completed_bars":
+                            strategy_cycle_status = "warming_up"
+                        elif decision_reason in {"incomplete_contiguous_minute_history", "completed_bar_is_stale"}:
+                            strategy_cycle_status = "degraded"
+                        else:
+                            strategy_cycle_status = "active"
                         if decision.get("reason") not in {
                             "warming_up_insufficient_completed_bars",
                             "incomplete_contiguous_minute_history",
@@ -386,7 +394,7 @@ def run_worker(
                     "snapshots_processed_last_cycle": processed,
                     "positions_closed_last_cycle": closed,
                     "funding_gaps_last_cycle": funding_gaps,
-                    "strategy_status": "active" if strategy is not None else "disabled",
+                    "strategy_status": strategy_cycle_status,
                     "strategy_decisions_last_cycle": strategy_decisions,
                     "signals_last_cycle": signals_seen,
                     "entries_opened_last_cycle": entries_opened,

@@ -212,6 +212,8 @@ class PerpsPaperEngineTests(unittest.TestCase):
         self.assertEqual(result["status"], "PAPER_MARK_RECORDED")
         trade = self.engine.list_trades()[0]
         self.assertGreater(float(trade["funding_paid"]), 0)
+        daily = self.engine.account_metrics(now=later)
+        self.assertGreater(float(daily["daily_loss"]), 0)
         self.assertEqual(trade["funding_status"], "tracking")
         self.assertEqual(trade["trade_id"], opened["trade_id"])
 

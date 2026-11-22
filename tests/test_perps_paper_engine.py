@@ -28,6 +28,8 @@ def make_snapshot(
     next_funding_ms=FUNDING_MS,
     funding_rate="0.0001",
     funding_interval="1h",
+    fees=None,
+    liquidation_fee="0.01",
 ):
     mark_value = Decimal(mark)
     bid_value = Decimal(bid) if bid is not None else mark_value - Decimal("0.01")
@@ -46,7 +48,7 @@ def make_snapshot(
             "quantity_decimals": 4,
             "price_decimals": 2,
             "price_bounds": "0.1",
-            "liquidation_fee": "0.01",
+            "liquidation_fee": liquidation_fee,
             "funding_interval": funding_interval,
             "risk_tiers": [
                 {"lower_bound": "0", "max_leverage": "20"},
@@ -75,14 +77,22 @@ def make_snapshot(
             "asks": [{"price": str(ask_value), "quantity": ask_quantity}],
         },
         "received_at": iso_ms(timestamp_ms),
+        "fees": fees if fees is not None else {
+            "taker_fee_rate": "0.0004",
+            "maker_fee_rate": "0.0001",
+            "tier_assumption": "highest_published_rate_no_volume_discount",
+            "source": "public_perps_fee_schedule",
+            "retrieved_at": iso_ms(timestamp_ms),
+        },
         "research_only": True,
         "execution": "none",
     }
 
 
 class FakeHistory:
-    def __init__(self, marks=None, *, first_ms=NOW_MS):
+    def __init__(self, marks=None, *, first_ms=NOW_MS, settled_rate="0.00025"):
         values = marks or ["100.00", "100.20", "100.40"]
+        self.settled_rate = settled_rate
         self.rows = [
             {
                 "book_timestamp_ms": first_ms + index * 30_000,
@@ -261,7 +271,7 @@ class PerpsPaperEngineTests(unittest.TestCase):
                 ).fetchone()
                 self.assertIn("insufficient visible", event["details_json"])
 
-    def test_funding_is_settled_once_from_last_observed_rate(self):
+    def test_funding_uses_exact_published_settlement_not_previous_ticker_estimate(self):
         with tempfile.TemporaryDirectory() as directory:
             with self.make_engine(directory) as engine:
                 engine.process_snapshot(
@@ -280,17 +290,22 @@ class PerpsPaperEngineTests(unittest.TestCase):
                     funding_rate="0.0002",
                     next_funding_ms=FUNDING_MS + 3_600_000,
                 )
-                engine.process_snapshot(snapshot, FakeHistory())
+                history = FakeHistory(settled_rate="0.00025")
+                engine.process_snapshot(snapshot, history)
                 after = engine.db.execute(
                     "SELECT margin_balance,funding_paid FROM perps_paper_positions"
                 ).fetchone()
-                expected = Decimal(before["quantity"]) * Decimal("100.50") * Decimal("0.001")
+                expected = Decimal(before["quantity"]) * Decimal("100.50") * Decimal("0.00025")
                 self.assertAlmostEqual(
                     float(Decimal(before["margin_balance"]) - Decimal(after["margin_balance"])),
                     float(expected),
                     places=8,
                 )
                 self.assertEqual(Decimal(after["funding_paid"]), expected)
+                event = engine.db.execute(
+                    "SELECT details_json FROM perps_paper_events WHERE event_type='FUNDING_SETTLED'"
+                ).fetchone()
+                self.assertIn("0.00025", event["details_json"])
                 self.assertEqual(
                     engine.db.execute(
                         "SELECT COUNT(*) FROM perps_paper_events WHERE event_type='FUNDING_SETTLED'"
@@ -317,6 +332,108 @@ class PerpsPaperEngineTests(unittest.TestCase):
                     "SELECT details_json FROM perps_paper_events WHERE event_type='FUNDING_RECONCILIATION_REQUIRED'"
                 ).fetchone()
                 self.assertIn("no estimate applied", event["details_json"])
+
+    def test_missing_exact_funding_settlement_halts_without_guessing_rate(self):
+        with tempfile.TemporaryDirectory() as directory:
+            with self.make_engine(directory) as engine:
+                engine.process_snapshot(make_snapshot(), FakeHistory())
+                snapshot = make_snapshot(
+                    mark="100.50",
+                    sequence=4,
+                    timestamp_ms=FUNDING_MS + 1_000,
+                    bid="100.49",
+                    ask="100.51",
+                    next_funding_ms=FUNDING_MS + 3_600_000,
+                )
+                result = engine.process_snapshot(snapshot, FakeHistory(settled_rate=None))
+                self.assertTrue(result["halted"])
+                self.assertEqual(result["halt_reason"], "published_funding_settlement_missing")
+                position = engine.db.execute(
+                    "SELECT funding_paid FROM perps_paper_positions"
+                ).fetchone()
+                self.assertEqual(Decimal(position["funding_paid"]), Decimal("0"))
+
+    def test_fee_schedule_is_required_for_new_entries_and_stored_on_position(self):
+        with tempfile.TemporaryDirectory() as directory:
+            with self.make_engine(directory) as engine:
+                missing_fee = make_snapshot(fees={})
+                result = engine.process_snapshot(missing_fee, FakeHistory())
+                self.assertEqual(result["open_positions"], 0)
+                event = engine.db.execute(
+                    "SELECT details_json FROM perps_paper_events WHERE event_type='ENTRY_BLOCKED'"
+                ).fetchone()
+                self.assertIn("fee_schedule_missing_or_stale", event["details_json"])
+
+        with tempfile.TemporaryDirectory() as directory:
+            with self.make_engine(directory) as engine:
+                engine.process_snapshot(make_snapshot(), FakeHistory())
+                row = engine.db.execute(
+                    "SELECT taker_fee_rate,liquidation_fee_rate FROM perps_paper_positions"
+                ).fetchone()
+                self.assertEqual(Decimal(row["taker_fee_rate"]), Decimal("0.0004"))
+                self.assertEqual(Decimal(row["liquidation_fee_rate"]), Decimal("0.01"))
+
+    def test_exit_uses_more_conservative_current_published_fee(self):
+        with tempfile.TemporaryDirectory() as directory:
+            with self.make_engine(directory) as engine:
+                engine.process_snapshot(make_snapshot(), FakeHistory())
+                closing = make_snapshot(
+                    mark="102.00", sequence=4,
+                    timestamp_ms=NOW_MS + 90_000,
+                    bid="101.99", ask="102.01",
+                    fees={
+                        "taker_fee_rate": "0.0007",
+                        "maker_fee_rate": "0.0001",
+                        "source": "public_perps_fee_schedule",
+                        "retrieved_at": iso_ms(NOW_MS + 90_000),
+                    },
+                )
+                engine.process_snapshot(closing, FakeHistory())
+                event = engine.db.execute(
+                    "SELECT details_json FROM perps_paper_events WHERE event_type='CLOSED'"
+                ).fetchone()
+                self.assertIn('"exit_taker_fee_rate":"0.0007"', event["details_json"])
+
+    def test_maintenance_margin_uses_instrument_max_leverage_not_risk_tier_leverage(self):
+        with tempfile.TemporaryDirectory() as directory:
+            with self.make_engine(directory) as engine:
+                snapshot = make_snapshot()
+                snapshot["instrument"]["risk_tiers"] = [
+                    {"lower_bound": "0", "max_leverage": "10"},
+                    {"lower_bound": "100000", "max_leverage": "5"},
+                ]
+                engine.process_snapshot(snapshot, FakeHistory())
+                row = engine.db.execute(
+                    "SELECT maintenance_leverage,margin_balance FROM perps_paper_positions"
+                ).fetchone()
+                self.assertEqual(Decimal(row["maintenance_leverage"]), Decimal("20"))
+                # Between the correct 2.5% maintenance requirement and the
+                # incorrect 5% tier-based requirement: should stay open.
+                engine.db.execute(
+                    "UPDATE perps_paper_positions SET margin_balance='1.0'"
+                )
+                next_snapshot = make_snapshot(
+                    sequence=4, timestamp_ms=NOW_MS + 90_000,
+                    mark="100.40", bid="100.39", ask="100.41",
+                )
+                result = engine.process_snapshot(next_snapshot, FakeHistory())
+                self.assertEqual(result["open_positions"], 1)
+                self.assertFalse(result["halted"])
+
+    def test_funding_requirements_report_exact_open_position_settlement_window(self):
+        with tempfile.TemporaryDirectory() as directory:
+            with self.make_engine(directory) as engine:
+                engine.process_snapshot(make_snapshot(), FakeHistory())
+                result = engine.funding_requirements([make_snapshot(
+                    sequence=4,
+                    timestamp_ms=FUNDING_MS + 1_000,
+                    next_funding_ms=FUNDING_MS + 3_600_000,
+                )])
+                self.assertEqual(result, [{
+                    "instrument_id": 7,
+                    "start_timestamp_ms": FUNDING_MS,
+                    "end_timestamp_ms": FUNDING_MS + 3_600_000,
+                }])
 
     def test_mark_price_liquidation_closes_with_separate_liquidation_fee(self):
         with tempfile.TemporaryDirectory() as directory:

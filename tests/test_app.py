@@ -790,5 +790,58 @@ class WorkerRetryIntegrationTests(unittest.TestCase):
         self.assertEqual(delay, 900.0)
 
 
+class PerpsPaperBackupHealthTests(unittest.TestCase):
+    def test_recent_verified_pair_is_healthy(self):
+        now = datetime(2026, 11, 22, 12, 0, tzinfo=timezone.utc)
+        snapshot = {
+            "backup_interval_hours": 6,
+            "last_backup_at": (now - timedelta(hours=1)).isoformat(),
+            "backup_files_last_run": 2,
+            "backup_error_type": None,
+            "backup_consecutive_failures": 0,
+            "last_backup_manifest_name": "perps-backup-manifest.json",
+        }
+        result = app.perps_backup_health_component(snapshot, now)
+        self.assertEqual(result["status"], "healthy")
+        self.assertEqual(result["backup_files_last_run"], 2)
+        self.assertEqual(result["stale_after_seconds"], 8 * 3600)
+
+    def test_missing_or_stale_backup_fails_closed(self):
+        now = datetime(2026, 11, 22, 12, 0, tzinfo=timezone.utc)
+        missing = app.perps_backup_health_component({}, now)
+        self.assertEqual(missing["status"], "starting")
+        stale = app.perps_backup_health_component({
+            "backup_interval_hours": 6,
+            "last_backup_at": (now - timedelta(hours=10)).isoformat(),
+            "backup_files_last_run": 2,
+            "backup_consecutive_failures": 0,
+        }, now)
+        self.assertEqual(stale["status"], "stale")
+
+    def test_incomplete_backup_and_backup_errors_are_degraded(self):
+        now = datetime(2026, 11, 22, 12, 0, tzinfo=timezone.utc)
+        base = {
+            "last_backup_at": (now - timedelta(minutes=10)).isoformat(),
+            "backup_files_last_run": 1,
+            "backup_consecutive_failures": 0,
+        }
+        self.assertEqual(app.perps_backup_health_component(base, now)["status"], "degraded")
+        failed = {
+            **base,
+            "backup_files_last_run": 2,
+            "backup_error_type": "OSError",
+            "backup_consecutive_failures": 1,
+        }
+        self.assertEqual(app.perps_backup_health_component(failed, now)["status"], "degraded")
+
+    def test_future_dated_backup_is_invalid(self):
+        now = datetime(2026, 11, 22, 12, 0, tzinfo=timezone.utc)
+        result = app.perps_backup_health_component({
+            "last_backup_at": (now + timedelta(minutes=5)).isoformat(),
+            "backup_files_last_run": 2,
+        }, now)
+        self.assertEqual(result["status"], "invalid")
+
+
 if __name__ == "__main__":
     unittest.main()

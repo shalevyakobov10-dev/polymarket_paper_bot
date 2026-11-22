@@ -163,6 +163,87 @@ class SupervisorTests(unittest.TestCase):
             self.assertEqual(status["event_paper_worker_last_exit_code"], 7)
             self.assertIsNone(status["event_paper_worker_next_restart_at"])
 
+
+    def test_perps_worker_is_sanitized_and_forced_to_read_only_paper_mode(self):
+        config = build_supervisor_config(
+            {
+                "ENABLE_PERPS_PAPER_WORKER": "true",
+                "DATA_DIR": "/persist/data",
+                "DRY_RUN": "false",
+                "LIVE_EXECUTION_ENABLED": "true",
+                "LIVE_TRADING_ENABLED": "true",
+                "LIVE_TRADING_ARMED": "true",
+                "LIVE_EXPECTED_WALLET": "synthetic-wallet",
+                "POLYMARKET_PRIVATE_KEY": "synthetic-private-key",
+                "PERPS_API_KEY": "synthetic-api-key",
+                "PERPS_PRIVATE_KEY": "synthetic-perps-key",
+                "PERPS_SECRET": "synthetic-perps-secret",
+            },
+            python_executable="python-test",
+        )
+        self.assertEqual(config.perps_worker_command, ("python-test", "perps_paper_worker.py"))
+        self.assertEqual(config.perps_worker_env["DRY_RUN"], "true")
+        self.assertEqual(config.perps_worker_env["LIVE_EXECUTION_ENABLED"], "false")
+        self.assertEqual(config.perps_worker_env["LIVE_TRADING_ENABLED"], "false")
+        self.assertEqual(config.perps_worker_env["LIVE_TRADING_ARMED"], "false")
+        self.assertEqual(config.perps_worker_env["PERPS_LIVE_EXECUTION_ENABLED"], "false")
+        for secret in (
+            "POLYMARKET_PRIVATE_KEY", "LIVE_EXPECTED_WALLET",
+            "PERPS_API_KEY", "PERPS_PRIVATE_KEY", "PERPS_SECRET",
+        ):
+            self.assertNotIn(secret, config.perps_worker_env)
+        self.assertEqual(
+            config.perps_worker_env["PERPS_PAPER_DATABASE_PATH"],
+            "/persist/data/perps_paper.sqlite3",
+        )
+        self.assertEqual(
+            config.perps_worker_env["PERPS_PAPER_WORKER_STATUS_FILE"],
+            "/persist/data/perps_paper_worker_status.json",
+        )
+
+    def test_invalid_perps_worker_flag_fails_closed(self):
+        with self.assertRaisesRegex(ValueError, "ENABLE_PERPS_PAPER_WORKER"):
+            build_supervisor_config({"ENABLE_PERPS_PAPER_WORKER": "maybe"})
+
+    def test_perps_worker_restarts_after_failure_with_backoff(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as directory:
+            config = build_supervisor_config(
+                {
+                    "ENABLE_PERPS_PAPER_WORKER": "true",
+                    "DATA_DIR": directory,
+                    "SERVICE_SUPERVISOR_POLL_SECONDS": "0.25",
+                },
+                python_executable="python-test",
+            )
+            app = FakeProcess()
+            failed_worker = FakeProcess(poll_results=[9])
+            restarted_worker = FakeProcess()
+            processes = [app, failed_worker, restarted_worker]
+            commands = []
+
+            def fake_popen(command, *, env):
+                commands.append((command, env))
+                return processes.pop(0)
+
+            event = FakeStopEvent(stop_after_waits=2)
+            result = run_supervisor(config, popen_factory=fake_popen, stop_event=event)
+            self.assertEqual(result, 0)
+            self.assertEqual(len(commands), 3)
+            self.assertEqual(commands[1][0], ["python-test", "perps_paper_worker.py"])
+            self.assertEqual(commands[2][0], ["python-test", "perps_paper_worker.py"])
+            self.assertNotIn("POLYMARKET_PRIVATE_KEY", commands[1][1])
+            self.assertEqual(failed_worker.returncode, 9)
+            self.assertTrue(restarted_worker.terminated)
+            status = read_supervisor_status(config.status_path)
+            self.assertTrue(status["perps_paper_worker_enabled"])
+            self.assertEqual(status["perps_paper_worker_state"], "stopped")
+            self.assertEqual(status["perps_paper_worker_restart_count"], 1)
+            self.assertEqual(status["perps_paper_worker_last_exit_code"], 9)
+            self.assertIsNone(status["perps_paper_worker_next_restart_at"])
+
+
     def test_opt_in_monitor_requires_runtime_secret_and_never_puts_it_in_argv(self):
         with self.assertRaisesRegex(ValueError, "requires POLYMARKET_PRIVATE_KEY"):
             build_supervisor_config({"ENABLE_USER_ORDER_MONITOR": "true"})

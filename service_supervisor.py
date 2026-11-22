@@ -47,6 +47,10 @@ class SupervisorConfig:
     monitor_restart_max_seconds: float = 60.0
     perps_worker_status_path: Path | None = None
     perps_worker_heartbeat_timeout_seconds: float = 180.0
+    perps_account_supervisor_command: tuple[str, ...] | None = None
+    perps_account_supervisor_env: dict[str, str] | None = None
+    perps_account_supervisor_status_path: Path | None = None
+    perps_account_supervisor_heartbeat_timeout_seconds: float = 180.0
 
 
 def _positive_finite(value: Any, name: str) -> float:
@@ -138,10 +142,22 @@ def build_supervisor_config(
             str(data_dir / "service_supervisor_status.json"),
         )
     ).expanduser()
+    # A secret-file path is itself sensitive deployment metadata. It is
+    # reserved for the dedicated account worker and never inherited by siblings.
+    account_secrets_file = source.get("PERPS_ACCOUNT_SUPERVISOR_SECRETS_FILE")
     monitor_env = dict(source)
     monitor_env["DATA_DIR"] = str(data_dir)
     monitor_env["ORDER_JOURNAL_DB"] = str(database_path)
     monitor_env["SERVICE_SUPERVISOR_STATUS_FILE"] = str(status_path)
+    for secret_name in (
+        "POLYMARKET_API_KEY",
+        "POLYMARKET_API_SECRET",
+        "POLYMARKET_API_PASSPHRASE",
+        "POLYMARKET_SECRET",
+        "PERPS_ACCOUNT_SUPERVISOR_SECRETS_FILE",
+        "PERPS_SESSION_CREDENTIALS_JSON",
+    ):
+        monitor_env.pop(secret_name, None)
 
     # The public HTTP research worker has no need to inherit account secrets.
     app_env = dict(monitor_env)
@@ -152,6 +168,8 @@ def build_supervisor_config(
         "POLYMARKET_API_PASSPHRASE",
         "POLYMARKET_SECRET",
         "POLYMARKET_DEPOSIT_WALLET",
+        "PERPS_ACCOUNT_SUPERVISOR_SECRETS_FILE",
+        "PERPS_SESSION_CREDENTIALS_JSON",
         "LIVE_EXPECTED_WALLET",
         "LIVE_TRADING_CONFIRMATION",
     ):
@@ -241,6 +259,107 @@ def build_supervisor_config(
     perps_worker_env["LIVE_EXECUTION_ENABLED"] = "false"
     perps_worker_env["ENABLE_USER_ORDER_MONITOR"] = "false"
 
+    account_worker_enabled_raw = str(
+        source.get("ENABLE_PERPS_ACCOUNT_SUPERVISOR", "false")
+    ).strip().lower()
+    if account_worker_enabled_raw not in {"true", "false"}:
+        raise ValueError("ENABLE_PERPS_ACCOUNT_SUPERVISOR must be exactly true or false")
+    account_worker_enabled = account_worker_enabled_raw == "true"
+    account_worker_command: tuple[str, ...] | None = None
+    account_worker_env: dict[str, str] | None = None
+    account_worker_status_path: Path | None = None
+    account_worker_heartbeat_timeout = 180
+
+    if account_worker_enabled:
+        if not perps_worker_enabled:
+            raise ValueError(
+                "ENABLE_PERPS_ACCOUNT_SUPERVISOR requires ENABLE_PERPS_MARKET_DATA_WORKER=true"
+            )
+        if not isinstance(account_secrets_file, str) or not account_secrets_file.strip():
+            raise ValueError(
+                "ENABLE_PERPS_ACCOUNT_SUPERVISOR=true requires "
+                "PERPS_ACCOUNT_SUPERVISOR_SECRETS_FILE from the secret manager"
+            )
+        secrets_path = Path(account_secrets_file).expanduser()
+        try:
+            secrets_stat = secrets_path.lstat()
+        except OSError:
+            raise ValueError("Perps account supervisor secret file is unavailable") from None
+        if secrets_path.is_symlink() or not secrets_path.is_file():
+            raise ValueError("Perps account supervisor secret file must be a regular non-symlink file")
+        if secrets_stat.st_size <= 0 or secrets_stat.st_size > 16 * 1024:
+            raise ValueError("Perps account supervisor secret file has invalid size")
+        permissions = secrets_stat.st_mode & 0o777
+        if permissions & 0o037 or not permissions & 0o400:
+            raise ValueError("Perps account supervisor secret file permissions are unsafe")
+
+        account_poll = _bounded_integer(
+            source.get("PERPS_ACCOUNT_SUPERVISOR_POLL_SECONDS", "30"),
+            "PERPS_ACCOUNT_SUPERVISOR_POLL_SECONDS",
+            minimum=15,
+            maximum=300,
+        )
+        account_cycle_timeout = _positive_finite(
+            source.get("PERPS_ACCOUNT_SUPERVISOR_CYCLE_TIMEOUT_SECONDS", "60"),
+            "PERPS_ACCOUNT_SUPERVISOR_CYCLE_TIMEOUT_SECONDS",
+        )
+        if account_cycle_timeout > 300:
+            raise ValueError(
+                "PERPS_ACCOUNT_SUPERVISOR_CYCLE_TIMEOUT_SECONDS must not exceed 300"
+            )
+        account_max_failures = _bounded_integer(
+            source.get("PERPS_ACCOUNT_SUPERVISOR_MAX_FAILURES", "10"),
+            "PERPS_ACCOUNT_SUPERVISOR_MAX_FAILURES",
+            minimum=1,
+            maximum=50,
+        )
+        minimum_account_heartbeat = max(120, account_poll * 3 + int(account_cycle_timeout) + 30)
+        configured_account_timeout = source.get(
+            "PERPS_ACCOUNT_SUPERVISOR_HEARTBEAT_TIMEOUT_SECONDS"
+        )
+        account_worker_heartbeat_timeout = (
+            minimum_account_heartbeat
+            if configured_account_timeout is None
+            else _bounded_integer(
+                configured_account_timeout,
+                "PERPS_ACCOUNT_SUPERVISOR_HEARTBEAT_TIMEOUT_SECONDS",
+                minimum=minimum_account_heartbeat,
+                maximum=7200,
+            )
+        )
+        account_worker_status_path = Path(source.get(
+            "PERPS_ACCOUNT_SUPERVISOR_STATUS_FILE",
+            str(data_dir / "perps_account_supervisor_status.json"),
+        )).expanduser()
+        shared_submission_lock = Path(source.get(
+            "PERPS_SUBMISSION_LOCK_PATH",
+            str(data_dir / "perps_submission.lock"),
+        )).expanduser()
+        perps_order_journal = Path(source.get(
+            "PERPS_ORDER_JOURNAL_DB",
+            str(data_dir / "perps_order_journal.sqlite3"),
+        )).expanduser()
+
+        # This is a strict child-environment allowlist. No inherited wallet/API
+        # keys, no LIVE_* values, and no unrelated process configuration.
+        account_worker_env = {
+            "DATA_DIR": str(data_dir),
+            "PERPS_ACCOUNT_SUPERVISOR_SECRETS_FILE": str(secrets_path),
+            "PERPS_ACCOUNT_SUPERVISOR_STATUS_FILE": str(account_worker_status_path),
+            "PERPS_ORDER_JOURNAL_DB": str(perps_order_journal),
+            "PERPS_SUBMISSION_LOCK_PATH": str(shared_submission_lock),
+            "PERPS_ACCOUNT_SUPERVISOR_POLL_SECONDS": str(account_poll),
+            "PERPS_ACCOUNT_SUPERVISOR_CYCLE_TIMEOUT_SECONDS": str(account_cycle_timeout),
+            "PERPS_ACCOUNT_SUPERVISOR_MAX_FAILURES": str(account_max_failures),
+            "DRY_RUN": "true",
+            "LIVE_EXECUTION_ENABLED": "false",
+            "LOG_LEVEL": str(source.get("LOG_LEVEL", "INFO")),
+        }
+        account_worker_command = (
+            python_executable or sys.executable,
+            "perps_account_supervisor_worker.py",
+        )
+
     executable = python_executable or sys.executable
     app_command = (executable, "app.py")
     paper_worker_command: tuple[str, ...] | None = (
@@ -293,6 +412,10 @@ def build_supervisor_config(
         poll_interval_seconds=min(poll_interval, 10.0),
         perps_worker_status_path=perps_worker_status_path,
         perps_worker_heartbeat_timeout_seconds=float(perps_heartbeat_timeout),
+        perps_account_supervisor_command=account_worker_command,
+        perps_account_supervisor_env=account_worker_env,
+        perps_account_supervisor_status_path=account_worker_status_path,
+        perps_account_supervisor_heartbeat_timeout_seconds=float(account_worker_heartbeat_timeout),
     )
 
 

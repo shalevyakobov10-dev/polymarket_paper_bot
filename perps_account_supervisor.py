@@ -303,6 +303,7 @@ def read_perps_account_supervisor_status(path: str | Path) -> dict[str, Any]:
         })
         if state == "healthy" and (
             raw.get("enabled") is not True
+            or raw.get("recovery_completed") is not True
             or not safe_report["passed"]
             or raw.get("consecutive_failures", 0) != 0
             or preflight_at is None

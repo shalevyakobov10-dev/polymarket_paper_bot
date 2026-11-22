@@ -291,7 +291,13 @@ def run_worker(
     if isinstance(failure_limit, bool) or not isinstance(failure_limit, int) or not 1 <= failure_limit <= 50:
         raise ValueError("max_consecutive_failures must be an integer between 1 and 50")
     market_limit = _positive_int_env("PERPS_MARKET_LIMIT", 10, 1, 50)
-    minimum_heartbeat_timeout = max(180, interval * 3 + market_limit * 8 + 80)
+    # Open positions are polled in addition to the regular discovery slice.
+    # Reserve the provider's maximum of ten prioritized open instruments.
+    maximum_prioritized_open_positions = 10
+    minimum_heartbeat_timeout = max(
+        180,
+        interval * 3 + (market_limit + maximum_prioritized_open_positions) * 8 + 80,
+    )
     heartbeat_timeout = _positive_int_env(
         "PERPS_WORKER_HEARTBEAT_TIMEOUT_SECONDS",
         minimum_heartbeat_timeout,

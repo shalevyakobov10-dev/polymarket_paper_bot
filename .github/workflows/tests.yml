@@ -57,21 +57,35 @@ jobs:
           test "$ready" -eq 1
           health_code=$(curl --silent --show-error --output /tmp/paper-health.json --write-out "%{http_code}" http://127.0.0.1:18080/health)
           test "$health_code" = "200" -o "$health_code" = "503"
-          curl --silent --show-error --fail http://127.0.0.1:18080/status > /tmp/paper-status.json
-          curl --silent --show-error --fail http://127.0.0.1:18080/paper > /tmp/paper-portfolio.json
-          curl --silent --show-error --fail http://127.0.0.1:18080/matches > /tmp/paper-matches.json
-          curl --silent --show-error --fail http://127.0.0.1:18080/market-stream > /tmp/paper-market-stream.json
-          curl --silent --show-error --fail http://127.0.0.1:18080/resolutions > /tmp/paper-resolutions.json
-          curl --silent --show-error --fail http://127.0.0.1:18080/forecast-evaluation > /tmp/paper-forecast-evaluation.json
-          curl --silent --show-error --fail http://127.0.0.1:18080/research-features > /tmp/paper-research-features.json
-          curl --silent --show-error --fail http://127.0.0.1:18080/independent-model-evaluation > /tmp/paper-independent-model-evaluation.json
-          curl --silent --show-error --fail http://127.0.0.1:18080/model-forecasts > /tmp/paper-model-forecasts.json
-          curl --silent --show-error --fail http://127.0.0.1:18080/learning > /tmp/paper-learning.json
-          curl --silent --show-error --fail http://127.0.0.1:18080/execution-readiness > /tmp/paper-execution-readiness.json
-          curl --silent --show-error --fail http://127.0.0.1:18080/service-supervisor > /tmp/paper-service-supervisor.json
-          curl --silent --show-error --fail http://127.0.0.1:18080/event-paper > /tmp/event-paper.json
-          curl --silent --show-error --fail http://127.0.0.1:18080/perps-market > /tmp/perps-market.json
-          curl --silent --show-error --fail http://127.0.0.1:18080/perps-paper > /tmp/perps-paper.json
+          fetch_json() {
+            local label="$1" path="$2" output="$3"
+            echo "Checking HTTP endpoint: $label"
+            for attempt in $(seq 1 5); do
+              if curl --silent --show-error --fail --max-time 15 "http://127.0.0.1:18080$path" > "$output"; then
+                return 0
+              fi
+              sleep 1
+            done
+            echo "HTTP smoke failed at endpoint: $label" >&2
+            docker inspect polymarket-paper-bot-smoke --format 'Container state: {{json .State}}' >&2 || true
+            docker logs --tail 120 polymarket-paper-bot-smoke >&2 || true
+            return 1
+          }
+          fetch_json status /status /tmp/paper-status.json
+          fetch_json paper /paper /tmp/paper-portfolio.json
+          fetch_json matches /matches /tmp/paper-matches.json
+          fetch_json market-stream /market-stream /tmp/paper-market-stream.json
+          fetch_json resolutions /resolutions /tmp/paper-resolutions.json
+          fetch_json forecast-evaluation /forecast-evaluation /tmp/paper-forecast-evaluation.json
+          fetch_json research-features /research-features /tmp/paper-research-features.json
+          fetch_json independent-model-evaluation /independent-model-evaluation /tmp/paper-independent-model-evaluation.json
+          fetch_json model-forecasts /model-forecasts /tmp/paper-model-forecasts.json
+          fetch_json learning /learning /tmp/paper-learning.json
+          fetch_json execution-readiness /execution-readiness /tmp/paper-execution-readiness.json
+          fetch_json service-supervisor /service-supervisor /tmp/paper-service-supervisor.json
+          fetch_json event-paper /event-paper /tmp/event-paper.json
+          fetch_json perps-market /perps-market /tmp/perps-market.json
+          fetch_json perps-paper /perps-paper /tmp/perps-paper.json
           python - <<'PY'
           import json
           from pathlib import Path

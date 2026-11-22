@@ -995,10 +995,78 @@ class PerpsPaperEngine:
                 ZERO,
             )
             closed_rows = self.db.execute(
-                "SELECT net_pnl FROM perps_paper_positions WHERE status IN ('CLOSED','LIQUIDATED')"
+                """
+                SELECT net_pnl,gross_pnl,entry_fee,funding_paid
+                FROM perps_paper_positions
+                WHERE status IN ('CLOSED','LIQUIDATED')
+                ORDER BY position_id
+                """
             ).fetchall()
             closed_count = len(closed_rows)
             closed_net_pnl = sum((Decimal(row["net_pnl"]) for row in closed_rows), ZERO)
+            closed_gross_pnl = sum((Decimal(row["gross_pnl"]) for row in closed_rows), ZERO)
+            winning_net = sum(
+                (Decimal(row["net_pnl"]) for row in closed_rows if Decimal(row["net_pnl"]) > ZERO),
+                ZERO,
+            )
+            losing_net = -sum(
+                (Decimal(row["net_pnl"]) for row in closed_rows if Decimal(row["net_pnl"]) < ZERO),
+                ZERO,
+            )
+            win_count = sum(1 for row in closed_rows if Decimal(row["net_pnl"]) > ZERO)
+            loss_count = sum(1 for row in closed_rows if Decimal(row["net_pnl"]) < ZERO)
+            breakeven_count = closed_count - win_count - loss_count
+            entry_fees_paid = sum((Decimal(row["entry_fee"]) for row in closed_rows), ZERO)
+            funding_paid_total = sum((Decimal(row["funding_paid"]) for row in closed_rows), ZERO)
+            close_events = self.db.execute(
+                """
+                SELECT details_json FROM perps_paper_events
+                WHERE event_type IN ('CLOSED','LIQUIDATED')
+                ORDER BY event_id
+                """
+            ).fetchall()
+            exit_fees_paid = ZERO
+            liquidation_fees_paid = ZERO
+            for event in close_events:
+                details = json.loads(event["details_json"])
+                exit_fees_paid += _decimal(details.get("exit_fee", "0"), "exit_fee")
+                liquidation_fees_paid += _decimal(
+                    details.get("liquidation_fee", "0"), "liquidation_fee"
+                )
+            total_fees_paid = entry_fees_paid + exit_fees_paid + liquidation_fees_paid
+            performance = {
+                "closed_trades": closed_count,
+                "winning_trades": win_count,
+                "losing_trades": loss_count,
+                "breakeven_trades": breakeven_count,
+                "win_rate_pct": (
+                    str((Decimal(win_count) / Decimal(closed_count) * Decimal("100")).quantize(Decimal("0.01")))
+                    if closed_count else None
+                ),
+                "gross_closed_pnl": str(closed_gross_pnl),
+                "net_closed_pnl_after_fees_and_funding": str(closed_net_pnl),
+                "net_expectancy_per_closed_trade": (
+                    str((closed_net_pnl / Decimal(closed_count)).quantize(Decimal("0.000001")))
+                    if closed_count else None
+                ),
+                "profit_factor": (
+                    str((winning_net / losing_net).quantize(Decimal("0.0001")))
+                    if losing_net > ZERO else None
+                ),
+                "profit_factor_status": (
+                    "calculated" if losing_net > ZERO
+                    else "undefined_without_closed_losses" if closed_count
+                    else "no_closed_trades"
+                ),
+                "entry_fees_paid": str(entry_fees_paid),
+                "exit_fees_paid": str(exit_fees_paid),
+                "liquidation_fees_paid": str(liquidation_fees_paid),
+                "total_fees_paid": str(total_fees_paid),
+                "funding_paid": str(funding_paid_total),
+                "descriptive_only": True,
+                "out_of_sample_validated": False,
+                "live_execution_eligible": False,
+            }
             events = self.db.execute(
                 "SELECT event_type, COUNT(*) AS count FROM perps_paper_events GROUP BY event_type"
             ).fetchall()
@@ -1019,6 +1087,7 @@ class PerpsPaperEngine:
                 "pending_exit_positions": int(pending_exit_count),
                 "closed_positions": closed_count,
                 "closed_net_pnl": str(closed_net_pnl),
+                "performance": performance,
                 "halted": bool(account["halted"]),
                 "halt_reason": account["halt_reason"],
                 "utc_day": account["utc_day"],

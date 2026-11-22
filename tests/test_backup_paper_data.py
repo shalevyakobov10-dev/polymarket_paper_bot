@@ -6,6 +6,7 @@ import tempfile
 import unittest
 from datetime import datetime, timezone
 from pathlib import Path
+from unittest.mock import patch
 
 from backup_paper_data import (
     create_paper_data_backups,
@@ -283,6 +284,41 @@ class PaperDataBackupTests(unittest.TestCase):
             self.assertTrue(verify_paper_data_backup(first_manifest)["complete"])
             self.assertEqual(list(backup_dir.glob("*.tmp")), [])
             self.assertEqual(list(backup_dir.glob(".*.tmp")), [])
+
+    def test_manifest_write_failure_preserves_previous_backup_and_cleans_staging(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            paper = root / "paper.sqlite3"
+            self._database(paper, "stable")
+            backup_dir = root / "backups"
+            first = create_paper_data_backups(
+                [paper],
+                backup_dir,
+                retain=1,
+                now=datetime(2026, 11, 20, 12, 0, tzinfo=timezone.utc),
+            )
+            first_manifest = backup_dir / first["manifest_name"]
+            before_files = sorted(path.name for path in backup_dir.glob("paper-*.sqlite3"))
+
+            with patch("backup_paper_data.json.dump", side_effect=OSError("simulated disk full")):
+                with self.assertRaisesRegex(OSError, "disk full"):
+                    create_paper_data_backups(
+                        [paper],
+                        backup_dir,
+                        retain=1,
+                        now=datetime(2026, 11, 21, 12, 0, tzinfo=timezone.utc),
+                    )
+
+            self.assertTrue(first_manifest.is_file())
+            self.assertEqual(
+                sorted(path.name for path in backup_dir.glob("paper-*.sqlite3")),
+                before_files,
+            )
+            self.assertEqual(
+                list(backup_dir.glob(".paper-backup-manifest.*.tmp")),
+                [],
+            )
+            self.assertTrue(verify_paper_data_backup(first_manifest)["complete"])
 
     def test_corrupt_database_is_not_published_as_backup(self):
         with tempfile.TemporaryDirectory() as directory:

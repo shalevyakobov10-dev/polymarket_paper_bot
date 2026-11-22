@@ -15,7 +15,7 @@ class PerpsPaperConfigTests(unittest.TestCase):
         self.assertEqual(options["stop_loss_pct"], "0.0075")
         self.assertEqual(options["take_profit_pct"], "0.015")
         self.assertEqual(options["funding_schedule_grace_seconds"], 60)
-        self.assertEqual(options["max_post_funding_mark_delay_seconds"], 45)
+        self.assertEqual(options["max_post_funding_mark_delay_seconds"], 90)
 
     def test_overrides_are_shared_as_normalized_engine_options(self):
         options = perps_engine_options_from_env({

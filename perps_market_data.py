@@ -19,6 +19,7 @@ from urllib.request import Request, urlopen
 PERPS_API_BASE_URL = "https://api.perpetuals.polymarket.com"
 USER_AGENT = "PolymarketResearchBot/1.0"
 MAX_RESPONSE_BYTES = 5_000_000
+ZERO = Decimal("0")
 
 
 class PerpsAPIError(RuntimeError):
@@ -491,4 +492,3 @@ class PerpsPublicMarketDataProvider:
             }
         return [result[key] for key in sorted(result)]
 
-        return snapshots

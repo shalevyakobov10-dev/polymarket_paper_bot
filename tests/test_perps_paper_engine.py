@@ -557,7 +557,7 @@ class PerpsPaperEngineTests(unittest.TestCase):
                 stale_ms = int((datetime.now(timezone.utc) - timedelta(seconds=120)).timestamp() * 1000)
                 snapshot = make_snapshot(timestamp_ms=stale_ms)
                 with self.assertRaisesRegex(ValueError, "stale"):
-                    process_snapshot_at_capture(engine, snapshot, FakeHistory())
+                    engine.process_snapshot(snapshot, FakeHistory(), now=datetime.now(timezone.utc))
 
     def test_stale_exchange_timestamp_is_rejected(self):
         with tempfile.TemporaryDirectory() as directory:

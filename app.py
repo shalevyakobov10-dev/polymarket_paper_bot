@@ -982,6 +982,61 @@ def _health_component(
     }
 
 
+def perps_backup_health_component(
+    snapshot: dict,
+    now: datetime | None = None,
+) -> dict:
+    """Require a recent, verified two-database Perps backup when paper is enabled."""
+    current = now or datetime.now(timezone.utc)
+    if current.tzinfo is None or current.utcoffset() is None:
+        current = current.replace(tzinfo=timezone.utc)
+    current = current.astimezone(timezone.utc)
+    try:
+        interval_hours = int(snapshot.get("backup_interval_hours") or 6)
+        if isinstance(snapshot.get("backup_interval_hours"), bool) or not 1 <= interval_hours <= 168:
+            raise ValueError("invalid backup interval")
+    except (TypeError, ValueError, OverflowError):
+        interval_hours = 6
+    stale_after = max(8 * 3600, (interval_hours + 2) * 3600)
+    stamp = None
+    age = None
+    try:
+        stamp = datetime.fromisoformat(
+            str(snapshot.get("last_backup_at") or "").replace("Z", "+00:00")
+        )
+        if stamp.tzinfo is not None and stamp.utcoffset() is not None:
+            age = (current - stamp.astimezone(timezone.utc)).total_seconds()
+    except (TypeError, ValueError, OverflowError):
+        stamp = None
+    if age is None:
+        status = "starting"
+    elif age < -2:
+        status = "invalid"
+    elif age > stale_after:
+        status = "stale"
+    elif snapshot.get("backup_error_type"):
+        status = "degraded"
+    elif (
+        snapshot.get("backup_files_last_run") != 2
+        or snapshot.get("backup_consecutive_failures", 0) != 0
+    ):
+        status = "degraded"
+    else:
+        status = "healthy"
+    return {
+        "name": "perps_paper_backup",
+        "status": status,
+        "last_backup_at": snapshot.get("last_backup_at"),
+        "seconds_since_backup": round(max(0.0, age), 1) if age is not None else None,
+        "stale_after_seconds": stale_after,
+        "backup_files_last_run": snapshot.get("backup_files_last_run", 0),
+        "backup_manifest_name": snapshot.get("last_backup_manifest_name"),
+        "backup_interval_hours": interval_hours,
+        "backup_error_type": snapshot.get("backup_error_type"),
+        "backup_consecutive_failures": snapshot.get("backup_consecutive_failures", 0),
+    }
+
+
 def health_payload(
     snapshot: dict,
     now: datetime | None = None,
@@ -1405,6 +1460,15 @@ class Handler(BaseHTTPRequestHandler):
                             payload["status"] = "unhealthy"
                             payload["required_component_failures"].append("perps_paper_engine")
                         payload["health_policy"] += "; perps_paper_engine_is_required_when_enabled"
+                        backup_component = perps_backup_health_component(perps_snapshot)
+                        payload["components"]["perps_paper_backup"] = backup_component
+                        payload["required_components"].append("perps_paper_backup")
+                        if backup_component["status"] != "healthy":
+                            healthy = False
+                            payload["ok"] = False
+                            payload["status"] = "unhealthy"
+                            payload["required_component_failures"].append("perps_paper_backup")
+                        payload["health_policy"] += "; recent_verified_perps_paper_and_market_history_backups_are_required_when_enabled"
                 self._send(200 if healthy else 503, payload)
             elif self.path == "/paper":
                 self._send(200, get_paper_trader().snapshot())

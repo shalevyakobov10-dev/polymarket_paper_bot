@@ -452,6 +452,23 @@ class SupervisorTests(unittest.TestCase):
                     "PERPS_ACCOUNT_SUPERVISOR_SECRETS_FILE": str(secret_path),
                 })
 
+    def test_perps_account_supervisor_rejects_empty_database_status_and_lock_paths(self):
+        with tempfile.TemporaryDirectory() as directory:
+            secret_path = self._account_supervisor_secret_file(directory)
+            base = {
+                "ENABLE_PERPS_ACCOUNT_SUPERVISOR": "true",
+                "ENABLE_PERPS_MARKET_DATA_WORKER": "true",
+                "PERPS_ACCOUNT_SUPERVISOR_SECRETS_FILE": str(secret_path),
+            }
+            for name in (
+                "PERPS_ORDER_JOURNAL_DB",
+                "PERPS_ACCOUNT_SUPERVISOR_STATUS_FILE",
+                "PERPS_SUBMISSION_LOCK_PATH",
+            ):
+                with self.subTest(name=name):
+                    with self.assertRaisesRegex(ValueError, name):
+                        build_supervisor_config({**base, name: ""})
+
     def test_perps_account_supervisor_heartbeat_timeout_cannot_be_too_short(self):
         with tempfile.TemporaryDirectory() as directory:
             secret_path = self._account_supervisor_secret_file(directory)

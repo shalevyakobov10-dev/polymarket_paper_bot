@@ -119,6 +119,28 @@ def _sanitize_preflight_report(report: Any) -> dict[str, Any]:
         safe_observations["account_fee_tier"] = _nonnegative_int(
             fee_tier, "account_fee_tier", maximum=10_000
         )
+
+    if passed:
+        invariant_failed = (
+            safe_observations["portfolio_fresh"] is not True
+            or safe_observations["auto_cancel_armed"] is not True
+            or safe_observations["fee_schedule_fresh"] is not True
+            or safe_observations.get("account_fee_tier") is None
+            or safe_observations.get("margin_available") is None
+            or Decimal(safe_observations["margin_available"] or "0") <= 0
+            or any(safe_observations[name] != 0 for name in (
+                "unresolved_order_count",
+                "cross_margin_positions",
+                "over_leveraged_positions",
+                "position_integrity_errors",
+                "high_adl_risk_positions",
+                "unknown_remote_open_orders",
+                "missing_remote_open_orders",
+            ))
+        )
+        if invariant_failed:
+            reasons.append("preflight_pass_invariant_violation")
+
     return {
         "passed": passed and not reasons,
         "blocked_reasons": reasons,
@@ -215,6 +237,12 @@ def read_perps_account_supervisor_status(path: str | Path) -> dict[str, Any]:
             "blocked_reasons": reasons,
             "observations": observations,
         })
+        if state == "healthy" and (
+            not safe_report["passed"]
+            or raw.get("consecutive_failures", 0) != 0
+            or preflight_at is None
+        ):
+            raise ValueError("healthy status conflicts with preflight result")
         recovery_count = _nonnegative_int(
             raw.get("recovered_interrupted_submissions", 0),
             "recovered_interrupted_submissions",
@@ -320,7 +348,6 @@ class PerpsAccountSupervisor:
         })
         recovery_completed = False
         cycles = 0
-        last_success_monotonic: float | None = None
         failures = 0
         _write_status(self.status_path, state)
 
@@ -352,7 +379,6 @@ class PerpsAccountSupervisor:
                     "observations": safe_report["observations"],
                 })
                 failures = 0
-                last_success_monotonic = time.monotonic()
             except asyncio.CancelledError:
                 raise
             except Exception as exc:

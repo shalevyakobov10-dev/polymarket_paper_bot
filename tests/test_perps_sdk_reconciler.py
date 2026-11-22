@@ -41,6 +41,7 @@ class FakePerpsSession:
         self.fill_calls.append({
             "instrument_id": instrument_id,
             "start": start,
+            "end": end,
             "sort": sort,
         })
         if self.fill_error:
@@ -135,6 +136,40 @@ class PerpsSdkReconcilerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(state["average_fill_price"], str((Decimal("0.5")*Decimal("2500") + Decimal("1")*Decimal("2501"))/Decimal("1.5")))
         self.assertEqual(self.reconciler_session.fill_calls[0]["instrument_id"], 17)
         self.assertEqual(self.reconciler_session.fill_calls[0]["sort"], "asc")
+        self.assertEqual(
+            self.reconciler_session.fill_calls[0]["end"],
+            self.order().updated_at,
+        )
+
+    async def test_fill_scan_is_bounded_even_for_unrelated_instrument_trades(self):
+        self.prepare_pending()
+        self.reconciler_session.orders[self.client_id] = [
+            self.order(status="partial", filled_quantity="1")
+        ]
+        self.reconciler_session.fills = [
+            self.fill(order_id=999, quantity="1", price="1"),
+            self.fill(quantity="1", price="2500"),
+        ]
+        bounded = PerpsSdkReconciler(
+            journal=self.journal,
+            session=self.reconciler_session,
+            max_scanned_fill_rows=1,
+        )
+        state = await bounded.reconcile(self.client_id)
+        self.assertEqual(state["status"], "submission_unknown")
+        self.assertEqual(state["last_reason_code"], "fill_history_not_yet_reconciled")
+
+    async def test_fill_instrument_mismatch_keeps_order_unresolved(self):
+        self.prepare_pending()
+        self.reconciler_session.orders[self.client_id] = [
+            self.order(status="partial", filled_quantity="1")
+        ]
+        self.reconciler_session.fills = [
+            self.fill(instrument_id=18, quantity="1", price="2500")
+        ]
+        state = await self.reconciler.reconcile(self.client_id)
+        self.assertEqual(state["status"], "submission_unknown")
+        self.assertEqual(state["last_reason_code"], "fill_history_not_yet_reconciled")
 
     async def test_sdk_filled_status_requires_complete_fills_and_closes_order_state(self):
         self.prepare_pending()
@@ -195,30 +230,22 @@ class PerpsSdkReconcilerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(state["status"], "submission_unknown")
         self.assertEqual(state["last_reason_code"], "duplicate_client_order_id_results")
 
-    async def test_duplicate_and_lookup_error_statuses_require_manual_review(self):
+    async def _assert_remote_status_requires_manual_review(self, remote_status):
         self.prepare_pending()
-        for remote_status in ("duplicate_order", "order_not_found", "order_already_terminal"):
-            with self.subTest(remote_status=remote_status):
-                self.reconciler_session.orders[self.client_id] = [
-                    self.order(status=remote_status)
-                ]
-                # Re-create the intent after the prior subtest's transition.
-                if remote_status != "duplicate_order":
-                    self.journal.close()
-                    self.journal = PerpsOrderJournal(
-                        Path(self.temp_dir.name) / f"{remote_status}.sqlite3"
-                    )
-                    self.reconciler.journal = self.journal
-                    self.client_id = "b" * 32 if remote_status == "order_not_found" else "c" * 32
-                    self.prepare_pending()
-                    self.reconciler_session.orders[self.client_id] = [
-                        self.order(
-                            client_order_id=self.client_id,
-                            status=remote_status,
-                        )
-                    ]
-                state = await self.reconciler.reconcile(self.client_id)
-                self.assertEqual(state["status"], "manual_review")
+        self.reconciler_session.orders[self.client_id] = [
+            self.order(status=remote_status)
+        ]
+        state = await self.reconciler.reconcile(self.client_id)
+        self.assertEqual(state["status"], "manual_review")
+
+    async def test_duplicate_order_status_requires_manual_review(self):
+        await self._assert_remote_status_requires_manual_review("duplicate_order")
+
+    async def test_order_not_found_status_requires_manual_review(self):
+        await self._assert_remote_status_requires_manual_review("order_not_found")
+
+    async def test_order_already_terminal_status_requires_manual_review(self):
+        await self._assert_remote_status_requires_manual_review("order_already_terminal")
 
     async def test_unrecognized_sdk_status_moves_order_to_manual_review(self):
         self.prepare_pending()

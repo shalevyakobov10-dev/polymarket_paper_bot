@@ -93,6 +93,7 @@ def evaluate_perps_entry(
     open_positions: int = 0,
     daily_loss: Any = ZERO,
     peak_equity: Any | None = None,
+    stop_loss_distance_pct: Any | None = None,
     limits: PerpsRiskLimits | None = None,
 ) -> dict[str, Any]:
     """Return a stable allow/block decision for a *paper* Perps entry."""
@@ -164,7 +165,14 @@ def evaluate_perps_entry(
         if leverage > Decimal("2"):
             return reject("paper_leverage_cap_exceeded")
 
-        stop_risk = notional * policy.stop_loss_distance_pct
+        stop_distance = (
+            policy.stop_loss_distance_pct
+            if stop_loss_distance_pct is None
+            else _d(stop_loss_distance_pct, "stop_loss_distance_pct")
+        )
+        if not Decimal("0.005") <= stop_distance <= Decimal("0.015"):
+            return reject("stop_loss_distance_out_of_research_bounds")
+        stop_risk = notional * stop_distance
         allowed_risk = account_equity * policy.risk_per_trade_pct
         if stop_risk > allowed_risk:
             return reject("risk_per_trade_exceeded", estimated_stop_loss=str(stop_risk), max_risk=str(allowed_risk))
@@ -202,6 +210,7 @@ def evaluate_perps_entry(
             "funding_reserve": str(funding_reserve),
             "required_free_collateral": str(required_collateral),
             "estimated_stop_loss": str(stop_risk),
+            "stop_loss_distance_pct": str(stop_distance),
             "risk_budget": str(allowed_risk),
             "portfolio_drawdown": str(drawdown),
             "research_only": True,

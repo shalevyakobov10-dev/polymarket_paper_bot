@@ -38,6 +38,27 @@ class FakePreflightSession:
             daily_limit=5,
         )
         self.account_configs = ()
+        self.fee_schedule_snapshot = {
+            "retrieved_at": NOW - timedelta(seconds=1),
+            "fee_schedule": [
+                {
+                    "instrument_type": "perpetual",
+                    "category": "legacy_crypto",
+                    "tiers": [
+                        {
+                            "min_volume_30d": "0",
+                            "taker_fee_rate": "0.0005",
+                            "maker_fee_rate": "0.0002",
+                        },
+                        {
+                            "min_volume_30d": "1000000",
+                            "taker_fee_rate": "0.0004",
+                            "maker_fee_rate": "0.0002",
+                        },
+                    ],
+                },
+            ],
+        }
         self.orders_by_client = {}
         self.read_error = False
         self.hang_account_read = False
@@ -62,6 +83,9 @@ class FakePreflightSession:
     async def fetch_account_config(self):
         return self.account_configs
 
+    async def fetch_public_fee_schedule(self):
+        return self.fee_schedule_snapshot
+
     async def fetch_orders(self, *, client_order_id):
         self.fetch_orders_calls.append(client_order_id)
         return tuple(self.orders_by_client.get(client_order_id, ()))
@@ -85,6 +109,7 @@ class PerpsAccountPreflightTests(unittest.IsolatedAsyncioTestCase):
         self.preflight = PerpsAccountPreflight(
             journal=self.journal,
             session=self.session,
+            fee_schedule_provider=self.session.fetch_public_fee_schedule,
         )
 
     async def test_clean_account_passes_read_only_preflight_but_never_authorizes_orders(self):
@@ -96,6 +121,55 @@ class PerpsAccountPreflightTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(report["execution"], "none")
         self.assertTrue(report["observations"]["portfolio_fresh"])
         self.assertTrue(report["observations"]["auto_cancel_armed"])
+        self.assertTrue(report["observations"]["fee_schedule_fresh"])
+        self.assertEqual(report["observations"]["account_fee_tier"], 0)
+        self.assertEqual(report["observations"]["effective_taker_fee_rate"], "0.0005")
+        self.assertEqual(report["observations"]["effective_maker_fee_rate"], "0.0002")
+
+    async def test_account_fee_tier_is_resolved_from_current_published_schedule(self):
+        self.session.portfolio.fee_tier = 1
+        report = await self.preflight.run(now=NOW)
+        self.assertTrue(report["read_only_preflight_passed"])
+        self.assertEqual(report["observations"]["effective_taker_fee_rate"], "0.0004")
+        self.assertEqual(report["observations"]["effective_maker_fee_rate"], "0.0002")
+
+    async def test_stale_public_fee_schedule_blocks_account_preflight(self):
+        self.session.fee_schedule_snapshot["retrieved_at"] = NOW - timedelta(minutes=30)
+        report = await self.preflight.run(now=NOW)
+        self.assertIn(
+            "public_perps_fee_schedule_missing_stale_or_ambiguous",
+            report["blocked_reasons"],
+        )
+        self.assertFalse(report["observations"]["fee_schedule_fresh"])
+
+    async def test_account_fee_tier_outside_published_schedule_fails_closed(self):
+        self.session.portfolio.fee_tier = 99
+        report = await self.preflight.run(now=NOW)
+        self.assertIn(
+            "public_perps_fee_schedule_missing_stale_or_ambiguous",
+            report["blocked_reasons"],
+        )
+
+    async def test_conflicting_legacy_category_fee_schedules_are_ambiguous(self):
+        self.session.fee_schedule_snapshot["fee_schedule"].append({
+            "instrument_type": "perpetual",
+            "category": "legacy_equity",
+            "tiers": [
+                {"min_volume_30d": "0", "taker_fee_rate": "0.0008", "maker_fee_rate": "0.0002"},
+                {"min_volume_30d": "1000000", "taker_fee_rate": "0.0007", "maker_fee_rate": "0.0002"},
+            ],
+        })
+        report = await self.preflight.run(now=NOW)
+        self.assertIn(
+            "public_perps_fee_schedule_missing_stale_or_ambiguous",
+            report["blocked_reasons"],
+        )
+
+    async def test_missing_fee_schedule_provider_fails_closed(self):
+        preflight = PerpsAccountPreflight(journal=self.journal, session=self.session)
+        report = await preflight.run(now=NOW)
+        self.assertIn("public_perps_fee_schedule_provider_missing", report["blocked_reasons"])
+        self.assertFalse(report["read_only_preflight_passed"])
 
     async def test_stale_or_future_portfolio_is_blocked(self):
         self.session.portfolio.timestamp = NOW - timedelta(minutes=5)

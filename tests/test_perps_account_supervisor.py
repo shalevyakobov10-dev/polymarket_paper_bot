@@ -9,6 +9,7 @@ from pathlib import Path
 
 from perps_account_supervisor import (
     PerpsAccountSupervisor,
+    perps_account_supervisor_freshness,
     read_perps_account_supervisor_status,
 )
 
@@ -301,6 +302,39 @@ class PerpsAccountSupervisorTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(status["worker_state"], "unknown")
         self.assertFalse(status["read_only_preflight_passed"])
         self.assertEqual(status["last_error_code"], "status_file_invalid")
+
+    async def test_stale_or_future_heartbeat_is_never_reported_healthy(self):
+        base = {
+            "enabled": True,
+            "worker_state": "healthy",
+            "poll_interval_seconds": 30,
+            "last_heartbeat_at": NOW.isoformat(),
+        }
+        fresh = perps_account_supervisor_freshness(base, now=NOW)
+        self.assertEqual(fresh["worker_state"], "healthy")
+        self.assertTrue(fresh["heartbeat_fresh"])
+        self.assertEqual(fresh["heartbeat_stale_after_seconds"], 90)
+
+        stale = perps_account_supervisor_freshness({
+            **base,
+            "last_heartbeat_at": (NOW - timedelta(seconds=91)).isoformat(),
+        }, now=NOW)
+        self.assertEqual(stale["worker_state"], "stale")
+        self.assertFalse(stale["heartbeat_fresh"])
+
+        future = perps_account_supervisor_freshness({
+            **base,
+            "last_heartbeat_at": (NOW + timedelta(seconds=5)).isoformat(),
+        }, now=NOW)
+        self.assertEqual(future["worker_state"], "invalid")
+        self.assertFalse(future["heartbeat_fresh"])
+
+        missing = perps_account_supervisor_freshness({
+            **base,
+            "last_heartbeat_at": None,
+        }, now=NOW)
+        self.assertEqual(missing["worker_state"], "unknown")
+        self.assertFalse(missing["heartbeat_fresh"])
 
     async def test_validation_rejects_unsafe_supervisor_configuration(self):
         with self.assertRaisesRegex(ValueError, "poll_interval_seconds"):

@@ -315,6 +315,8 @@ def run_worker(
                         funding_gaps += 1
                     elif outcome.get("status") == "PAPER_EXIT_BLOCKED":
                         exit_blocks += 1
+                        if outcome.get("funding_reconciliation") == "incomplete":
+                            funding_gaps += 1
                         last_exit_block_reason = str(outcome.get("reason") or "exit_fill_blocked")[:120]
 
                     if strategy is not None:

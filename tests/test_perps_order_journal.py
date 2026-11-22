@@ -38,20 +38,27 @@ class PerpsOrderJournalTests(unittest.TestCase):
         *,
         remote_status: str = "open",
         matched_client_order_id: str | None = None,
-        venue_order_id: str = "venue-123",
+        venue_order_id: str | None = None,
         instrument_id: int = 17,
         side: str = "buy",
         quantity: str = "2",
         filled_quantity: str = "0",
         average_fill_price: str | None = None,
     ) -> dict:
+        current = self.journal.get_intent(client_order_id)
+        if current is None:
+            raise AssertionError("order intent must exist before reconciliation")
+        if current["status"] == "prepared":
+            self.journal.begin_submission(client_order_id)
+            current = self.journal.get_intent(client_order_id)
+        actual_venue_id = venue_order_id or current.get("venue_order_id") or "venue-123"
         return self.journal.record_reconciliation(
             client_order_id,
             outcome="found",
             matched_client_order_id=(
                 matched_client_order_id or client_order_id
             ),
-            venue_order_id=venue_order_id,
+            venue_order_id=actual_venue_id,
             instrument_id=instrument_id,
             side=side,
             quantity=quantity,

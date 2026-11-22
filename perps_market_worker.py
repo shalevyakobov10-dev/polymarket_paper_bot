@@ -15,7 +15,8 @@ from typing import Any
 from backup_paper_data import create_paper_data_backups
 from perps_market_data import PerpsPublicMarketDataProvider
 from perps_market_history_store import PerpsMarketHistoryStore
-from perps_paper_engine import PerpsPaperEngine
+from perps_paper_engine import PerpsPaperEngine, flatten_perps_market_snapshot
+from perps_signal_strategy import strategy_from_env
 
 
 def _utc_now() -> str:
@@ -97,7 +98,12 @@ def read_perps_worker_status(path: str | Path) -> dict[str, Any]:
             "paper_funding_gaps_last_cycle": _status_count(raw.get("paper_funding_gaps_last_cycle", 0), "paper_funding_gaps_last_cycle"),
             "paper_exit_blocks_last_cycle": _status_count(raw.get("paper_exit_blocks_last_cycle", 0), "paper_exit_blocks_last_cycle"),
             "paper_snapshot_rejections_last_cycle": _status_count(raw.get("paper_snapshot_rejections_last_cycle", 0), "paper_snapshot_rejections_last_cycle"),
-            "paper_strategy_status": "not_configured",
+            "paper_strategy_status": raw.get("paper_strategy_status") if raw.get("paper_strategy_status") in {"disabled", "warming_up", "active", "degraded"} else "disabled",
+            "strategy_decisions_total": _status_count(raw.get("strategy_decisions_total", 0), "strategy_decisions_total"),
+            "signals_logged": _status_count(raw.get("signals_logged", 0), "signals_logged"),
+            "entries_opened_total": _status_count(raw.get("entries_opened_total", 0), "entries_opened_total"),
+            "entry_blocks_total": _status_count(raw.get("entry_blocks_total", 0), "entry_blocks_total"),
+            "strategy_last_reason": str(raw.get("strategy_last_reason") or "")[:120] or None,
             "paper_cash_balance": str(raw.get("paper_cash_balance"))[:80] if raw.get("paper_cash_balance") is not None else None,
             "paper_equity": str(raw.get("paper_equity"))[:80] if raw.get("paper_equity") is not None else None,
             "paper_daily_loss": str(raw.get("paper_daily_loss"))[:80] if raw.get("paper_daily_loss") is not None else None,
@@ -120,7 +126,10 @@ def read_perps_worker_status(path: str | Path) -> dict[str, Any]:
             "paper_open_positions": 0, "paper_closed_trades": 0,
             "paper_closed_last_cycle": 0, "paper_funding_gaps_last_cycle": 0,
             "paper_exit_blocks_last_cycle": 0, "paper_snapshot_rejections_last_cycle": 0,
-            "paper_strategy_status": "not_configured",
+            "paper_strategy_status": "disabled",
+            "strategy_decisions_total": 0, "signals_logged": 0,
+            "entries_opened_total": 0, "entry_blocks_total": 0,
+            "strategy_last_reason": None,
             "paper_cash_balance": None, "paper_equity": None, "paper_daily_loss": None,
             "backup_at": None, "backup_error_type": None,
             "research_only": True, "live_execution_enabled": False, "execution": "none",
@@ -200,6 +209,15 @@ def run_worker(
         paper_enabled = paper_engine_enabled
     if paper_engine is not None:
         paper_enabled = True
+    signal_enabled_raw = str(os.getenv("PERPS_SIGNAL_EVALUATION_ENABLED", "false")).strip().lower()
+    auto_entry_raw = str(os.getenv("PERPS_AUTO_ENTRY_ENABLED", "false")).strip().lower()
+    if signal_enabled_raw not in {"true", "false"} or auto_entry_raw not in {"true", "false"}:
+        raise ValueError("Perps signal/auto-entry flags must be exactly true or false")
+    signal_evaluation_enabled = signal_enabled_raw == "true"
+    auto_entry_enabled = auto_entry_raw == "true"
+    if auto_entry_enabled and (not paper_enabled or not signal_evaluation_enabled):
+        raise ValueError("Perps auto-entry requires the Paper engine and signal evaluation")
+    strategy = strategy_from_env() if signal_evaluation_enabled and paper_enabled else None
     current_paper_engine = paper_engine
     if paper_enabled and current_paper_engine is None:
         factory = paper_engine_factory or PerpsPaperEngine
@@ -242,7 +260,12 @@ def run_worker(
         "paper_funding_gaps_last_cycle": 0,
         "paper_exit_blocks_last_cycle": 0,
         "paper_snapshot_rejections_last_cycle": 0,
-        "paper_strategy_status": "not_configured",
+        "paper_strategy_status": "warming_up" if strategy is not None else "disabled",
+        "strategy_decisions_total": 0,
+        "signals_logged": 0,
+        "entries_opened_total": 0,
+        "entry_blocks_total": 0,
+        "strategy_last_reason": None,
         "paper_cash_balance": None,
         "paper_equity": None,
         "paper_daily_loss": None,
@@ -271,6 +294,12 @@ def run_worker(
                 paper_funding_gaps = 0
                 paper_exit_blocks = 0
                 paper_rejections = 0
+                strategy_decisions = 0
+                signals_logged = 0
+                entries_opened = 0
+                entry_blocks = 0
+                strategy_last_reason = None
+                strategy_state = "warming_up" if strategy is not None else "disabled"
                 paper_metrics = None
                 if current_paper_engine is not None:
                     for snapshot in snapshots:
@@ -283,6 +312,116 @@ def run_worker(
                             paper_exit_blocks += 1
                         elif outcome.get("status") == "PAPER_SNAPSHOT_REJECTED":
                             paper_rejections += 1
+
+                        if strategy is not None:
+                            cycle_now = datetime.now(timezone.utc)
+                            instrument_id = int(snapshot["instrument"]["instrument_id"])
+                            history_rows = current_store.history(instrument_id, limit=5000)
+                            history = [
+                                {
+                                    "observed_at": row.get("received_at"),
+                                    "mark_price": row.get("mark_price"),
+                                }
+                                for row in history_rows
+                            ]
+                            flat_snapshot = flatten_perps_market_snapshot(snapshot, now=cycle_now)
+                            decision = strategy.evaluate(
+                                history,
+                                current_snapshot=flat_snapshot,
+                                now=cycle_now,
+                            )
+                            strategy_last_reason = str(decision.get("reason") or "unknown")[:120]
+                            if strategy_last_reason in {"warming_up_insufficient_completed_bars"}:
+                                strategy_state = "warming_up"
+                            elif strategy_last_reason in {
+                                "incomplete_contiguous_minute_history",
+                                "completed_bar_is_stale",
+                            }:
+                                strategy_state = "degraded"
+                            else:
+                                strategy_state = "active"
+
+                            bar_close_ms = decision.get("bar_close_ms")
+                            if (
+                                isinstance(bar_close_ms, int)
+                                and not isinstance(bar_close_ms, bool)
+                                and strategy_last_reason not in {
+                                    "warming_up_insufficient_completed_bars",
+                                    "incomplete_contiguous_minute_history",
+                                    "completed_bar_is_stale",
+                                    "snapshot_not_research_only",
+                                    "instrument_not_entry_eligible",
+                                    "instrument_settled",
+                                }
+                            ):
+                                claimed = current_paper_engine.claim_strategy_decision(
+                                    instrument_id,
+                                    bar_close_ms,
+                                    now=cycle_now,
+                                    stale_claim_seconds=300,
+                                )
+                                if claimed:
+                                    strategy_decisions += 1
+                                    signal = bool(decision.get("signal"))
+                                    metrics = {
+                                        key: value for key, value in decision.items()
+                                        if key not in {"strategy", "research_only", "execution"}
+                                        and isinstance(value, (str, int, float, bool, type(None)))
+                                    }
+                                    if not signal:
+                                        current_paper_engine.record_strategy_decision(
+                                            instrument_id,
+                                            bar_close_ms,
+                                            decision_status="no_signal",
+                                            reason=str(decision.get("reason") or "no_signal"),
+                                            metrics=metrics,
+                                            now=cycle_now,
+                                        )
+                                    else:
+                                        signals_logged += 1
+                                        side = str(decision.get("side") or "")
+                                        if not auto_entry_enabled:
+                                            current_paper_engine.record_strategy_decision(
+                                                instrument_id,
+                                                bar_close_ms,
+                                                decision_status="signal_logged",
+                                                reason=str(decision.get("reason") or "signal_logged"),
+                                                metrics=metrics,
+                                                side=side,
+                                                now=cycle_now,
+                                            )
+                                        else:
+                                            entry = current_paper_engine.open_position(
+                                                snapshot,
+                                                side=side,
+                                                requested_notional=decision.get("entry_notional_usd"),
+                                                stop_loss_distance_pct=decision.get("stop_loss_distance_pct"),
+                                                reward_risk_multiple=decision.get("reward_risk_multiple", "2"),
+                                                now=cycle_now,
+                                            )
+                                            if entry.get("status") == "PAPER_POSITION_OPEN":
+                                                entries_opened += 1
+                                                current_paper_engine.record_strategy_decision(
+                                                    instrument_id,
+                                                    bar_close_ms,
+                                                    decision_status="entry_opened",
+                                                    reason=str(decision.get("reason") or "entry_opened"),
+                                                    metrics=metrics,
+                                                    side=side,
+                                                    trade_id=entry.get("trade_id"),
+                                                    now=cycle_now,
+                                                )
+                                            else:
+                                                entry_blocks += 1
+                                                current_paper_engine.record_strategy_decision(
+                                                    instrument_id,
+                                                    bar_close_ms,
+                                                    decision_status="entry_blocked",
+                                                    reason=str(entry.get("reason") or "entry_blocked"),
+                                                    metrics=metrics,
+                                                    side=side,
+                                                    now=cycle_now,
+                                                )
                     paper_metrics = current_paper_engine.account_metrics()
                     if paper_metrics.get("stale_open_position"):
                         paper_rejections += 1
@@ -312,7 +451,12 @@ def run_worker(
                         "paper_funding_gaps_last_cycle": paper_funding_gaps,
                         "paper_exit_blocks_last_cycle": paper_exit_blocks,
                         "paper_snapshot_rejections_last_cycle": paper_rejections,
-                        "paper_strategy_status": "not_configured",
+                        "paper_strategy_status": strategy_state,
+                        "strategy_decisions_total": int(current_paper_engine.strategy_decision_summary()["decisions_total"]),
+                        "signals_logged": int(current_paper_engine.strategy_decision_summary()["signals_logged"]),
+                        "entries_opened_total": int(current_paper_engine.strategy_decision_summary()["entries_opened"]),
+                        "entry_blocks_total": int(current_paper_engine.strategy_decision_summary()["entry_blocks"]),
+                        "strategy_last_reason": strategy_last_reason,
                         "paper_cash_balance": str(paper_metrics.get("cash_balance")),
                         "paper_equity": str(paper_metrics.get("equity")),
                         "paper_daily_loss": str(paper_metrics.get("daily_loss")),

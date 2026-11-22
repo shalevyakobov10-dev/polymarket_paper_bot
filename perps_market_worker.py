@@ -18,6 +18,7 @@ from perps_market_data import PerpsPublicMarketDataProvider
 from perps_market_history_store import PerpsMarketHistoryStore
 from perps_paper_config import perps_engine_options_from_env
 from perps_paper_engine import PerpsPaperEngine
+from perps_signal_strategy import PerpsEmaMomentumStrategy, strategy_from_env
 
 
 def _utc_now() -> str:
@@ -116,6 +117,31 @@ def _sanitize_paper_summary(value: Any) -> dict[str, Any] | None:
             if isinstance(key, str) and isinstance(count, int) and not isinstance(count, bool) and count >= 0:
                 counts[key[:80]] = count
         summary["event_counts"] = counts
+    shadow = value.get("ema_shadow")
+    if isinstance(shadow, dict):
+        safe_shadow: dict[str, Any] = {
+            "strategy": "ema_8_21_momentum_volatility_v1",
+            "mode": "shadow_only",
+            "order_submission_allowed": False,
+        }
+        for field in ("decisions_total", "signals", "no_signal"):
+            raw = shadow.get(field)
+            if isinstance(raw, int) and not isinstance(raw, bool) and raw >= 0:
+                safe_shadow[field] = raw
+        latest = shadow.get("latest")
+        if isinstance(latest, dict):
+            safe_latest = {}
+            for field in ("instrument_id", "bar_close_ms", "completed_bars"):
+                raw = latest.get(field)
+                if isinstance(raw, int) and not isinstance(raw, bool) and raw >= 0:
+                    safe_latest[field] = raw
+            for field in ("strategy_name", "decision_status", "side", "reason", "evaluated_at"):
+                raw = latest.get(field)
+                if isinstance(raw, str):
+                    safe_latest[field] = raw[:120]
+            if safe_latest:
+                safe_shadow["latest"] = safe_latest
+        summary["ema_shadow"] = safe_shadow
     return summary
 
 
@@ -157,6 +183,10 @@ def read_perps_worker_status(path: str | Path) -> dict[str, Any]:
                 "disabled", "starting", "healthy", "halted", "degraded"
             } else "unknown",
             "paper_engine": _sanitize_paper_summary(raw.get("paper_engine")),
+            "ema_shadow_enabled": raw.get("ema_shadow_enabled") is True,
+            "ema_shadow_evaluations_last_cycle": _status_count(raw.get("ema_shadow_evaluations_last_cycle", 0), "ema_shadow_evaluations_last_cycle"),
+            "ema_shadow_signals_last_cycle": _status_count(raw.get("ema_shadow_signals_last_cycle", 0), "ema_shadow_signals_last_cycle"),
+            "ema_shadow_errors_last_cycle": _status_count(raw.get("ema_shadow_errors_last_cycle", 0), "ema_shadow_errors_last_cycle"),
             "last_backup_at": raw.get("last_backup_at"),
             "last_backup_manifest_name": str(raw.get("last_backup_manifest_name") or "")[:200] or None,
             "backup_files_last_run": _status_count(raw.get("backup_files_last_run", 0), "backup_files_last_run"),
@@ -206,6 +236,8 @@ def run_worker(
     history_retention_days: int | None = None,
     paper_engine: Any | None = None,
     paper_engine_enabled: bool | None = None,
+    ema_shadow_strategy: PerpsEmaMomentumStrategy | None = None,
+    ema_shadow_enabled: bool | None = None,
     backup_function: Any | None = create_paper_data_backups,
     backup_interval_hours: int | None = None,
     backup_directory: str | Path | None = None,
@@ -288,6 +320,24 @@ def run_worker(
         engine_created = True
     if current_engine is not None and not engine_enabled:
         raise ValueError("paper_engine was supplied while paper_engine_enabled is false")
+    if ema_shadow_enabled is None:
+        shadow_raw = str(os.getenv("PERPS_EMA_SHADOW_ENABLED", "false")).strip().lower()
+        if shadow_raw not in {"true", "false"}:
+            raise ValueError("PERPS_EMA_SHADOW_ENABLED must be exactly true or false")
+        shadow_enabled = shadow_raw == "true"
+    else:
+        if not isinstance(ema_shadow_enabled, bool):
+            raise ValueError("ema_shadow_enabled must be a boolean")
+        shadow_enabled = ema_shadow_enabled
+    if ema_shadow_strategy is not None:
+        shadow_enabled = True
+    if shadow_enabled and current_engine is None:
+        raise ValueError("EMA shadow evaluation requires the Perps Paper engine ledger")
+    shadow_strategy = (
+        ema_shadow_strategy
+        if ema_shadow_strategy is not None
+        else strategy_from_env() if shadow_enabled else None
+    )
     initial_paper_summary = current_engine.summary() if current_engine is not None else None
     state: dict[str, Any] = {
         "schema_version": 1, "enabled": True, "worker_state": "starting",
@@ -303,6 +353,10 @@ def run_worker(
             else "healthy" if current_engine is not None else "disabled"
         ),
         "paper_engine": initial_paper_summary,
+        "ema_shadow_enabled": shadow_enabled,
+        "ema_shadow_evaluations_last_cycle": 0,
+        "ema_shadow_signals_last_cycle": 0,
+        "ema_shadow_errors_last_cycle": 0,
         "last_backup_at": None,
         "last_backup_manifest_name": None,
         "backup_files_last_run": 0,
@@ -353,8 +407,84 @@ def run_worker(
                             # The engine detects missing/ambiguous published
                             # settlements and halts new entries; exits still run.
                             continue
+                    shadow_evaluations = 0
+                    shadow_signals = 0
+                    shadow_errors = 0
                     for market_snapshot in snapshots:
+                        if shadow_strategy is not None:
+                            try:
+                                received_raw = market_snapshot.get("received_at")
+                                if not isinstance(received_raw, str):
+                                    raise ValueError("snapshot_received_at_missing")
+                                evaluated_at = datetime.fromisoformat(
+                                    received_raw.replace("Z", "+00:00")
+                                )
+                                if evaluated_at.tzinfo is None or evaluated_at.utcoffset() is None:
+                                    raise ValueError("snapshot_received_at_not_timezone_aware")
+                                instrument = market_snapshot.get("instrument")
+                                ticker = market_snapshot.get("ticker")
+                                if not isinstance(instrument, dict) or not isinstance(ticker, dict):
+                                    raise ValueError("snapshot_instrument_or_ticker_missing")
+                                instrument_id = int(instrument["instrument_id"])
+                                history_rows = current_store.history(
+                                    instrument_id,
+                                    limit=5000,
+                                    as_of_received_at=evaluated_at,
+                                )
+                                strategy_history = [
+                                    {
+                                        "observed_at": row.get("received_at"),
+                                        "mark_price": (
+                                            row.get("ticker", {}).get("mark_price")
+                                            if isinstance(row.get("ticker"), dict) else None
+                                        ),
+                                    }
+                                    for row in history_rows
+                                ]
+                                close_only = instrument.get("close_only") is True
+                                settled = instrument.get("settlement") is not None
+                                decision = shadow_strategy.evaluate(
+                                    strategy_history,
+                                    current_snapshot={
+                                        "research_only": True,
+                                        "execution": "none",
+                                        "entry_eligible": not close_only and not settled,
+                                        "close_only": close_only,
+                                        "settlement": settled,
+                                    },
+                                    now=evaluated_at,
+                                )
+                                skipped_reasons = {
+                                    "warming_up_insufficient_completed_bars",
+                                    "incomplete_contiguous_minute_history",
+                                    "completed_bar_is_stale",
+                                    "snapshot_not_research_only",
+                                    "instrument_not_entry_eligible",
+                                    "instrument_settled",
+                                }
+                                if (
+                                    isinstance(decision, dict)
+                                    and decision.get("reason") not in skipped_reasons
+                                    and isinstance(decision.get("bar_close_ms"), int)
+                                    and not isinstance(decision.get("bar_close_ms"), bool)
+                                    and decision.get("completed_bars", 0) >= shadow_strategy.config.minimum_completed_bars
+                                ):
+                                    saved = current_engine.record_ema_shadow_decision(
+                                        instrument_id,
+                                        decision,
+                                        evaluated_at=evaluated_at,
+                                    )
+                                    if saved:
+                                        shadow_evaluations += 1
+                                        shadow_signals += int(decision.get("signal") is True)
+                            except Exception:
+                                # Shadow research must never interrupt the existing
+                                # portfolio's liquidation/stop/funding management.
+                                shadow_errors += 1
                         current_engine.process_snapshot(market_snapshot, current_store)
+                    state["ema_shadow_evaluations_last_cycle"] = shadow_evaluations
+                    state["ema_shadow_signals_last_cycle"] = shadow_signals
+                    state["ema_shadow_errors_last_cycle"] = shadow_errors
                     paper_summary = current_engine.summary()
                     state["paper_engine"] = paper_summary
                     state["paper_engine_state"] = (

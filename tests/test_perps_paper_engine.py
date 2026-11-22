@@ -557,7 +557,7 @@ class PerpsPaperEngineTests(unittest.TestCase):
                 stale_ms = int((datetime.now(timezone.utc) - timedelta(seconds=120)).timestamp() * 1000)
                 snapshot = make_snapshot(timestamp_ms=stale_ms)
                 with self.assertRaisesRegex(ValueError, "stale"):
-                    engine.process_snapshot(snapshot, FakeHistory())
+                    process_snapshot_at_capture(engine, snapshot, FakeHistory())
 
     def test_stale_exchange_timestamp_is_rejected(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -568,7 +568,7 @@ class PerpsPaperEngineTests(unittest.TestCase):
                     snapshot["book"]["timestamp_ms"] / 1000, tz=timezone.utc
                 )
                 with self.assertRaisesRegex(ValueError, "future-dated"):
-                    process_snapshot_at_capture(engine, snapshot, FakeHistory(), now=captured_at)
+                    engine.process_snapshot(snapshot, FakeHistory(), now=captured_at)
 
     def test_invalid_configuration_fails_closed(self):
         with tempfile.TemporaryDirectory() as directory:

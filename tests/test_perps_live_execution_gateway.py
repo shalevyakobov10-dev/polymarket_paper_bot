@@ -284,7 +284,7 @@ class PerpsLiveExecutionGatewayTests(unittest.IsolatedAsyncioTestCase):
     async def test_required_initial_margin_must_fit_account_available_margin(self):
         self.preflight.report["observations"]["margin_available"] = "5"
         result = await self.submit()
-        self.assertEqual(result["reason_code"], "insufficient_available_initial_margin")
+        self.assertEqual(result["reason_code"], "insufficient_available_initial_margin_and_entry_fee")
         self.assertEqual(self.session.place_calls, [])
 
     async def test_target_instrument_must_be_isolated_and_at_or_below_two_x(self):

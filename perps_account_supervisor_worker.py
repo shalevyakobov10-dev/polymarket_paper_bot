@@ -185,6 +185,7 @@ async def run_perps_account_supervisor_worker(
     poll_interval_seconds: int = 30,
     cycle_timeout_seconds: float = 60.0,
     max_consecutive_failures: int = 10,
+    max_cycles: int | None = None,
     now_provider: Callable[[], datetime] | None = None,
     sleep: Callable[[float], Any] = asyncio.sleep,
 ) -> int:
@@ -217,7 +218,7 @@ async def run_perps_account_supervisor_worker(
                 now_provider=now_provider,
                 sleep=sleep,
             )
-            return await supervisor.run(stop_event=stop_event)
+            return await supervisor.run(stop_event=stop_event, max_cycles=max_cycles)
 
 
 async def _run_from_environment(args: argparse.Namespace) -> int:
@@ -225,10 +226,6 @@ async def _run_from_environment(args: argparse.Namespace) -> int:
     secrets_path = args.secrets_file or os.environ.get("PERPS_ACCOUNT_SUPERVISOR_SECRETS_FILE")
     if not isinstance(secrets_path, str) or not secrets_path.strip():
         raise PerpsAccountSecretsError("perps_account_secrets_file_not_configured")
-
-    secrets = load_perps_account_secrets(secrets_path)
-    client, credentials = await create_secure_client_from_existing_credentials(secrets)
-    secrets.clear()
 
     database_path = args.database or os.environ.get(
         "PERPS_ORDER_JOURNAL_DB", str(data_dir / "perps_order_journal.sqlite3")
@@ -243,6 +240,10 @@ async def _run_from_environment(args: argparse.Namespace) -> int:
     poll = args.poll_interval or int(os.environ.get("PERPS_ACCOUNT_SUPERVISOR_POLL_SECONDS", "30"))
     cycle_timeout = float(os.environ.get("PERPS_ACCOUNT_SUPERVISOR_CYCLE_TIMEOUT_SECONDS", "60"))
     max_failures = int(os.environ.get("PERPS_ACCOUNT_SUPERVISOR_MAX_FAILURES", "10"))
+
+    secrets = load_perps_account_secrets(secrets_path)
+    client, credentials = await create_secure_client_from_existing_credentials(secrets)
+    secrets.clear()
 
     stop_event = asyncio.Event()
     loop = asyncio.get_running_loop()

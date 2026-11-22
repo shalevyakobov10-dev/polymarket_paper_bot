@@ -27,12 +27,12 @@ jobs:
         env:
           PERPS_MARKET_LIMIT: "10"
           PERPS_POLL_INTERVAL_SECONDS: "30"
-          PERPS_MARKET_HISTORY_DB: \${{ runner.temp }}/perps-market-history.sqlite3
-          PERPS_MARKET_WORKER_STATUS_FILE: \${{ runner.temp }}/perps-market-worker-status.json
+          PERPS_MARKET_HISTORY_DB: ${{ runner.temp }}/perps-market-history.sqlite3
+          PERPS_MARKET_WORKER_STATUS_FILE: ${{ runner.temp }}/perps-market-worker-status.json
         run: python perps_market_worker.py --once
       - name: Assert public market-data status is healthy and non-executable
         env:
-          PERPS_MARKET_WORKER_STATUS_FILE: \${{ runner.temp }}/perps-market-worker-status.json
+          PERPS_MARKET_WORKER_STATUS_FILE: ${{ runner.temp }}/perps-market-worker-status.json
         run: |
           python - <<'PY'
           import json

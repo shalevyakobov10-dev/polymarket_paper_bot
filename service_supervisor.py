@@ -38,6 +38,8 @@ class SupervisorConfig:
     monitor_env: dict[str, str] | None
     paper_worker_command: tuple[str, ...] | None
     paper_worker_env: dict[str, str] | None
+    perps_worker_command: tuple[str, ...] | None
+    perps_worker_env: dict[str, str] | None
     status_path: Path
     poll_interval_seconds: float = 1.0
     monitor_restart_base_seconds: float = 2.0
@@ -118,10 +120,30 @@ def build_supervisor_config(
         source.get("EVENT_PAPER_WORKER_STATUS_FILE", str(data_dir / "event_paper_worker_status.json"))
     )
 
+    perps_enabled_raw = str(source.get("ENABLE_PERPS_MARKET_DATA_WORKER", "false")).strip().lower()
+    if perps_enabled_raw not in {"true", "false"}:
+        raise ValueError("ENABLE_PERPS_MARKET_DATA_WORKER must be exactly true or false")
+    perps_worker_enabled = perps_enabled_raw == "true"
+    perps_worker_env = dict(app_env)
+    perps_worker_env["DATA_DIR"] = str(data_dir)
+    perps_worker_env["PERPS_MARKET_HISTORY_DB"] = str(
+        source.get("PERPS_MARKET_HISTORY_DB", str(data_dir / "perps_market_history.sqlite3"))
+    )
+    perps_worker_env["PERPS_MARKET_WORKER_STATUS_FILE"] = str(
+        source.get("PERPS_MARKET_WORKER_STATUS_FILE", str(data_dir / "perps_market_worker_status.json"))
+    )
+    perps_worker_env.setdefault("PERPS_POLL_INTERVAL_SECONDS", "30")
+    perps_worker_env.setdefault("PERPS_MARKET_LIMIT", "10")
+    perps_worker_env["DRY_RUN"] = "true"
+    perps_worker_env["LIVE_EXECUTION_ENABLED"] = "false"
+
     executable = python_executable or sys.executable
     app_command = (executable, "app.py")
     paper_worker_command: tuple[str, ...] | None = (
         (executable, "event_paper_worker.py") if paper_worker_enabled else None
+    )
+    perps_worker_command: tuple[str, ...] | None = (
+        (executable, "perps_market_worker.py") if perps_worker_enabled else None
     )
     monitor_command: tuple[str, ...] | None = None
 
@@ -161,6 +183,8 @@ def build_supervisor_config(
         monitor_env=monitor_env if monitor_enabled else None,
         paper_worker_command=paper_worker_command,
         paper_worker_env=paper_worker_env if paper_worker_enabled else None,
+        perps_worker_command=perps_worker_command,
+        perps_worker_env=perps_worker_env if perps_worker_enabled else None,
         status_path=status_path,
         poll_interval_seconds=min(poll_interval, 10.0),
     )
@@ -212,16 +236,22 @@ def run_supervisor(
     monitor_state = "starting" if monitor_enabled else "disabled"
     paper_worker_enabled = config.paper_worker_command is not None
     paper_worker_state = "starting" if paper_worker_enabled else "disabled"
+    perps_worker_enabled = config.perps_worker_command is not None
+    perps_worker_state = "starting" if perps_worker_enabled else "disabled"
     service_state = "starting"
     monitor_process = None
     paper_worker_process = None
+    perps_worker_process = None
     app_process = None
     monitor_failures = 0
     paper_worker_failures = 0
+    perps_worker_failures = 0
     last_monitor_exit_code: int | None = None
     next_restart_at: str | None = None
     last_paper_worker_exit_code: int | None = None
     paper_worker_next_restart_at: str | None = None
+    last_perps_worker_exit_code: int | None = None
+    perps_worker_next_restart_at: str | None = None
     app_exit_code: int | None = None
 
     def publish_status() -> None:
@@ -239,6 +269,11 @@ def run_supervisor(
                 event_paper_worker_restart_count=paper_worker_failures,
                 event_paper_worker_last_exit_code=last_paper_worker_exit_code,
                 event_paper_worker_next_restart_at=paper_worker_next_restart_at,
+                perps_market_worker_enabled=perps_worker_enabled,
+                perps_market_worker_state=perps_worker_state,
+                perps_market_worker_restart_count=perps_worker_failures,
+                perps_market_worker_last_exit_code=last_perps_worker_exit_code,
+                perps_market_worker_next_restart_at=perps_worker_next_restart_at,
             )
             write_supervisor_status(config.status_path, payload)
         except (OSError, TypeError, ValueError) as exc:
@@ -281,6 +316,16 @@ def run_supervisor(
         else:
             paper_worker_state = "disabled"
             log.info("event-aware paper research worker is disabled")
+        if perps_worker_enabled:
+            perps_worker_process = popen_factory(
+                list(config.perps_worker_command or ()),
+                env=dict(config.perps_worker_env or {}),
+            )
+            perps_worker_state = "running"
+            log.info("started public Perps market-data worker")
+        else:
+            perps_worker_state = "disabled"
+            log.info("public Perps market-data worker is disabled")
         if not monitor_enabled:
             log.info("authenticated account monitor is disabled")
         else:
@@ -300,9 +345,11 @@ def run_supervisor(
                 service_state = "app_failed"
                 monitor_state = "stopped" if monitor_enabled else "disabled"
                 paper_worker_state = "stopped" if paper_worker_enabled else "disabled"
+                perps_worker_state = "stopped" if perps_worker_enabled else "disabled"
                 app_exit_code = int(app_code)
                 next_restart_at = None
                 paper_worker_next_restart_at = None
+                perps_worker_next_restart_at = None
                 publish_status()
                 return int(app_code) if int(app_code) != 0 else 1
 
@@ -335,6 +382,38 @@ def run_supervisor(
                     )
                     paper_worker_state = "running"
                     paper_worker_next_restart_at = None
+                    publish_status()
+                    continue
+
+            if perps_worker_process is not None:
+                perps_code = perps_worker_process.poll()
+                if perps_code is not None:
+                    perps_worker_failures += 1
+                    last_perps_worker_exit_code = int(perps_code)
+                    delay = monitor_restart_delay(
+                        perps_worker_failures,
+                        base_seconds=config.monitor_restart_base_seconds,
+                        max_seconds=config.monitor_restart_max_seconds,
+                    )
+                    perps_worker_next_restart_at = (
+                        datetime.now(timezone.utc) + timedelta(seconds=delay)
+                    ).isoformat()
+                    perps_worker_state = "restarting"
+                    publish_status()
+                    log.warning(
+                        "Perps market-data worker exited with code %s; restart %s in %.1f seconds",
+                        perps_code,
+                        perps_worker_failures,
+                        delay,
+                    )
+                    if wait_with_heartbeat(delay):
+                        break
+                    perps_worker_process = popen_factory(
+                        list(config.perps_worker_command or ()),
+                        env=dict(config.perps_worker_env or {}),
+                    )
+                    perps_worker_state = "running"
+                    perps_worker_next_restart_at = None
                     publish_status()
                     continue
 
@@ -379,20 +458,25 @@ def run_supervisor(
         service_state = "startup_failed"
         monitor_state = "stopped" if monitor_enabled else "disabled"
         paper_worker_state = "stopped" if paper_worker_enabled else "disabled"
+        perps_worker_state = "stopped" if perps_worker_enabled else "disabled"
         next_restart_at = None
         paper_worker_next_restart_at = None
+        perps_worker_next_restart_at = None
         publish_status()
         raise
     finally:
         _stop_child(monitor_process)
         _stop_child(paper_worker_process)
+        _stop_child(perps_worker_process)
         _stop_child(app_process)
         if service_state != "app_failed" and service_state != "startup_failed":
             service_state = "stopped"
             monitor_state = "stopped" if monitor_enabled else "disabled"
             paper_worker_state = "stopped" if paper_worker_enabled else "disabled"
+            perps_worker_state = "stopped" if perps_worker_enabled else "disabled"
             next_restart_at = None
             paper_worker_next_restart_at = None
+            perps_worker_next_restart_at = None
             publish_status()
 
 

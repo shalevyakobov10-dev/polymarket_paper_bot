@@ -1654,13 +1654,20 @@ class Handler(BaseHTTPRequestHandler):
                     engine_enabled = worker_snapshot.get("paper_engine_enabled") is True
                     engine_state = worker_snapshot.get("paper_engine_state", "unknown")
                     supervisor_worker_state = supervisor_snapshot.get("perps_market_worker_state")
-                    if supervisor_worker_state != "running":
-                        engine_state = perps_worker_supervision_health(
-                            supervisor_worker_state, worker_snapshot
-                        )["status"]
-                        worker_snapshot["paper_engine_degraded_reason"] = (
-                            "supervisor_worker_" + str(supervisor_worker_state or "unavailable")
-                        )
+                    perps_supervision = perps_worker_supervision_health(
+                        supervisor_worker_state, worker_snapshot
+                    )
+                    if perps_supervision["status"] != "healthy" and engine_state != "halted":
+                        engine_state = perps_supervision["status"]
+                        if not worker_snapshot.get("paper_engine_degraded_reason"):
+                            reason_prefix = (
+                                "supervisor_worker_"
+                                if supervisor_worker_state != "running"
+                                else "perps_market_worker_"
+                            )
+                            worker_snapshot["paper_engine_degraded_reason"] = (
+                                reason_prefix + perps_supervision["status"]
+                            )
                 else:
                     worker_snapshot = {
                         "paper_engine_degraded_reason": None,

@@ -66,12 +66,22 @@ class PointInTimePerpsHistory:
         *,
         tolerance_ms: int = 1000,
     ) -> dict[str, Any] | None:
-        return self._store.funding_rate_at(
+        settlement = self._store.funding_rate_at(
             instrument_id,
             timestamp_ms,
             tolerance_ms=tolerance_ms,
             as_of_received_at=self._as_of,
         )
+        if not isinstance(settlement, dict):
+            return None
+        try:
+            settlement_ms = int(settlement["timestamp_ms"])
+        except (KeyError, TypeError, ValueError, OverflowError):
+            return None
+        # Receipt-time filtering alone is not enough if an archived settlement
+        # row carries a future event timestamp. Require both clocks to be past.
+        decision_ms = int(self._as_of.timestamp() * 1000)
+        return settlement if 0 < settlement_ms <= decision_ms else None
 
 
 def _engine_snapshot(row: dict[str, Any]) -> dict[str, Any]:

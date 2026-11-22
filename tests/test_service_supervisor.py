@@ -248,9 +248,11 @@ class SupervisorTests(unittest.TestCase):
                 '{"last_heartbeat_at":"2026-11-22T08:00:10+00:00"}',
                 encoding="utf-8",
             )
+            # Future timestamps are treated as no new heartbeat; restart timing
+            # remains anchored to this process launch rather than looping immediately.
             self.assertEqual(
                 _perps_worker_heartbeat_age(path, worker_started_at=started, now=now),
-                float("inf"),
+                10.0,
             )
 
     def test_perps_heartbeat_watchdog_restarts_a_hung_but_running_process(self):

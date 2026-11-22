@@ -265,6 +265,15 @@ class PerpsPaperEngine:
             "SELECT * FROM perps_paper_positions WHERE status='OPEN' ORDER BY position_id"
         ).fetchall()
 
+    def open_instrument_ids(self) -> list[int]:
+        """Return every instrument that currently has an open isolated position."""
+        with self._lock:
+            rows = self.db.execute(
+                "SELECT DISTINCT instrument_id FROM perps_paper_positions "
+                "WHERE status='OPEN' ORDER BY instrument_id"
+            ).fetchall()
+            return [int(row["instrument_id"]) for row in rows]
+
     @staticmethod
     def _current_fee_rate(snapshot: dict[str, Any], now: datetime) -> Decimal | None:
         fees = snapshot.get("fees")
@@ -800,8 +809,11 @@ class PerpsPaperEngine:
         history_store: Any,
         *,
         now: datetime | None = None,
+        allow_new_entries: bool = True,
     ) -> dict[str, Any]:
         """Process one public snapshot idempotently and return a sanitized state."""
+        if not isinstance(allow_new_entries, bool):
+            raise ValueError("allow_new_entries must be a boolean")
         if not isinstance(snapshot, dict):
             raise ValueError("snapshot must be an object")
         instrument = snapshot.get("instrument")
@@ -934,6 +946,11 @@ class PerpsPaperEngine:
                     self._event(
                         snapshot_key, instrument_id, "ENTRY_BLOCKED", captured_now,
                         {"reason": "instrument_close_only"},
+                    )
+                elif not allow_new_entries:
+                    self._event(
+                        snapshot_key, instrument_id, "ENTRY_BLOCKED", captured_now,
+                        {"reason": "open_position_market_data_incomplete"},
                     )
                 else:
                     self._try_open(snapshot, history_store, captured_now, snapshot_key)

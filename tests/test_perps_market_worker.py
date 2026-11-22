@@ -254,13 +254,6 @@ class PerpsMarketWorkerTests(unittest.TestCase):
             store = OrderedStore(order)
             engine = OrderedEngine(order)
             provider.order = order
-            original_load_funding = provider.load_funding_history
-
-            def ordered_fetch(*args, **kwargs):
-                order.append("fetch_funding")
-                return original_load_funding(*args, **kwargs)
-
-            provider.load_funding_history = ordered_fetch
             result = run_worker(
                 provider=provider,
                 store=store,

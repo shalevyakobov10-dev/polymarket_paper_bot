@@ -1310,7 +1310,7 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def do_GET(self):
-        if self.path in ("/", "/status", "/health", "/paper", "/news", "/matches", "/market-stream", "/resolutions", "/forecast-evaluation", "/research-features", "/independent-model-evaluation", "/model-forecasts", "/learning", "/execution-readiness", "/service-supervisor", "/event-paper", "/perps-market"):
+        if self.path in ("/", "/status", "/health", "/paper", "/news", "/matches", "/market-stream", "/resolutions", "/forecast-evaluation", "/research-features", "/independent-model-evaluation", "/model-forecasts", "/learning", "/execution-readiness", "/service-supervisor", "/event-paper", "/perps-market", "/perps-paper"):
             with _lock:
                 snapshot = dict(_state)
             if self.path == "/health":
@@ -1379,6 +1379,32 @@ class Handler(BaseHTTPRequestHandler):
                         payload["status"] = "unhealthy"
                         payload["required_component_failures"].append("perps_market_data")
                     payload["health_policy"] += "; perps_market_data_is_required_when_enabled"
+                    if perps_snapshot.get("paper_engine_enabled") is True:
+                        engine_state = perps_snapshot.get("paper_engine_state") or "unknown"
+                        engine_summary = perps_snapshot.get("paper_engine") or {}
+                        engine_status = (
+                            "halted" if engine_state == "halted"
+                            else "healthy" if engine_state == "healthy"
+                            else "starting" if engine_state == "starting"
+                            else "degraded"
+                        )
+                        payload["components"]["perps_paper_engine"] = {
+                            "name": "perps_paper_engine",
+                            "status": engine_status,
+                            "worker_state": engine_state,
+                            "halt_reason": engine_summary.get("halt_reason"),
+                            "open_positions": engine_summary.get("open_positions", 0),
+                            "closed_positions": engine_summary.get("closed_positions", 0),
+                            "live_execution_enabled": False,
+                            "order_submission_allowed": False,
+                        }
+                        payload["required_components"].append("perps_paper_engine")
+                        if engine_status != "healthy":
+                            healthy = False
+                            payload["ok"] = False
+                            payload["status"] = "unhealthy"
+                            payload["required_component_failures"].append("perps_paper_engine")
+                        payload["health_policy"] += "; perps_paper_engine_is_required_when_enabled"
                 self._send(200 if healthy else 503, payload)
             elif self.path == "/paper":
                 self._send(200, get_paper_trader().snapshot())
@@ -1479,6 +1505,27 @@ class Handler(BaseHTTPRequestHandler):
                     "execution": "none",
                 })
                 self._send(200, worker_snapshot)
+            elif self.path == "/perps-paper":
+                supervisor_snapshot = read_supervisor_status(SUPERVISOR_STATUS_FILE)
+                if supervisor_snapshot.get("perps_market_worker_enabled") is True:
+                    worker_snapshot = read_perps_worker_status(PERPS_MARKET_WORKER_STATUS_FILE)
+                    engine_summary = worker_snapshot.get("paper_engine") or {}
+                    engine_enabled = worker_snapshot.get("paper_engine_enabled") is True
+                    engine_state = worker_snapshot.get("paper_engine_state", "unknown")
+                else:
+                    engine_summary = None
+                    engine_enabled = False
+                    engine_state = "disabled"
+                self._send(200, {
+                    "mode": "POLYMARKET_PERPS_ISOLATED_MARGIN_PAPER",
+                    "enabled": engine_enabled,
+                    "worker_state": engine_state,
+                    "portfolio": engine_summary,
+                    "research_only": True,
+                    "live_execution_enabled": False,
+                    "order_submission_allowed": False,
+                    "execution": "none",
+                })
             elif self.path == "/service-supervisor":
                 payload = read_supervisor_status(SUPERVISOR_STATUS_FILE)
                 payload["event_paper_worker"] = read_event_paper_worker_status(EVENT_PAPER_WORKER_STATUS_FILE)

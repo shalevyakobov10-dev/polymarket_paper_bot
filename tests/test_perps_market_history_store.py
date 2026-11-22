@@ -287,8 +287,26 @@ class PerpsMarketHistoryStoreTests(unittest.TestCase):
                 old = sample_snapshot(11, "2026-10-01T00:00:00+00:00")
                 new = sample_snapshot(12, "2026-11-22T08:00:00+00:00")
                 store.record_snapshots([old, new])
+                store.record_funding_history(11, [{
+                    "instrument_id": 11,
+                    "timestamp_ms": int(datetime(2026, 10, 1, tzinfo=timezone.utc).timestamp() * 1000),
+                    "funding_rate": "0.0001",
+                }], received_at="2026-10-01T00:00:00+00:00")
+                store.record_funding_history(12, [{
+                    "instrument_id": 12,
+                    "timestamp_ms": int(datetime(2026, 11, 22, tzinfo=timezone.utc).timestamp() * 1000),
+                    "funding_rate": "0.0002",
+                }], received_at="2026-11-22T00:00:00+00:00")
                 result = store.prune_before("2026-11-01T00:00:00+00:00")
-                self.assertEqual(result, {"deleted": 1, "remaining": 1})
+                self.assertEqual(result, {
+                    "deleted": 2,
+                    "snapshot_rows_deleted": 1,
+                    "funding_rows_deleted": 1,
+                    "remaining": 1,
+                })
+                self.assertIsNone(store.funding_rate_at(
+                    11, int(datetime(2026, 10, 1, tzinfo=timezone.utc).timestamp() * 1000)
+                ))
                 self.assertEqual(store.count(), 1)
                 self.assertEqual(store.latest()[0]["symbol"], "ASSET12-PERP")
 

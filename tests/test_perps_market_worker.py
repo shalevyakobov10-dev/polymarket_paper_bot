@@ -206,6 +206,76 @@ class PerpsMarketWorkerTests(unittest.TestCase):
             self.assertEqual(safe["backup_files_last_run"], 2)
             self.assertEqual(safe["backup_consecutive_failures"], 0)
 
+    def test_worker_fetches_and_persists_exact_funding_before_engine_processing(self):
+        class OrderedProvider(FakeProvider):
+            def __init__(self):
+                super().__init__()
+                self.order = []
+
+            def load_funding_history(self, instrument_id, *, start_timestamp_ms, end_timestamp_ms):
+                self.order.append("fetch_funding")
+                self.asserted_window = (instrument_id, start_timestamp_ms, end_timestamp_ms)
+                return [{
+                    "instrument_id": instrument_id,
+                    "timestamp_ms": start_timestamp_ms,
+                    "funding_rate": "0.00025",
+                }]
+
+        class OrderedStore(FakeStore):
+            def __init__(self, order):
+                super().__init__()
+                self.order = order
+                self.funding_rows = []
+
+            def record_funding_history(self, instrument_id, entries, *, received_at=None):
+                self.order.append("persist_funding")
+                self.funding_rows.extend(entries)
+                return {"received": len(entries), "inserted": len(entries), "duplicates": 0}
+
+        class OrderedEngine(FakePaperEngine):
+            def __init__(self, order):
+                super().__init__()
+                self.order = order
+
+            def funding_requirements(self, snapshots):
+                return [{
+                    "instrument_id": 1,
+                    "start_timestamp_ms": 1795334400000,
+                    "end_timestamp_ms": 1795338000000,
+                }]
+
+            def process_snapshot(self, snapshot, history_store):
+                self.order.append("process_snapshot")
+                super().process_snapshot(snapshot, history_store)
+
+        with tempfile.TemporaryDirectory() as directory:
+            order = []
+            provider = OrderedProvider()
+            store = OrderedStore(order)
+            engine = OrderedEngine(order)
+            provider.order = order
+            original_load_funding = provider.load_funding_history
+
+            def ordered_fetch(*args, **kwargs):
+                order.append("fetch_funding")
+                return original_load_funding(*args, **kwargs)
+
+            provider.load_funding_history = ordered_fetch
+            result = run_worker(
+                provider=provider,
+                store=store,
+                paper_engine=engine,
+                paper_engine_enabled=True,
+                stop_event=FakeStopEvent(),
+                status_path=Path(directory) / "status.json",
+                poll_interval_seconds=15,
+                max_cycles=1,
+                backup_function=None,
+            )
+            self.assertEqual(result, 0)
+            self.assertEqual(order, ["fetch_funding", "persist_funding", "process_snapshot"])
+            self.assertEqual(store.funding_rows[0]["funding_rate"], "0.00025")
+
     def test_worker_marks_degraded_and_returns_failure_when_data_is_unavailable(self):
         with tempfile.TemporaryDirectory() as directory:
             target = Path(directory) / "status.json"

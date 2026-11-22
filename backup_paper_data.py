@@ -83,17 +83,23 @@ def _prune_orphaned_manifests(directory: Path) -> int:
 
 
 def _stage_json(directory: Path, payload: dict[str, Any]) -> Path:
-    with tempfile.NamedTemporaryFile(
-        mode="w", encoding="utf-8", dir=str(directory),
-        prefix=".paper-backup-manifest.", suffix=".tmp", delete=False,
-    ) as handle:
-        path = Path(handle.name)
-        json.dump(payload, handle, ensure_ascii=False, sort_keys=True, allow_nan=False, indent=2)
-        handle.write("\n")
-        handle.flush()
-        os.fsync(handle.fileno())
-    return path
-
+    temp_path: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w", encoding="utf-8", dir=str(directory),
+            prefix=".paper-backup-manifest.", suffix=".tmp", delete=False,
+        ) as handle:
+            temp_path = Path(handle.name)
+            json.dump(payload, handle, ensure_ascii=False, sort_keys=True, allow_nan=False, indent=2)
+            handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        result = temp_path
+        temp_path = None
+        return result
+    finally:
+        if temp_path is not None:
+            temp_path.unlink(missing_ok=True)
 
 def create_paper_data_backups(
     database_paths: Iterable[str | Path],

@@ -514,4 +514,4 @@ A scheduled GitHub Actions check (\`Perps public market-data smoke\`) fetches li
 
 ## Polymarket Perps Paper Engine
 
-The existing public Perps collector now feeds a separate, SQLite-backed Paper account with risk checks, visible-book fills, funding tracking, protective exits, retention, verified backups and a sanitized /perps-paper endpoint. See PERPS_PAPER_HE.md for design details and limitations. The Paper engine does not yet generate autonomous LONG/SHORT entries and cannot submit live orders.
+The existing public Perps collector now feeds a separate, SQLite-backed Paper account with risk checks, visible-book fills, funding tracking, protective exits, retention, verified backups and a sanitized /perps-paper endpoint. See PERPS_PAPER_HE.md for design details and limitations. An experimental EMA 8/21 research strategy now evaluates completed one-minute bars and records deduplicated signals. Paper auto-entry remains disabled by default; this subsystem cannot submit live orders.

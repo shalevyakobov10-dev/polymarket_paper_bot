@@ -30,6 +30,7 @@ from resilience import exponential_backoff_seconds, parse_retry_after
 from supervisor_status import read_supervisor_status
 from event_paper_worker import read_event_paper_worker_status
 from perps_market_worker import read_perps_worker_status
+from perps_account_supervisor import read_perps_account_supervisor_status
 from perps_live_release_gate import evaluate_perps_live_release_gate
 from control_center import CONTROL_CENTER_HTML
 
@@ -61,6 +62,10 @@ EVENT_PAPER_WORKER_STATUS_FILE = Path(os.getenv("EVENT_PAPER_WORKER_STATUS_FILE"
 PERPS_MARKET_WORKER_STATUS_FILE = Path(os.getenv(
     "PERPS_MARKET_WORKER_STATUS_FILE",
     str(DATA_DIR / "perps_market_worker_status.json"),
+))
+PERPS_ACCOUNT_SUPERVISOR_STATUS_FILE = Path(os.getenv(
+    "PERPS_ACCOUNT_SUPERVISOR_STATUS_FILE",
+    str(DATA_DIR / "perps_account_supervisor_status.json"),
 ))
 SNAPSHOTS = DATA_DIR / "market_snapshots.jsonl"
 SIGNALS = DATA_DIR / "candidate_signals.jsonl"
@@ -1460,7 +1465,7 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         if self.path in ("/control-center", "/control-center/"):
             self._send_html(200, CONTROL_CENTER_HTML)
-        elif self.path in ("/", "/status", "/health", "/paper", "/news", "/matches", "/market-stream", "/resolutions", "/forecast-evaluation", "/research-features", "/independent-model-evaluation", "/model-forecasts", "/learning", "/execution-readiness", "/service-supervisor", "/event-paper", "/perps-market", "/perps-paper", "/perps-live-gate"):
+        elif self.path in ("/", "/status", "/health", "/paper", "/news", "/matches", "/market-stream", "/resolutions", "/forecast-evaluation", "/research-features", "/independent-model-evaluation", "/model-forecasts", "/learning", "/execution-readiness", "/service-supervisor", "/event-paper", "/perps-market", "/perps-paper", "/perps-account-supervisor", "/perps-live-gate"):
             with _lock:
                 snapshot = dict(_state)
             if self.path == "/health":
@@ -1734,6 +1739,18 @@ class Handler(BaseHTTPRequestHandler):
                     "order_submission_allowed": False,
                     "execution": "none",
                 })
+            elif self.path == "/perps-account-supervisor":
+                payload = read_perps_account_supervisor_status(
+                    PERPS_ACCOUNT_SUPERVISOR_STATUS_FILE
+                )
+                payload.update({
+                    "read_only": True,
+                    "order_submission_allowed": False,
+                    "order_signing_allowed": False,
+                    "new_order_permission": False,
+                    "execution": "none",
+                })
+                self._send(200, payload)
             elif self.path == "/perps-live-gate":
                 payload = evaluate_perps_live_release_gate()
                 payload.update({
@@ -1746,6 +1763,9 @@ class Handler(BaseHTTPRequestHandler):
                 payload = read_supervisor_status(SUPERVISOR_STATUS_FILE)
                 payload["event_paper_worker"] = read_event_paper_worker_status(EVENT_PAPER_WORKER_STATUS_FILE)
                 payload["perps_market_worker"] = read_perps_worker_status(PERPS_MARKET_WORKER_STATUS_FILE)
+                payload["perps_account_supervisor"] = read_perps_account_supervisor_status(
+                    PERPS_ACCOUNT_SUPERVISOR_STATUS_FILE
+                )
                 payload.update({
                     "read_only": True,
                     "order_submission_allowed": False,

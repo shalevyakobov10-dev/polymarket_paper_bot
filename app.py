@@ -1539,7 +1539,8 @@ class Handler(BaseHTTPRequestHandler):
                     }
                 worker_snapshot.update({
                     "mode": "POLYMARKET_PERPS_PAPER_ONLY",
-                    "strategy_status": "not_configured",
+                    "paper_auto_entry_enabled": False,
+                    "strategy_status": worker_snapshot.get("paper_strategy_status", "disabled"),
                     "research_only": True,
                     "live_execution_enabled": False,
                     "live_execution_eligible": False,

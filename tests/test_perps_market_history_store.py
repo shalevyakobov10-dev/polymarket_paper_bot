@@ -258,8 +258,12 @@ class PerpsMarketHistoryStoreTests(unittest.TestCase):
                 ]
                 first = store.record_funding_history(11, rows)
                 repeated = store.record_funding_history(11, rows)
-                self.assertEqual(first, {"received": 2, "inserted": 2, "duplicates": 0})
-                self.assertEqual(repeated, {"received": 2, "inserted": 0, "duplicates": 2})
+                self.assertEqual(first, {
+                    "received": 2, "inserted": 2, "duplicates": 0, "conflicts": 0
+                })
+                self.assertEqual(repeated, {
+                    "received": 2, "inserted": 0, "duplicates": 2, "conflicts": 0
+                })
                 self.assertEqual(
                     store.funding_rate_at(11, 1795334400000)["funding_rate"],
                     "0.000125",

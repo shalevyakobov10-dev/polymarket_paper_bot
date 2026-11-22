@@ -4,8 +4,25 @@ from __future__ import annotations
 import json
 import sqlite3
 from datetime import datetime, timezone
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any
+
+
+def _finite_decimal(value: Any, field: str, *, positive: bool = False, nonnegative: bool = False) -> Decimal:
+    if isinstance(value, bool) or value is None:
+        raise ValueError(f"{field} must be a finite decimal")
+    try:
+        parsed = Decimal(str(value))
+    except (InvalidOperation, TypeError, ValueError):
+        raise ValueError(f"{field} must be a finite decimal") from None
+    if not parsed.is_finite():
+        raise ValueError(f"{field} must be finite")
+    if positive and parsed <= 0:
+        raise ValueError(f"{field} must be positive")
+    if nonnegative and parsed < 0:
+        raise ValueError(f"{field} must be nonnegative")
+    return parsed
 
 
 class PerpsMarketHistoryStore:
@@ -79,12 +96,49 @@ class PerpsMarketHistoryStore:
         )
         if any(ticker.get(field) is None for field in required_ticker):
             raise ValueError("ticker is missing required fields")
-        if not isinstance(book.get("timestamp_ms"), int) or not isinstance(book.get("sequence"), int):
-            raise ValueError("book timestamp and sequence must be integers")
-        if not book.get("bids") or not book.get("asks"):
+        if isinstance(ticker["timestamp_ms"], bool) or not isinstance(ticker["timestamp_ms"], int) or ticker["timestamp_ms"] <= 0:
+            raise ValueError("ticker timestamp_ms must be a positive integer")
+        for field in ("index_price", "mark_price", "last_price", "mid_price"):
+            _finite_decimal(ticker[field], f"ticker.{field}", positive=True)
+        _finite_decimal(ticker["open_interest"], "ticker.open_interest", nonnegative=True)
+        _finite_decimal(ticker["funding_rate"], "ticker.funding_rate")
+        if ticker.get("next_funding_ms") is not None and (
+            isinstance(ticker["next_funding_ms"], bool)
+            or not isinstance(ticker["next_funding_ms"], int)
+            or ticker["next_funding_ms"] <= 0
+        ):
+            raise ValueError("ticker next_funding_ms must be a positive integer or null")
+        if (
+            isinstance(book.get("timestamp_ms"), bool)
+            or not isinstance(book.get("timestamp_ms"), int)
+            or book["timestamp_ms"] <= 0
+            or isinstance(book.get("sequence"), bool)
+            or not isinstance(book.get("sequence"), int)
+            or book["sequence"] < 0
+        ):
+            raise ValueError("book timestamp and sequence must be integers in valid ranges")
+        bids, asks = book.get("bids"), book.get("asks")
+        if not isinstance(bids, list) or not bids or not isinstance(asks, list) or not asks:
             raise ValueError("book must contain both sides")
+        parsed_sides = []
+        for side_name, levels, reverse in (("bids", bids, True), ("asks", asks, False)):
+            prices: list[Decimal] = []
+            for level in levels[:10]:
+                if not isinstance(level, dict):
+                    raise ValueError(f"book {side_name} levels must be objects")
+                prices.append(_finite_decimal(level.get("price"), f"{side_name}.price", positive=True))
+                _finite_decimal(level.get("quantity"), f"{side_name}.quantity", positive=True)
+            if prices != sorted(prices, reverse=reverse):
+                raise ValueError(f"book {side_name} levels must be price ordered")
+            parsed_sides.append(prices[0])
+        best_bid = _finite_decimal(book.get("best_bid"), "book.best_bid", positive=True)
+        best_ask = _finite_decimal(book.get("best_ask"), "book.best_ask", positive=True)
+        if best_bid != parsed_sides[0] or best_ask != parsed_sides[1] or best_bid >= best_ask:
+            raise ValueError("book best bid/ask do not match valid non-crossed depth")
         if not isinstance(instrument.get("symbol"), str) or not instrument["symbol"]:
             raise ValueError("instrument symbol is required")
+        if not isinstance(instrument.get("category"), str) or not instrument["category"]:
+            raise ValueError("instrument category is required")
         return {
             "instrument": instrument,
             "ticker": ticker,
@@ -161,6 +215,22 @@ class PerpsMarketHistoryStore:
         return int(self.db.execute(
             "SELECT COUNT(*) FROM perps_market_snapshots"
         ).fetchone()[0])
+
+    def prune_before(self, cutoff: str | datetime) -> dict[str, int]:
+        """Remove expired observations while preserving the configured retention window."""
+        parsed = (
+            cutoff if isinstance(cutoff, datetime)
+            else datetime.fromisoformat(str(cutoff).replace("Z", "+00:00"))
+        )
+        if parsed.tzinfo is None or parsed.utcoffset() is None:
+            raise ValueError("cutoff must be timezone-aware")
+        normalized = parsed.astimezone(timezone.utc).isoformat()
+        with self.db:
+            cursor = self.db.execute(
+                "DELETE FROM perps_market_snapshots WHERE received_at < ?",
+                (normalized,),
+            )
+        return {"deleted": max(0, int(cursor.rowcount)), "remaining": self.count()}
 
     def close(self) -> None:
         self.db.close()

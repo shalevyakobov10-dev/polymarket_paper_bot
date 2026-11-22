@@ -16,6 +16,8 @@ from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any, Callable
 
+from perps_live_release_gate import evaluate_perps_live_release_gate
+
 
 DEFAULT_DEADLINE_SECONDS = 60
 DEFAULT_REFRESH_SECONDS = 20
@@ -186,6 +188,10 @@ class PerpsAutoCancelGuard:
                 "execution": "none",
             }
 
+        release_report = evaluate_perps_live_release_gate()
+        if release_report.get("eligible_for_separate_gateway_review") is not True:
+            return self._blocked("source_controlled_perps_release_gate_closed", now=current)
+
         requested_deadline = current + timedelta(seconds=self.deadline_seconds)
         try:
             await asyncio.wait_for(
@@ -207,10 +213,10 @@ class PerpsAutoCancelGuard:
         remaining = (server_deadline - current).total_seconds()
         if remaining < self.min_server_remaining_seconds:
             return self._blocked("auto_cancel_server_deadline_too_close", now=current)
-        if server_deadline < requested_deadline - timedelta(seconds=2):
+        if abs((server_deadline - requested_deadline).total_seconds()) > 2:
             return self._blocked("auto_cancel_server_deadline_mismatch", now=current)
         if (
-            isinstance(triggered, bool) or not isinstance(triggered, int)
+            isinstance(triggered, bool) or not isinstance(triggered, int) or triggered < 0
             or isinstance(daily_limit, bool) or not isinstance(daily_limit, int)
             or daily_limit <= 0 or triggered >= daily_limit
         ):
@@ -323,6 +329,49 @@ class PerpsAutoCancelGuard:
                     last_verified_deadline=last_deadline,
                 )
             await self.sleep(min(self.shutdown_poll_interval_seconds, remaining))
+
+        # A final fill can race with cancel-all. Re-read positions after the
+        # venue reports no resting orders; if exposure changed, keep the
+        # server-side deadline armed rather than disarming into open risk.
+        try:
+            final_portfolio = await asyncio.wait_for(
+                self.session.fetch_portfolio(),
+                timeout=self.account_read_timeout_seconds,
+            )
+            final_positions = _field(final_portfolio, "positions")
+            if not isinstance(final_positions, (tuple, list)):
+                raise ValueError("position state unavailable")
+            for position in final_positions:
+                size = _finite_decimal(_field(position, "size"), "position.size")
+                if size != 0:
+                    raise ValueError("position opened during shutdown")
+        except Exception:
+            return self._blocked(
+                "shutdown_position_changed_after_cancel_deadman_kept_armed",
+                now=current,
+                last_verified_deadline=last_deadline,
+            )
+
+        # Verify once more immediately before disarming; an earlier empty
+        # order-list read does not guarantee that a cancellation/fill race
+        # did not create another resting order.
+        try:
+            final_open_orders = await asyncio.wait_for(
+                self.session.fetch_open_orders(),
+                timeout=self.account_read_timeout_seconds,
+            )
+        except Exception:
+            return self._blocked(
+                "shutdown_final_open_order_verification_failed_deadman_kept_armed",
+                now=current,
+                last_verified_deadline=last_deadline,
+            )
+        if not isinstance(final_open_orders, (tuple, list)) or final_open_orders:
+            return self._blocked(
+                "shutdown_open_orders_reappeared_deadman_kept_armed",
+                now=current,
+                last_verified_deadline=last_deadline,
+            )
 
         try:
             await asyncio.wait_for(

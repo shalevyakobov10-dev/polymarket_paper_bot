@@ -364,7 +364,12 @@ def main() -> int:
         result = asyncio.run(_run_from_environment(args))
     except KeyboardInterrupt:
         return 0
+    except PerpsAccountSecretsError as exc:
+        # This exception contains only a fixed machine-readable reason code.
+        LOGGER.error("Perps account supervisor startup failed: %s", str(exc))
+        return 1
     except Exception as exc:
+        # Do not log SDK exception messages or request context.
         LOGGER.error("Perps account supervisor startup/cycle failed: %s", type(exc).__name__)
         return 1
     return result

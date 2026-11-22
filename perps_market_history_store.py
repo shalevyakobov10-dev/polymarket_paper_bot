@@ -1,4 +1,8 @@
-"""Append-only SQLite archive for public Polymarket Perps market snapshots."""
+"""Retained SQLite archive for public Perps snapshots and published funding settlements.
+
+Snapshot and funding rows are append-only during the retention window; expiry is
+handled by the worker's explicit retention policy.
+"""
 from __future__ import annotations
 
 import json
@@ -60,12 +64,29 @@ class PerpsMarketHistoryStore:
                 asks_json TEXT NOT NULL,
                 instrument_json TEXT NOT NULL,
                 ticker_json TEXT NOT NULL,
+                fees_json TEXT NOT NULL DEFAULT '{}',
                 UNIQUE(instrument_id, book_timestamp_ms, book_sequence)
             );
             CREATE INDEX IF NOT EXISTS idx_perps_history_symbol_time
                 ON perps_market_snapshots(symbol, received_at);
             CREATE INDEX IF NOT EXISTS idx_perps_history_instrument_time
                 ON perps_market_snapshots(instrument_id, book_timestamp_ms);
+            """
+        )
+        columns = {row[1] for row in self.db.execute("PRAGMA table_info(perps_market_snapshots)").fetchall()}
+        if "fees_json" not in columns:
+            self.db.execute("ALTER TABLE perps_market_snapshots ADD COLUMN fees_json TEXT NOT NULL DEFAULT '{}'")
+        self.db.executescript(
+            """
+            CREATE TABLE IF NOT EXISTS perps_funding_history (
+                instrument_id INTEGER NOT NULL,
+                funding_timestamp_ms INTEGER NOT NULL,
+                funding_rate TEXT NOT NULL,
+                received_at TEXT NOT NULL,
+                PRIMARY KEY(instrument_id, funding_timestamp_ms)
+            );
+            CREATE INDEX IF NOT EXISTS idx_perps_funding_time
+                ON perps_funding_history(instrument_id, funding_timestamp_ms);
             """
         )
         self.db.commit()
@@ -139,10 +160,19 @@ class PerpsMarketHistoryStore:
             raise ValueError("instrument symbol is required")
         if not isinstance(instrument.get("category"), str) or not instrument["category"]:
             raise ValueError("instrument category is required")
+        fees = snapshot.get("fees")
+        if fees is not None:
+            if not isinstance(fees, dict):
+                raise ValueError("snapshot fees must be an object")
+            _finite_decimal(fees.get("taker_fee_rate"), "fees.taker_fee_rate", nonnegative=True)
+            _finite_decimal(fees.get("maker_fee_rate"), "fees.maker_fee_rate", nonnegative=True)
+            if fees.get("source") != "public_perps_fee_schedule":
+                raise ValueError("fees must come from the public Perps fee schedule")
         return {
             "instrument": instrument,
             "ticker": ticker,
             "book": book,
+            "fees": fees or {},
             "received_at": parsed.astimezone(timezone.utc).isoformat(),
         }
 
@@ -164,6 +194,7 @@ class PerpsMarketHistoryStore:
                 json.dumps(book["asks"], sort_keys=True, separators=(",", ":"), allow_nan=False),
                 json.dumps(instrument, sort_keys=True, separators=(",", ":"), allow_nan=False),
                 json.dumps(ticker, sort_keys=True, separators=(",", ":"), allow_nan=False),
+                json.dumps(item["fees"], sort_keys=True, separators=(",", ":"), allow_nan=False),
             ))
         before = self.db.total_changes
         with self.db:
@@ -174,8 +205,8 @@ class PerpsMarketHistoryStore:
                     ticker_timestamp_ms, book_timestamp_ms, book_sequence,
                     index_price, mark_price, last_price, mid_price, open_interest,
                     funding_rate, next_funding_ms, best_bid, best_ask,
-                    bids_json, asks_json, instrument_json, ticker_json
-                ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                    bids_json, asks_json, instrument_json, ticker_json, fees_json
+                ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                 """,
                 rows,
             )
@@ -208,6 +239,7 @@ class PerpsMarketHistoryStore:
             item["asks"] = json.loads(item.pop("asks_json"))
             item["instrument"] = json.loads(item.pop("instrument_json"))
             item["ticker"] = json.loads(item.pop("ticker_json"))
+            item["fees"] = json.loads(item.pop("fees_json"))
             result.append(item)
         return result
 
@@ -244,6 +276,78 @@ class PerpsMarketHistoryStore:
             result.append(item)
         result.reverse()
         return result
+
+
+    def record_funding_history(
+        self,
+        instrument_id: int,
+        entries: list[dict[str, Any]],
+        *,
+        received_at: str | datetime | None = None,
+    ) -> dict[str, int]:
+        """Persist validated public funding settlements idempotently."""
+        if isinstance(instrument_id, bool) or not isinstance(instrument_id, int) or instrument_id < 0:
+            raise ValueError("instrument_id must be a nonnegative integer")
+        if not isinstance(entries, list):
+            raise ValueError("funding entries must be a list")
+        capture = received_at or datetime.now(timezone.utc)
+        parsed_capture = capture if isinstance(capture, datetime) else datetime.fromisoformat(str(capture).replace("Z", "+00:00"))
+        if parsed_capture.tzinfo is None or parsed_capture.utcoffset() is None:
+            raise ValueError("funding received_at must be timezone-aware")
+        captured = parsed_capture.astimezone(timezone.utc).isoformat()
+        rows = []
+        seen: set[int] = set()
+        for entry in entries:
+            if not isinstance(entry, dict):
+                raise ValueError("funding history row must be an object")
+            if entry.get("instrument_id") != instrument_id:
+                raise ValueError("funding instrument ID mismatch")
+            timestamp_ms = entry.get("timestamp_ms")
+            if isinstance(timestamp_ms, bool) or not isinstance(timestamp_ms, int) or timestamp_ms <= 0:
+                raise ValueError("funding timestamp_ms must be a positive integer")
+            if timestamp_ms in seen:
+                raise ValueError("duplicate funding timestamp in response")
+            seen.add(timestamp_ms)
+            rate = _finite_decimal(entry.get("funding_rate"), "funding_rate")
+            rows.append((instrument_id, timestamp_ms, str(rate), captured))
+        before = self.db.total_changes
+        with self.db:
+            self.db.executemany(
+                """INSERT OR IGNORE INTO perps_funding_history
+                   (instrument_id, funding_timestamp_ms, funding_rate, received_at)
+                   VALUES (?,?,?,?)""",
+                rows,
+            )
+        inserted = self.db.total_changes - before
+        return {"received": len(rows), "inserted": inserted, "duplicates": len(rows) - inserted}
+
+    def funding_rate_at(
+        self,
+        instrument_id: int,
+        timestamp_ms: int,
+        *,
+        tolerance_ms: int = 1000,
+    ) -> dict[str, Any] | None:
+        """Return one unambiguous published settlement nearest the scheduled time."""
+        if isinstance(instrument_id, bool) or not isinstance(instrument_id, int) or instrument_id < 0:
+            raise ValueError("instrument_id must be a nonnegative integer")
+        if isinstance(timestamp_ms, bool) or not isinstance(timestamp_ms, int) or timestamp_ms <= 0:
+            raise ValueError("timestamp_ms must be a positive integer")
+        if isinstance(tolerance_ms, bool) or not isinstance(tolerance_ms, int) or not 0 <= tolerance_ms <= 5000:
+            raise ValueError("tolerance_ms must be between 0 and 5000")
+        rows = self.db.execute(
+            """SELECT funding_timestamp_ms, funding_rate FROM perps_funding_history
+               WHERE instrument_id=? AND funding_timestamp_ms BETWEEN ? AND ?
+               ORDER BY ABS(funding_timestamp_ms - ?) LIMIT 2""",
+            (instrument_id, timestamp_ms - tolerance_ms, timestamp_ms + tolerance_ms, timestamp_ms),
+        ).fetchall()
+        if len(rows) != 1:
+            return None
+        return {
+            "instrument_id": instrument_id,
+            "timestamp_ms": int(rows[0]["funding_timestamp_ms"]),
+            "funding_rate": str(rows[0]["funding_rate"]),
+        }
 
     def count(self) -> int:
         return int(self.db.execute(

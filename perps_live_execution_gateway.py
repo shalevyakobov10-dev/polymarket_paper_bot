@@ -17,7 +17,7 @@ import uuid
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from perps_order_journal import PerpsOrderJournal
 from perps_sdk_reconciler import PerpsSdkReconciler
@@ -129,6 +129,7 @@ class PerpsLiveExecutionGateway:
         account_read_timeout_seconds: float = 5.0,
         submission_timeout_seconds: float = 10.0,
         risk_decision_max_age_seconds: int = 5,
+        now_provider: Callable[[], datetime] | None = None,
     ) -> None:
         if not callable(getattr(session, "place_order", None)):
             raise ValueError("session must expose place_order")
@@ -184,6 +185,9 @@ class PerpsLiveExecutionGateway:
         self.account_read_timeout_seconds = float(account_read_timeout_seconds)
         self.submission_timeout_seconds = float(submission_timeout_seconds)
         self.risk_decision_max_age_seconds = risk_decision_max_age_seconds
+        if now_provider is not None and not callable(now_provider):
+            raise ValueError("now_provider must be callable")
+        self.now_provider = now_provider or (lambda: datetime.now(timezone.utc))
 
     def _blocked(self, reason: str, *, client_order_id: str | None = None) -> dict[str, Any]:
         return {
@@ -355,6 +359,26 @@ class PerpsLiveExecutionGateway:
 
             if self.kill_switch_path.exists():
                 return self._blocked("local_perps_kill_switch_present", client_order_id=identifier)
+
+            # Account, fee, and instrument reads above are sequential network
+            # operations. Re-check the independent risk decision after they
+            # finish, immediately before the durable submission transition.
+            try:
+                final_risk_check_at = self.now_provider()
+                if (
+                    not isinstance(final_risk_check_at, datetime)
+                    or final_risk_check_at.tzinfo is None
+                    or final_risk_check_at.utcoffset() is None
+                ):
+                    return self._blocked("risk_clock_unavailable", client_order_id=identifier)
+                final_risk_age = (
+                    final_risk_check_at.astimezone(timezone.utc)
+                    - captured_at.astimezone(timezone.utc)
+                ).total_seconds()
+            except Exception:
+                return self._blocked("risk_clock_unavailable", client_order_id=identifier)
+            if final_risk_age < -2 or final_risk_age > self.risk_decision_max_age_seconds:
+                return self._blocked("risk_decision_stale_before_submission", client_order_id=identifier)
 
             try:
                 prepared = self.journal.create_intent(

@@ -1,7 +1,7 @@
 name: Public news RSS smoke check
 on:
   push:
-    branches: [main]
+    branches: [main, research/event-aware-news-signals]
     paths:
       - "news_monitor.py"
       - ".github/workflows/news-rss-smoke.yml"

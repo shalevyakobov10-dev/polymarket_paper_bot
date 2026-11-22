@@ -27,9 +27,18 @@ from learning_journal import LearningJournal
 from model_governance import ModelGovernanceLedger
 from execution_readiness import execution_readiness_payload
 from resilience import exponential_backoff_seconds, parse_retry_after
+from supervisor_status import read_supervisor_status
+from event_paper_worker import read_event_paper_worker_status
+from perps_market_worker import read_perps_worker_status
+from perps_live_release_gate import evaluate_perps_live_release_gate
+from control_center import CONTROL_CENTER_HTML
 
 GAMMA_URL = "https://gamma-api.polymarket.com/markets"
 POLL_SECONDS = max(15, int(os.getenv("POLL_SECONDS", "60")))
+try:
+    EVENT_PAPER_POLL_SECONDS = min(86_400, max(30, int(os.getenv("PAPER_POLL_SECONDS", "300"))))
+except (ValueError, TypeError):
+    EVENT_PAPER_POLL_SECONDS = 300
 try:
     NEWS_POLL_SECONDS = min(3600, max(60, int(os.getenv("NEWS_POLL_SECONDS", "300"))))
 except (ValueError, TypeError):
@@ -47,6 +56,12 @@ try:
 except (ValueError, TypeError):
     MODEL_EVALUATION_SECONDS = 21600
 DATA_DIR = Path(os.getenv("DATA_DIR", "data"))
+SUPERVISOR_STATUS_FILE = Path(os.getenv("SERVICE_SUPERVISOR_STATUS_FILE", str(DATA_DIR / "service_supervisor_status.json")))
+EVENT_PAPER_WORKER_STATUS_FILE = Path(os.getenv("EVENT_PAPER_WORKER_STATUS_FILE", str(DATA_DIR / "event_paper_worker_status.json")))
+PERPS_MARKET_WORKER_STATUS_FILE = Path(os.getenv(
+    "PERPS_MARKET_WORKER_STATUS_FILE",
+    str(DATA_DIR / "perps_market_worker_status.json"),
+))
 SNAPSHOTS = DATA_DIR / "market_snapshots.jsonl"
 SIGNALS = DATA_DIR / "candidate_signals.jsonl"
 ORDERBOOK_SNAPSHOTS = DATA_DIR / "orderbook_snapshots.jsonl"
@@ -969,6 +984,135 @@ def _health_component(
     }
 
 
+def perps_worker_supervision_health(
+    supervisor_worker_state: object,
+    worker_snapshot: dict,
+    now: datetime | None = None,
+) -> dict:
+    """Do not trust a child heartbeat while the supervisor says it is restarting."""
+    current = now or datetime.now(timezone.utc)
+    if current.tzinfo is None or current.utcoffset() is None:
+        raise ValueError("now must be timezone-aware")
+    current = current.astimezone(timezone.utc)
+    heartbeat_age = None
+    try:
+        stamp = datetime.fromisoformat(
+            str(worker_snapshot.get("last_heartbeat_at") or "").replace("Z", "+00:00")
+        )
+        if stamp.tzinfo is not None and stamp.utcoffset() is not None:
+            heartbeat_age = (current - stamp.astimezone(timezone.utc)).total_seconds()
+    except (TypeError, ValueError, OverflowError):
+        heartbeat_age = None
+    try:
+        timeout = int(worker_snapshot.get("heartbeat_timeout_seconds") or 180)
+        if isinstance(worker_snapshot.get("heartbeat_timeout_seconds"), bool) or timeout < 60:
+            raise ValueError("invalid heartbeat timeout")
+    except (TypeError, ValueError, OverflowError):
+        timeout = 180
+    stale_after = max(90, timeout)
+
+    if supervisor_worker_state != "running":
+        status = {
+            "starting": "starting",
+            "restarting": "restarting",
+            "stopped": "stopped",
+            "disabled": "disabled",
+        }.get(str(supervisor_worker_state), "supervisor_unavailable")
+    else:
+        worker_state = worker_snapshot.get("worker_state")
+        if worker_state == "healthy":
+            if heartbeat_age is None:
+                status = "invalid_timestamp"
+            elif heartbeat_age < -2:
+                status = "future_dated"
+            elif heartbeat_age > stale_after:
+                status = "stale"
+            else:
+                status = "healthy"
+        elif worker_state == "degraded":
+            status = "degraded"
+        elif worker_state == "stopped":
+            status = "stopped"
+        else:
+            status = "starting"
+    return {
+        "status": status,
+        "supervisor_worker_state": str(supervisor_worker_state or "unknown"),
+        "heartbeat_age_seconds": (
+            round(max(0.0, heartbeat_age), 1) if heartbeat_age is not None else None
+        ),
+        "stale_after_seconds": stale_after,
+    }
+
+
+def perps_backup_health_component(
+    snapshot: dict,
+    now: datetime | None = None,
+) -> dict:
+    """Require a recent, verified two-database Perps backup when paper is enabled."""
+    current = now or datetime.now(timezone.utc)
+    if current.tzinfo is None or current.utcoffset() is None:
+        current = current.replace(tzinfo=timezone.utc)
+    current = current.astimezone(timezone.utc)
+    try:
+        interval_hours = int(snapshot.get("backup_interval_hours") or 6)
+        if isinstance(snapshot.get("backup_interval_hours"), bool) or not 1 <= interval_hours <= 168:
+            raise ValueError("invalid backup interval")
+    except (TypeError, ValueError, OverflowError):
+        interval_hours = 6
+    stale_after = max(8 * 3600, (interval_hours + 2) * 3600)
+    stamp = None
+    age = None
+    try:
+        stamp = datetime.fromisoformat(
+            str(snapshot.get("last_backup_at") or "").replace("Z", "+00:00")
+        )
+        if stamp.tzinfo is not None and stamp.utcoffset() is not None:
+            age = (current - stamp.astimezone(timezone.utc)).total_seconds()
+    except (TypeError, ValueError, OverflowError):
+        stamp = None
+    if age is None:
+        status = "starting"
+    elif age < -2:
+        status = "invalid"
+    elif age > stale_after:
+        status = "stale"
+    elif snapshot.get("backup_error_type"):
+        status = "degraded"
+    else:
+        journal_present = snapshot.get("perps_order_journal_present") is True
+        expected_files = 3 if journal_present else 2
+        reported_expected = snapshot.get("backup_files_expected_last_run", expected_files)
+        journal_backup_missing = (
+            journal_present and snapshot.get("perps_order_journal_backed_up") is not True
+        )
+        if (
+            snapshot.get("backup_files_last_run") != expected_files
+            or reported_expected != expected_files
+            or journal_backup_missing
+            or not snapshot.get("last_backup_manifest_name")
+            or snapshot.get("backup_consecutive_failures", 0) != 0
+        ):
+            status = "degraded"
+        else:
+            status = "healthy"
+    return {
+        "name": "perps_paper_backup",
+        "status": status,
+        "last_backup_at": snapshot.get("last_backup_at"),
+        "seconds_since_backup": round(max(0.0, age), 1) if age is not None else None,
+        "stale_after_seconds": stale_after,
+        "backup_files_last_run": snapshot.get("backup_files_last_run", 0),
+        "backup_files_expected_last_run": snapshot.get("backup_files_expected_last_run", 2),
+        "perps_order_journal_present": snapshot.get("perps_order_journal_present") is True,
+        "perps_order_journal_backed_up": snapshot.get("perps_order_journal_backed_up") is True,
+        "backup_manifest_name": snapshot.get("last_backup_manifest_name"),
+        "backup_interval_hours": interval_hours,
+        "backup_error_type": snapshot.get("backup_error_type"),
+        "backup_consecutive_failures": snapshot.get("backup_consecutive_failures", 0),
+    }
+
+
 def health_payload(
     snapshot: dict,
     now: datetime | None = None,
@@ -978,6 +1122,7 @@ def health_payload(
     resolution_snapshot: dict | None = None,
     gdelt_snapshot: dict | None = None,
     learning_snapshot: dict | None = None,
+    paper_worker_snapshot: dict | None = None,
 ) -> tuple[bool, dict]:
     """Report core market readiness and separately expose optional collector degradation."""
     current = now or datetime.now(timezone.utc)
@@ -1053,6 +1198,51 @@ def health_payload(
         )
         components["model_learning"] = learning_component
 
+    if paper_worker_snapshot is not None:
+        paper_state = str(paper_worker_snapshot.get("worker_state") or "unknown")
+        paper_component = _health_component(
+            name="event_paper_worker",
+            worker_running=paper_state in {"starting", "running", "degraded"},
+            last_success_at=paper_worker_snapshot.get("last_success_at"),
+            stale_after_seconds=max(900, EVENT_PAPER_POLL_SECONDS * 3),
+            now=current,
+            last_error=paper_worker_snapshot.get("last_error_type"),
+        )
+        paper_component["worker_state"] = paper_state
+        paper_component["last_cycle_warning"] = paper_worker_snapshot.get("last_cycle_warning")
+        paper_component["cycles"] = int(paper_worker_snapshot.get("cycles") or 0)
+        paper_component["consecutive_failures"] = int(
+            paper_worker_snapshot.get("consecutive_failures") or 0
+        )
+        paper_component["total_failures"] = int(
+            paper_worker_snapshot.get("total_failures") or 0
+        )
+        paper_component["heartbeat_fresh"] = bool(
+            paper_worker_snapshot.get("heartbeat_fresh")
+        )
+        if not paper_component["heartbeat_fresh"]:
+            paper_component["status"] = "stale"
+        paper_component["last_backup_at"] = paper_worker_snapshot.get("last_backup_at")
+        paper_component["backup_manifest_name"] = paper_worker_snapshot.get("backup_manifest_name")
+        paper_component["backup_files_last_run"] = int(
+            paper_worker_snapshot.get("backup_files_last_run") or 0
+        )
+        paper_component["backup_error_type"] = paper_worker_snapshot.get("backup_error_type")
+        paper_component["backup_consecutive_failures"] = int(
+            paper_worker_snapshot.get("backup_consecutive_failures") or 0
+        )
+        paper_component["backup_retry_delay_seconds"] = float(
+            paper_worker_snapshot.get("backup_retry_delay_seconds") or 0.0
+        )
+        if (
+            (paper_state == "degraded" or paper_worker_snapshot.get("backup_error_type"))
+            and paper_component["status"] == "healthy"
+        ):
+            paper_component["status"] = "degraded"
+        if paper_state == "failed":
+            paper_component["status"] = "failed"
+        components["event_paper_worker"] = paper_component
+
     if stream_snapshot is not None:
         stream_worker_running = bool(stream_snapshot.get("worker_running"))
         stream_last_connect = stream_snapshot.get("last_connect_at")
@@ -1069,14 +1259,23 @@ def health_payload(
         stream_component["last_message_at"] = stream_snapshot.get("last_message_at")
         components["market_stream"] = stream_component
 
-    healthy = market_component["status"] == "healthy"
+    required_components = ["market_data"]
+    if paper_worker_snapshot is not None:
+        required_components.append("event_paper_worker")
+    healthy = all(components[name]["status"] == "healthy" for name in required_components)
     degraded = [
         name for name, component in components.items()
-        if name != "market_data" and component["status"] != "healthy"
+        if name not in required_components and component["status"] != "healthy"
+    ]
+    required_failures = [
+        name for name in required_components
+        if components[name]["status"] != "healthy"
     ]
     payload = {
         "ok": healthy,
         "status": "unhealthy" if not healthy else ("degraded" if degraded else "healthy"),
+        "required_components": required_components,
+        "required_component_failures": required_failures,
         "mode": "paper_only",
         "worker_running": bool(snapshot.get("worker_running")),
         "last_success_at": snapshot.get("last_success_at"),
@@ -1088,7 +1287,7 @@ def health_payload(
         "next_retry_at": snapshot.get("next_retry_at"),
         "components": components,
         "degraded_components": degraded,
-        "health_policy": "market_data_is_required; news_gdelt_resolution_stream_and_model_learning_are_reported_as_optional_degraded_components",
+        "health_policy": "market_data_is_required; event_paper_worker_is_required_when_enabled; news_gdelt_resolution_stream_and_model_learning_are_optional",
     }
     if not healthy and not payload["last_error"]:
         payload["last_error"] = "No recent successful market poll"
@@ -1241,8 +1440,27 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def _send_html(self, status: int, html: str) -> None:
+        body = html.encode("utf-8")
+        self.send_response(status)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.send_header("X-Frame-Options", "DENY")
+        self.send_header("Referrer-Policy", "no-referrer")
+        self.send_header(
+            "Content-Security-Policy",
+            "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; "
+            "connect-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'",
+        )
+        self.end_headers()
+        self.wfile.write(body)
+
     def do_GET(self):
-        if self.path in ("/", "/status", "/health", "/paper", "/news", "/matches", "/market-stream", "/resolutions", "/forecast-evaluation", "/research-features", "/independent-model-evaluation", "/model-forecasts", "/learning", "/execution-readiness"):
+        if self.path in ("/control-center", "/control-center/"):
+            self._send_html(200, CONTROL_CENTER_HTML)
+        elif self.path in ("/", "/status", "/health", "/paper", "/news", "/matches", "/market-stream", "/resolutions", "/forecast-evaluation", "/research-features", "/independent-model-evaluation", "/model-forecasts", "/learning", "/execution-readiness", "/service-supervisor", "/event-paper", "/perps-market", "/perps-paper", "/perps-live-gate"):
             with _lock:
                 snapshot = dict(_state)
             if self.path == "/health":
@@ -1254,6 +1472,12 @@ class Handler(BaseHTTPRequestHandler):
                     resolution_snapshot = dict(_resolution_state)
                 with _learning_lock:
                     learning_snapshot = dict(_learning_state)
+                supervisor_snapshot = read_supervisor_status(SUPERVISOR_STATUS_FILE)
+                paper_worker_snapshot = (
+                    read_event_paper_worker_status(EVENT_PAPER_WORKER_STATUS_FILE)
+                    if supervisor_snapshot.get("event_paper_worker_enabled") is True
+                    else None
+                )
                 healthy, payload = health_payload(
                     snapshot,
                     news_snapshot=news_snapshot,
@@ -1261,7 +1485,93 @@ class Handler(BaseHTTPRequestHandler):
                     resolution_snapshot=resolution_snapshot,
                     gdelt_snapshot=gdelt_snapshot,
                     learning_snapshot=learning_snapshot,
+                    paper_worker_snapshot=paper_worker_snapshot,
                 )
+                if supervisor_snapshot.get("perps_market_worker_enabled") is True:
+                    perps_snapshot = read_perps_worker_status(PERPS_MARKET_WORKER_STATUS_FILE)
+                    perps_supervision = perps_worker_supervision_health(
+                        supervisor_snapshot.get("perps_market_worker_state"),
+                        perps_snapshot,
+                    )
+                    perps_status = perps_supervision["status"]
+                    perps_component = {
+                        "name": "perps_market_data",
+                        "status": perps_status,
+                        "supervisor_worker_state": perps_supervision["supervisor_worker_state"],
+                        "worker_running": (
+                            perps_supervision["supervisor_worker_state"] == "running"
+                            and perps_snapshot.get("worker_state") in {"healthy", "degraded"}
+                        ),
+                        "markets_in_last_snapshot": perps_snapshot.get("markets_in_last_snapshot", 0),
+                        "markets_with_verified_fee_schedule": perps_snapshot.get("markets_with_fee_schedule", 0),
+                        "fee_coverage_status": (
+                            "unavailable" if perps_snapshot.get("markets_with_fee_schedule", 0) == 0
+                            else "complete" if perps_snapshot.get("markets_with_fee_schedule", 0)
+                            >= perps_snapshot.get("markets_in_last_snapshot", 0)
+                            else "partial"
+                        ),
+                        "last_success_at": perps_snapshot.get("last_success_at"),
+                        "last_heartbeat_at": perps_snapshot.get("last_heartbeat_at"),
+                        "seconds_since_heartbeat": perps_supervision["heartbeat_age_seconds"],
+                        "stale_after_seconds": perps_supervision["stale_after_seconds"],
+                        "last_error": perps_snapshot.get("last_error"),
+                    }
+                    payload["components"]["perps_market_data"] = perps_component
+                    payload["required_components"].append("perps_market_data")
+                    if perps_status != "healthy":
+                        healthy = False
+                        payload["ok"] = False
+                        payload["status"] = "unhealthy"
+                        payload["required_component_failures"].append("perps_market_data")
+                    payload["health_policy"] += "; perps_market_data_is_required_when_enabled"
+                    if perps_snapshot.get("paper_engine_enabled") is True:
+                        engine_state = perps_snapshot.get("paper_engine_state") or "unknown"
+                        engine_summary = perps_snapshot.get("paper_engine") or {}
+                        engine_status = (
+                            "halted" if engine_state == "halted"
+                            else "healthy" if engine_state == "healthy" and perps_status == "healthy"
+                            else perps_status if perps_status in {"starting", "restarting", "stopped"}
+                            else "degraded"
+                        )
+                        payload["components"]["perps_paper_engine"] = {
+                            "name": "perps_paper_engine",
+                            "status": engine_status,
+                            "worker_state": engine_state,
+                            "supervisor_worker_state": perps_supervision["supervisor_worker_state"],
+                            "halt_reason": engine_summary.get("halt_reason"),
+                            "degraded_reason": perps_snapshot.get("paper_engine_degraded_reason"),
+                            "verified_fee_markets": perps_snapshot.get("markets_with_fee_schedule", 0),
+                            "fee_coverage_status": (
+                                "unavailable" if perps_snapshot.get("markets_with_fee_schedule", 0) == 0
+                                else "complete" if perps_snapshot.get("markets_with_fee_schedule", 0)
+                                >= perps_snapshot.get("markets_in_last_snapshot", 0)
+                                else "partial"
+                            ),
+                            "open_positions": engine_summary.get("open_positions", 0),
+                            "closed_positions": engine_summary.get("closed_positions", 0),
+                            "fee_verified_entry_path_available": (
+                                engine_status == "healthy"
+                                and perps_snapshot.get("markets_with_fee_schedule", 0) > 0
+                            ),
+                            "live_execution_enabled": False,
+                            "order_submission_allowed": False,
+                        }
+                        payload["required_components"].append("perps_paper_engine")
+                        if engine_status != "healthy":
+                            healthy = False
+                            payload["ok"] = False
+                            payload["status"] = "unhealthy"
+                            payload["required_component_failures"].append("perps_paper_engine")
+                        payload["health_policy"] += "; perps_paper_engine_is_required_when_enabled"
+                        backup_component = perps_backup_health_component(perps_snapshot)
+                        payload["components"]["perps_paper_backup"] = backup_component
+                        payload["required_components"].append("perps_paper_backup")
+                        if backup_component["status"] != "healthy":
+                            healthy = False
+                            payload["ok"] = False
+                            payload["status"] = "unhealthy"
+                            payload["required_component_failures"].append("perps_paper_backup")
+                        payload["health_policy"] += "; recent_verified_perps_paper_and_market_history_backups_are_required_when_enabled"
                 self._send(200 if healthy else 503, payload)
             elif self.path == "/paper":
                 self._send(200, get_paper_trader().snapshot())
@@ -1322,6 +1632,126 @@ class Handler(BaseHTTPRequestHandler):
                     })
             elif self.path == "/execution-readiness":
                 self._send(200, execution_readiness_payload())
+            elif self.path == "/event-paper":
+                supervisor_snapshot = read_supervisor_status(SUPERVISOR_STATUS_FILE)
+                if supervisor_snapshot.get("event_paper_worker_enabled") is True:
+                    worker_snapshot = read_event_paper_worker_status(EVENT_PAPER_WORKER_STATUS_FILE)
+                else:
+                    worker_snapshot = {
+                        "worker_state": "disabled",
+                        "heartbeat_fresh": False,
+                        "execution": "none",
+                    }
+                worker_snapshot.update({
+                    "mode": "OFFLINE_NEWS_PAPER_ONLY",
+                    "research_only": True,
+                    "live_execution_enabled": False,
+                    "execution": "none",
+                })
+                self._send(200, worker_snapshot)
+            elif self.path == "/perps-market":
+                supervisor_snapshot = read_supervisor_status(SUPERVISOR_STATUS_FILE)
+                if supervisor_snapshot.get("perps_market_worker_enabled") is True:
+                    worker_snapshot = read_perps_worker_status(PERPS_MARKET_WORKER_STATUS_FILE)
+                    perps_supervision = perps_worker_supervision_health(
+                        supervisor_snapshot.get("perps_market_worker_state"),
+                        worker_snapshot,
+                    )
+                    worker_snapshot["worker_state"] = perps_supervision["status"]
+                    worker_snapshot["supervisor_worker_state"] = perps_supervision["supervisor_worker_state"]
+                    worker_snapshot["seconds_since_heartbeat"] = perps_supervision["heartbeat_age_seconds"]
+                else:
+                    worker_snapshot = {
+                        "enabled": False,
+                        "worker_state": "disabled",
+                        "last_heartbeat_at": None,
+                        "last_success_at": None,
+                        "last_error": None,
+                        "research_only": True,
+                        "live_execution_enabled": False,
+                        "execution": "none",
+                    }
+                worker_snapshot.update({
+                    "mode": "POLYMARKET_PERPS_PUBLIC_MARKET_DATA",
+                    "research_only": True,
+                    "live_execution_enabled": False,
+                    "order_submission_allowed": False,
+                    "execution": "none",
+                })
+                self._send(200, worker_snapshot)
+            elif self.path == "/perps-paper":
+                supervisor_snapshot = read_supervisor_status(SUPERVISOR_STATUS_FILE)
+                if supervisor_snapshot.get("perps_market_worker_enabled") is True:
+                    worker_snapshot = read_perps_worker_status(PERPS_MARKET_WORKER_STATUS_FILE)
+                    engine_summary = worker_snapshot.get("paper_engine") or {}
+                    engine_enabled = worker_snapshot.get("paper_engine_enabled") is True
+                    engine_state = worker_snapshot.get("paper_engine_state", "unknown")
+                    supervisor_worker_state = supervisor_snapshot.get("perps_market_worker_state")
+                    perps_supervision = perps_worker_supervision_health(
+                        supervisor_worker_state, worker_snapshot
+                    )
+                    if perps_supervision["status"] != "healthy" and engine_state != "halted":
+                        engine_state = perps_supervision["status"]
+                        if not worker_snapshot.get("paper_engine_degraded_reason"):
+                            reason_prefix = (
+                                "supervisor_worker_"
+                                if supervisor_worker_state != "running"
+                                else "perps_market_worker_"
+                            )
+                            worker_snapshot["paper_engine_degraded_reason"] = (
+                                reason_prefix + perps_supervision["status"]
+                            )
+                else:
+                    worker_snapshot = {
+                        "paper_engine_degraded_reason": None,
+                        "markets_in_last_snapshot": 0,
+                        "markets_with_fee_schedule": 0,
+                    }
+                    engine_summary = None
+                    engine_enabled = False
+                    engine_state = "disabled"
+                self._send(200, {
+                    "mode": "POLYMARKET_PERPS_ISOLATED_MARGIN_PAPER",
+                    "enabled": engine_enabled,
+                    "worker_state": engine_state,
+                    "degraded_reason": worker_snapshot.get("paper_engine_degraded_reason"),
+                    "markets_in_last_snapshot": worker_snapshot.get("markets_in_last_snapshot", 0),
+                    "markets_with_verified_fee_schedule": worker_snapshot.get("markets_with_fee_schedule", 0),
+                    "fee_coverage_status": (
+                        "unavailable" if worker_snapshot.get("markets_with_fee_schedule", 0) == 0
+                        else "complete" if worker_snapshot.get("markets_with_fee_schedule", 0)
+                        >= worker_snapshot.get("markets_in_last_snapshot", 0)
+                        else "partial"
+                    ),
+                    "fee_verified_entry_path_available": (
+                        engine_enabled
+                        and engine_state == "healthy"
+                        and worker_snapshot.get("markets_with_fee_schedule", 0) > 0
+                    ),
+                    "portfolio": engine_summary,
+                    "research_only": True,
+                    "live_execution_enabled": False,
+                    "order_submission_allowed": False,
+                    "execution": "none",
+                })
+            elif self.path == "/perps-live-gate":
+                payload = evaluate_perps_live_release_gate()
+                payload.update({
+                    "read_only": True,
+                    "private_credentials_loaded": False,
+                    "order_signing_allowed": False,
+                })
+                self._send(200, payload)
+            elif self.path == "/service-supervisor":
+                payload = read_supervisor_status(SUPERVISOR_STATUS_FILE)
+                payload["event_paper_worker"] = read_event_paper_worker_status(EVENT_PAPER_WORKER_STATUS_FILE)
+                payload["perps_market_worker"] = read_perps_worker_status(PERPS_MARKET_WORKER_STATUS_FILE)
+                payload.update({
+                    "read_only": True,
+                    "order_submission_allowed": False,
+                    "order_signing_allowed": False,
+                })
+                self._send(200, payload)
             elif self.path == "/learning":
                 try:
                     with _learning_lock:

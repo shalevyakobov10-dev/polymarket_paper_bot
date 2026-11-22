@@ -10,13 +10,32 @@ class ExecutionReadinessTests(unittest.TestCase):
         report = execution_readiness_payload()
         self.assertEqual(report["mode"], "paper_only")
         self.assertEqual(report["status"], "blocked")
-        self.assertFalse(report["live_order_submission_implemented"])
+        self.assertTrue(report["live_order_submission_implemented"])
         self.assertFalse(report["live_execution_enabled"])
         self.assertFalse(report["order_submission_allowed"])
         self.assertFalse(report["order_signing_enabled"])
         self.assertEqual(report["kill_switch"], "engaged")
         self.assertTrue(report["research_only"])
         self.assertEqual(report["execution"], "none")
+
+    def test_platform_age_policy_is_explicit_and_cannot_authorize_execution(self):
+        report = execution_readiness_payload()
+        policy = report["platform_eligibility_policy"]
+        self.assertEqual(policy["minimum_user_age_years"], 18)
+        self.assertEqual(policy["terms_effective_date"], "2026-08-11")
+        self.assertTrue(policy["independent_verification_required"])
+        self.assertIn("polymarket.com", policy["source_url"])
+        self.assertFalse(report["live_execution_enabled"])
+        self.assertFalse(report["order_submission_allowed"])
+        eligibility = next(
+            item for item in report["blockers"]
+            if item["code"] == "account_eligibility_not_verified"
+        )
+        self.assertIn("18 or older", eligibility["detail"])
+        self.assertTrue(any(
+            "at least 18 years old" in item
+            for item in report["requirements_before_any_separate_live_launch_review"]
+        ))
 
     def test_environment_flags_cannot_enable_live_execution(self):
         with patch.dict(os.environ, {
@@ -31,7 +50,19 @@ class ExecutionReadinessTests(unittest.TestCase):
 
     def test_blockers_include_nontechnical_requirements(self):
         codes = {item["code"] for item in execution_readiness_payload()["blockers"]}
-        self.assertIn("live_order_adapter_not_implemented", codes)
+        self.assertIn("live_execution_disabled_by_default", codes)
+        self.assertIn("live_release_gates_not_verified", codes)
+        self.assertIn("resting_order_execution_not_supported", codes)
+        execution_blocker = next(
+            item for item in execution_readiness_payload()["blockers"]
+            if item["code"] == "live_execution_disabled_by_default"
+        )
+        self.assertIn("LIVE_TRADING_ENABLED", execution_blocker["detail"])
+        resting_blocker = next(
+            item for item in execution_readiness_payload()["blockers"]
+            if item["code"] == "resting_order_execution_not_supported"
+        )
+        self.assertIn("FAK", resting_blocker["detail"])
         self.assertIn("account_eligibility_not_verified", codes)
         self.assertIn("jurisdiction_and_legal_review_not_verified", codes)
         self.assertIn("strategy_edge_not_established", codes)

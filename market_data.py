@@ -19,6 +19,15 @@ def _number(value: Any) -> float | None:
     return parsed if math.isfinite(parsed) and parsed >= 0 else None
 
 
+def _timestamp_iso(value: Any) -> str | None:
+    if isinstance(value, datetime):
+        return value.isoformat()
+    if isinstance(value, str):
+        normalized = value.strip()
+        return normalized or None
+    return None
+
+
 def summarize_order_book(payload: dict[str, Any], *, token_id: str, observed_at: str | None = None) -> dict[str, Any]:
     """Extract best bid/ask, spread, top-five depth and imbalance from a CLOB book."""
     if not isinstance(payload, dict):
@@ -101,10 +110,7 @@ def fetch_order_book(token_id: str) -> dict[str, Any]:
     result.update({
         "source": "official_polymarket_python_sdk",
         "sdk_version": "0.16.0",
-        "exchange_timestamp": (
-            exchange_timestamp.isoformat()
-            if hasattr(exchange_timestamp, "isoformat") else None
-        ),
+        "exchange_timestamp": _timestamp_iso(exchange_timestamp),
         "book_hash": str(getattr(book, "hash", "") or ""),
         "min_order_size": str(getattr(book, "min_order_size", "") or ""),
         "tick_size": str(getattr(book, "tick_size", "") or ""),

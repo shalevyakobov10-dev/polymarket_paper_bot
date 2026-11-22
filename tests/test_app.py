@@ -10,6 +10,7 @@ from urllib.request import urlopen as http_urlopen
 from urllib.parse import parse_qs, urlparse
 
 import app
+from supervisor_status import build_supervisor_status, write_supervisor_status
 
 
 class ParserTests(unittest.TestCase):
@@ -257,6 +258,66 @@ class ParserTests(unittest.TestCase):
             ["news", "resolutions", "gdelt", "market_stream"],
         )
 
+    def test_health_reports_event_paper_worker_freshness_and_degradation(self):
+        now = datetime(2026, 11, 7, 12, 0, tzinfo=timezone.utc)
+        core = {
+            "worker_running": True,
+            "last_success_at": (now - timedelta(seconds=30)).isoformat(),
+            "last_error": None,
+        }
+        paper = {
+            "worker_state": "running",
+            "last_success_at": (now - timedelta(seconds=60)).isoformat(),
+            "cycles": 8,
+            "consecutive_failures": 0,
+            "total_failures": 1,
+            "heartbeat_fresh": True,
+        }
+        healthy, payload = app.health_payload(core, now, paper_worker_snapshot=paper)
+        self.assertTrue(healthy)
+        self.assertEqual(payload["components"]["event_paper_worker"]["status"], "healthy")
+        self.assertNotIn("event_paper_worker", payload["degraded_components"])
+
+        backup_degraded = {**paper, "backup_error_type": "OSError",
+                           "backup_consecutive_failures": 1,
+                           "backup_retry_delay_seconds": 60}
+        healthy, payload = app.health_payload(
+            core, now, paper_worker_snapshot=backup_degraded
+        )
+        self.assertFalse(healthy)
+        self.assertEqual(payload["status"], "unhealthy")
+        self.assertEqual(payload["components"]["event_paper_worker"]["status"], "degraded")
+        self.assertIn("event_paper_worker", payload["required_component_failures"])
+        self.assertEqual(
+            payload["components"]["event_paper_worker"]["backup_error_type"], "OSError"
+        )
+
+        degraded = {**paper, "worker_state": "degraded", "consecutive_failures": 2}
+        healthy, payload = app.health_payload(core, now, paper_worker_snapshot=degraded)
+        self.assertFalse(healthy)
+        self.assertEqual(payload["status"], "unhealthy")
+        self.assertEqual(payload["components"]["event_paper_worker"]["status"], "degraded")
+        self.assertIn("event_paper_worker", payload["required_component_failures"])
+
+        stale = {
+            **paper,
+            "last_success_at": (now - timedelta(hours=1)).isoformat(),
+            "heartbeat_fresh": False,
+        }
+        healthy, payload = app.health_payload(core, now, paper_worker_snapshot=stale)
+        self.assertFalse(healthy)
+        self.assertEqual(payload["status"], "unhealthy")
+        self.assertEqual(payload["components"]["event_paper_worker"]["status"], "stale")
+
+        hung = {
+            **paper,
+            "last_success_at": (now - timedelta(seconds=60)).isoformat(),
+            "heartbeat_fresh": False,
+        }
+        healthy, payload = app.health_payload(core, now, paper_worker_snapshot=hung)
+        self.assertFalse(healthy)
+        self.assertEqual(payload["components"]["event_paper_worker"]["status"], "stale")
+
     def test_health_reports_model_learning_worker_freshness(self):
         now = datetime(2026, 11, 3, 12, tzinfo=timezone.utc)
         core = {
@@ -309,6 +370,312 @@ class ParserTests(unittest.TestCase):
         }
         healthy, payload = app.health_payload(stopped, now)
         self.assertFalse(healthy)
+
+
+
+    def test_event_paper_endpoint_reports_disabled_state_without_enabling_execution(self):
+        server = app.ThreadingHTTPServer(("127.0.0.1", 0), app.Handler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        old_supervisor = app.SUPERVISOR_STATUS_FILE
+        old_worker = app.EVENT_PAPER_WORKER_STATUS_FILE
+        with tempfile.TemporaryDirectory() as directory:
+            try:
+                app.SUPERVISOR_STATUS_FILE = Path(directory) / "supervisor.json"
+                app.EVENT_PAPER_WORKER_STATUS_FILE = Path(directory) / "worker.json"
+                write_supervisor_status(
+                    app.SUPERVISOR_STATUS_FILE,
+                    build_supervisor_status(
+                        service_state="running",
+                        monitor_enabled=False,
+                        monitor_state="disabled",
+                        event_paper_worker_enabled=False,
+                        event_paper_worker_state="disabled",
+                    ),
+                )
+                thread.start()
+                address = f"http://127.0.0.1:{server.server_port}/event-paper"
+                with http_urlopen(address, timeout=3) as response:
+                    payload = json.loads(response.read().decode("utf-8"))
+                self.assertEqual(payload["worker_state"], "disabled")
+                self.assertTrue(payload["research_only"])
+                self.assertFalse(payload["live_execution_enabled"])
+                self.assertEqual(payload["execution"], "none")
+            finally:
+                server.shutdown()
+                server.server_close()
+                thread.join(timeout=2)
+                app.SUPERVISOR_STATUS_FILE = old_supervisor
+                app.EVENT_PAPER_WORKER_STATUS_FILE = old_worker
+
+    def test_perps_live_release_gate_endpoint_stays_closed_even_with_runtime_flags_set(self):
+        server = app.ThreadingHTTPServer(("127.0.0.1", 0), app.Handler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        environment = {
+            "DRY_RUN": "false",
+            "PERPS_LIVE_EXECUTION_ENABLED": "true",
+            "PERPS_LIVE_TRADING_ARMED": "true",
+            "PERPS_LIVE_CONFIRMATION": "I_ACCEPT_REAL_MONEY_RISK",
+            "POLYMARKET_PRIVATE_KEY": "must-not-be-read",
+        }
+        try:
+            with patch.dict(os.environ, environment):
+                thread.start()
+                address = f"http://127.0.0.1:{server.server_port}/perps-live-gate"
+                with http_urlopen(address, timeout=3) as response:
+                    payload = json.loads(response.read().decode("utf-8"))
+            self.assertEqual(payload["mode"], "PERPS_LIVE_RELEASE_GATE_ONLY")
+            self.assertFalse(payload["all_release_gates_passed"])
+            self.assertTrue(payload["runtime_flags_passed"])
+            self.assertFalse(payload["eligible_for_separate_gateway_review"])
+            self.assertFalse(payload["order_submission_allowed"])
+            self.assertFalse(payload["live_execution_enabled"])
+            self.assertFalse(payload["private_credentials_loaded"])
+            self.assertFalse(payload["order_signing_allowed"])
+            self.assertEqual(payload["execution"], "none")
+            self.assertNotIn("must-not-be-read", json.dumps(payload))
+            self.assertTrue(all(
+                item["passed"] is False
+                for item in payload["release_gates"].values()
+            ))
+        finally:
+            server.shutdown()
+            server.server_close()
+            if thread.is_alive():
+                thread.join(timeout=2)
+
+    def test_perps_paper_endpoint_reports_disabled_state_without_worker_status(self):
+        server = app.ThreadingHTTPServer(("127.0.0.1", 0), app.Handler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        old_supervisor = app.SUPERVISOR_STATUS_FILE
+        old_perps_worker = app.PERPS_MARKET_WORKER_STATUS_FILE
+        with tempfile.TemporaryDirectory() as directory:
+            try:
+                app.SUPERVISOR_STATUS_FILE = Path(directory) / "supervisor.json"
+                app.PERPS_MARKET_WORKER_STATUS_FILE = Path(directory) / "missing-worker.json"
+                write_supervisor_status(
+                    app.SUPERVISOR_STATUS_FILE,
+                    build_supervisor_status(
+                        service_state="running",
+                        monitor_enabled=False,
+                        monitor_state="disabled",
+                        perps_market_worker_enabled=False,
+                        perps_market_worker_state="disabled",
+                    ),
+                )
+                thread.start()
+                address = f"http://127.0.0.1:{server.server_port}/perps-paper"
+                with http_urlopen(address, timeout=3) as response:
+                    payload = json.loads(response.read().decode("utf-8"))
+                self.assertEqual(payload["worker_state"], "disabled")
+                self.assertFalse(payload["enabled"])
+                self.assertIsNone(payload["degraded_reason"])
+                self.assertEqual(payload["markets_in_last_snapshot"], 0)
+                self.assertEqual(payload["fee_coverage_status"], "unavailable")
+                self.assertFalse(payload["fee_verified_entry_path_available"])
+                self.assertTrue(payload["research_only"])
+                self.assertFalse(payload["live_execution_enabled"])
+                self.assertFalse(payload["order_submission_allowed"])
+                self.assertEqual(payload["execution"], "none")
+            finally:
+                server.shutdown()
+                server.server_close()
+                if thread.is_alive():
+                    thread.join(timeout=2)
+                app.SUPERVISOR_STATUS_FILE = old_supervisor
+                app.PERPS_MARKET_WORKER_STATUS_FILE = old_perps_worker
+
+    def test_perps_paper_endpoint_rejects_stale_healthy_file_while_supervisor_restarts(self):
+        server = app.ThreadingHTTPServer(("127.0.0.1", 0), app.Handler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        old_supervisor = app.SUPERVISOR_STATUS_FILE
+        old_perps_worker = app.PERPS_MARKET_WORKER_STATUS_FILE
+        with tempfile.TemporaryDirectory() as directory:
+            try:
+                root = Path(directory)
+                app.SUPERVISOR_STATUS_FILE = root / "supervisor.json"
+                app.PERPS_MARKET_WORKER_STATUS_FILE = root / "perps-worker.json"
+                now = datetime.now(timezone.utc)
+                write_supervisor_status(
+                    app.SUPERVISOR_STATUS_FILE,
+                    build_supervisor_status(
+                        service_state="running",
+                        monitor_enabled=False,
+                        monitor_state="disabled",
+                        perps_market_worker_enabled=True,
+                        perps_market_worker_state="restarting",
+                        perps_market_worker_restart_count=1,
+                        perps_market_worker_next_restart_at=(
+                            now + timedelta(seconds=30)
+                        ).isoformat(),
+                    ),
+                )
+                # The prior process left a fresh-looking healthy file. It must
+                # not be mistaken for a running worker during a restart window.
+                app.PERPS_MARKET_WORKER_STATUS_FILE.write_text(json.dumps({
+                    "schema_version": 1,
+                    "enabled": True,
+                    "worker_state": "healthy",
+                    "last_heartbeat_at": now.isoformat(),
+                    "heartbeat_timeout_seconds": 250,
+                    "last_success_at": now.isoformat(),
+                    "consecutive_failures": 0,
+                    "markets_in_last_snapshot": 10,
+                    "markets_with_fee_schedule": 10,
+                    "history_rows": 10,
+                    "paper_engine_enabled": True,
+                    "paper_engine_state": "healthy",
+                    "paper_engine": {
+                        "mode": "POLYMARKET_PERPS_ISOLATED_MARGIN_PAPER",
+                        "cash": "1000",
+                        "open_positions": 0,
+                        "closed_positions": 0,
+                        "halted": False,
+                    },
+                }), encoding="utf-8")
+                thread.start()
+                address = f"http://127.0.0.1:{server.server_port}/perps-paper"
+                with http_urlopen(address, timeout=3) as response:
+                    payload = json.loads(response.read().decode("utf-8"))
+                self.assertEqual(payload["worker_state"], "restarting")
+                self.assertEqual(payload["degraded_reason"], "supervisor_worker_restarting")
+                self.assertFalse(payload["fee_verified_entry_path_available"])
+                self.assertTrue(payload["research_only"])
+                self.assertFalse(payload["live_execution_enabled"])
+                self.assertFalse(payload["order_submission_allowed"])
+            finally:
+                server.shutdown()
+                server.server_close()
+                if thread.is_alive():
+                    thread.join(timeout=2)
+                app.SUPERVISOR_STATUS_FILE = old_supervisor
+                app.PERPS_MARKET_WORKER_STATUS_FILE = old_perps_worker
+
+    def test_perps_paper_endpoint_reports_fee_gated_degraded_state(self):
+        server = app.ThreadingHTTPServer(("127.0.0.1", 0), app.Handler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        old_supervisor = app.SUPERVISOR_STATUS_FILE
+        old_perps_worker = app.PERPS_MARKET_WORKER_STATUS_FILE
+        with tempfile.TemporaryDirectory() as directory:
+            try:
+                root = Path(directory)
+                app.SUPERVISOR_STATUS_FILE = root / "supervisor.json"
+                app.PERPS_MARKET_WORKER_STATUS_FILE = root / "perps-worker.json"
+                write_supervisor_status(
+                    app.SUPERVISOR_STATUS_FILE,
+                    build_supervisor_status(
+                        service_state="running",
+                        monitor_enabled=False,
+                        monitor_state="disabled",
+                        perps_market_worker_enabled=True,
+                        perps_market_worker_state="running",
+                    ),
+                )
+                app.PERPS_MARKET_WORKER_STATUS_FILE.write_text(json.dumps({
+                    "schema_version": 1,
+                    "enabled": True,
+                    "worker_state": "healthy",
+                    "last_heartbeat_at": datetime.now(timezone.utc).isoformat(),
+                    "last_success_at": datetime.now(timezone.utc).isoformat(),
+                    "consecutive_failures": 0,
+                    "markets_in_last_snapshot": 10,
+                    "markets_with_fee_schedule": 0,
+                    "history_rows": 10,
+                    "paper_engine_enabled": True,
+                    "paper_engine_state": "degraded",
+                    "paper_engine_degraded_reason": "no_verified_fee_schedule",
+                    "paper_engine": {
+                        "mode": "POLYMARKET_PERPS_ISOLATED_MARGIN_PAPER",
+                        "cash": "1000",
+                        "open_positions": 0,
+                        "closed_positions": 0,
+                        "halted": False,
+                    },
+                }), encoding="utf-8")
+                thread.start()
+                address = f"http://127.0.0.1:{server.server_port}/perps-paper"
+                with http_urlopen(address, timeout=3) as response:
+                    payload = json.loads(response.read().decode("utf-8"))
+                self.assertEqual(payload["worker_state"], "degraded")
+                self.assertEqual(payload["degraded_reason"], "no_verified_fee_schedule")
+                self.assertEqual(payload["markets_in_last_snapshot"], 10)
+                self.assertEqual(payload["markets_with_verified_fee_schedule"], 0)
+                self.assertEqual(payload["fee_coverage_status"], "unavailable")
+                self.assertFalse(payload["fee_verified_entry_path_available"])
+                self.assertFalse(payload["live_execution_enabled"])
+                self.assertFalse(payload["order_submission_allowed"])
+                self.assertEqual(payload["execution"], "none")
+            finally:
+                server.shutdown()
+                server.server_close()
+                if thread.is_alive():
+                    thread.join(timeout=2)
+                app.SUPERVISOR_STATUS_FILE = old_supervisor
+                app.PERPS_MARKET_WORKER_STATUS_FILE = old_perps_worker
+
+    def test_service_supervisor_endpoint_reports_sanitized_process_status(self):
+        server = app.ThreadingHTTPServer(("127.0.0.1", 0), app.Handler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        old_path = app.SUPERVISOR_STATUS_FILE
+        with tempfile.TemporaryDirectory() as directory:
+            try:
+                app.SUPERVISOR_STATUS_FILE = Path(directory) / "supervisor.json"
+                write_supervisor_status(
+                    app.SUPERVISOR_STATUS_FILE,
+                    build_supervisor_status(
+                        service_state="running",
+                        monitor_enabled=True,
+                        monitor_state="restarting",
+                        restart_count=2,
+                        last_exit_code=7,
+                        next_restart_at="2026-11-04T20:00:05+00:00",
+                    ),
+                )
+                thread.start()
+                address = f"http://127.0.0.1:{server.server_port}/service-supervisor"
+                with http_urlopen(address, timeout=3) as response:
+                    payload = json.loads(response.read().decode("utf-8"))
+                self.assertTrue(payload["supervised"])
+                self.assertTrue(payload["status_fresh"])
+                self.assertIsNotNone(payload["status_age_seconds"])
+                self.assertEqual(payload["service_state"], "running")
+                self.assertEqual(payload["monitor_state"], "restarting")
+                self.assertEqual(payload["monitor_restart_count"], 2)
+                self.assertEqual(payload["monitor_last_exit_code"], 7)
+                self.assertTrue(payload["read_only"])
+                self.assertFalse(payload["order_submission_allowed"])
+                self.assertFalse(payload["order_signing_allowed"])
+                self.assertEqual(payload["execution"], "none")
+                self.assertIsNone(payload["app_exit_code"])
+                self.assertNotIn("POLYMARKET_PRIVATE_KEY", payload)
+            finally:
+                server.shutdown()
+                server.server_close()
+                if thread.is_alive():
+                    thread.join(timeout=2)
+                app.SUPERVISOR_STATUS_FILE = old_path
+
+    def test_service_supervisor_endpoint_is_explicit_when_not_supervised(self):
+        server = app.ThreadingHTTPServer(("127.0.0.1", 0), app.Handler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        old_path = app.SUPERVISOR_STATUS_FILE
+        with tempfile.TemporaryDirectory() as directory:
+            try:
+                app.SUPERVISOR_STATUS_FILE = Path(directory) / "not-created.json"
+                thread.start()
+                address = f"http://127.0.0.1:{server.server_port}/service-supervisor"
+                with http_urlopen(address, timeout=3) as response:
+                    payload = json.loads(response.read().decode("utf-8"))
+                self.assertFalse(payload["supervised"])
+                self.assertEqual(payload["service_state"], "unknown")
+                self.assertEqual(payload["status_error"], "status_file_missing")
+                self.assertFalse(payload["order_submission_allowed"])
+                self.assertEqual(payload["execution"], "none")
+            finally:
+                server.shutdown()
+                server.server_close()
+                if thread.is_alive():
+                    thread.join(timeout=2)
+                app.SUPERVISOR_STATUS_FILE = old_path
 
 
     def test_news_endpoint_returns_status_and_attributed_items(self):
@@ -596,6 +963,41 @@ class ParserTests(unittest.TestCase):
         self.assertFalse(payload["live_execution_enabled"])
         forecast.assert_called_once()
 
+    def test_control_center_serves_read_only_dashboard_with_security_headers(self):
+        server = app.ThreadingHTTPServer(("127.0.0.1", 0), app.Handler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        try:
+            thread.start()
+            address = f"http://127.0.0.1:{server.server_port}/control-center"
+            with http_urlopen(address, timeout=3) as response:
+                html = response.read().decode("utf-8")
+                self.assertEqual(response.status, 200)
+                self.assertIn("text/html", response.headers.get("Content-Type", ""))
+                self.assertEqual(response.headers.get("X-Frame-Options"), "DENY")
+                self.assertEqual(response.headers.get("X-Content-Type-Options"), "nosniff")
+                self.assertEqual(response.headers.get("Cache-Control"), "no-store")
+                policy = response.headers.get("Content-Security-Policy", "")
+                self.assertIn("connect-src 'self'", policy)
+                self.assertIn("frame-ancestors 'none'", policy)
+            self.assertIn("Polymarket Bot Control Center", html)
+            self.assertIn("Read-only monitoring", html)
+            self.assertIn("/perps-paper", html)
+            self.assertIn("/perps-live-gate", html)
+            self.assertIn("perps_order_journal_present", html)
+            self.assertIn("perps_order_journal_backed_up", html)
+            self.assertIn("backup_files_expected_last_run", html)
+            self.assertIn("Live order submission and signing remain disabled", html)
+            self.assertNotIn("<input", html.lower())
+            self.assertNotIn("type=\"password\"", html.lower())
+            self.assertNotIn("submit_limit_order", html)
+            self.assertNotIn("PERPS_LIVE_CONFIRMATION", html)
+        finally:
+            server.shutdown()
+            server.server_close()
+            if thread.is_alive():
+                thread.join(timeout=2)
+
+
 class WorkerRetryIntegrationTests(unittest.TestCase):
     def test_worker_retry_delay_grows_to_shared_cap(self):
         with patch("app.random.random", return_value=0.5):
@@ -626,6 +1028,102 @@ class WorkerRetryIntegrationTests(unittest.TestCase):
         with patch("app.random.random", return_value=0.5):
             delay = app._worker_retry_delay(error, 1, base_seconds=60)
         self.assertEqual(delay, 900.0)
+
+
+class PerpsPaperBackupHealthTests(unittest.TestCase):
+    def test_recent_verified_pair_is_healthy(self):
+        now = datetime(2026, 11, 22, 12, 0, tzinfo=timezone.utc)
+        snapshot = {
+            "backup_interval_hours": 6,
+            "last_backup_at": (now - timedelta(hours=1)).isoformat(),
+            "backup_files_last_run": 2,
+            "backup_error_type": None,
+            "backup_consecutive_failures": 0,
+            "last_backup_manifest_name": "perps-backup-manifest.json",
+        }
+        result = app.perps_backup_health_component(snapshot, now)
+        self.assertEqual(result["status"], "healthy")
+        self.assertEqual(result["backup_files_last_run"], 2)
+        self.assertEqual(result["stale_after_seconds"], 8 * 3600)
+
+    def test_missing_or_stale_backup_fails_closed(self):
+        now = datetime(2026, 11, 22, 12, 0, tzinfo=timezone.utc)
+        missing = app.perps_backup_health_component({}, now)
+        self.assertEqual(missing["status"], "starting")
+        stale = app.perps_backup_health_component({
+            "backup_interval_hours": 6,
+            "last_backup_at": (now - timedelta(hours=10)).isoformat(),
+            "backup_files_last_run": 2,
+            "backup_consecutive_failures": 0,
+        }, now)
+        self.assertEqual(stale["status"], "stale")
+
+    def test_incomplete_backup_and_backup_errors_are_degraded(self):
+        now = datetime(2026, 11, 22, 12, 0, tzinfo=timezone.utc)
+        base = {
+            "last_backup_at": (now - timedelta(minutes=10)).isoformat(),
+            "backup_files_last_run": 1,
+            "backup_consecutive_failures": 0,
+        }
+        self.assertEqual(app.perps_backup_health_component(base, now)["status"], "degraded")
+        failed = {
+            **base,
+            "backup_files_last_run": 2,
+            "backup_error_type": "OSError",
+            "backup_consecutive_failures": 1,
+        }
+        self.assertEqual(app.perps_backup_health_component(failed, now)["status"], "degraded")
+
+    def test_existing_perps_order_journal_must_be_in_the_verified_backup_set(self):
+        now = datetime(2026, 11, 22, 12, 0, tzinfo=timezone.utc)
+        base = {
+            "backup_interval_hours": 6,
+            "last_backup_at": (now - timedelta(minutes=10)).isoformat(),
+            "last_backup_manifest_name": "perps-backup-manifest.json",
+            "backup_consecutive_failures": 0,
+            "perps_order_journal_present": True,
+            "perps_order_journal_backed_up": False,
+            "backup_files_last_run": 2,
+            "backup_files_expected_last_run": 2,
+        }
+        missing_journal_copy = app.perps_backup_health_component(base, now)
+        self.assertEqual(missing_journal_copy["status"], "degraded")
+        self.assertTrue(missing_journal_copy["perps_order_journal_present"])
+        self.assertFalse(missing_journal_copy["perps_order_journal_backed_up"])
+
+        complete = {
+            **base,
+            "perps_order_journal_backed_up": True,
+            "backup_files_last_run": 3,
+            "backup_files_expected_last_run": 3,
+        }
+        verified = app.perps_backup_health_component(complete, now)
+        self.assertEqual(verified["status"], "healthy")
+        self.assertEqual(verified["backup_files_last_run"], 3)
+        self.assertEqual(verified["backup_files_expected_last_run"], 3)
+
+    def test_order_journal_appearing_after_previous_two_database_backup_is_degraded(self):
+        now = datetime(2026, 11, 22, 12, 0, tzinfo=timezone.utc)
+        snapshot = {
+            "backup_interval_hours": 6,
+            "last_backup_at": (now - timedelta(minutes=10)).isoformat(),
+            "last_backup_manifest_name": "perps-backup-manifest.json",
+            "backup_consecutive_failures": 0,
+            "backup_files_last_run": 2,
+            "backup_files_expected_last_run": 2,
+            "perps_order_journal_present": True,
+            "perps_order_journal_backed_up": False,
+        }
+        result = app.perps_backup_health_component(snapshot, now)
+        self.assertEqual(result["status"], "degraded")
+
+    def test_future_dated_backup_is_invalid(self):
+        now = datetime(2026, 11, 22, 12, 0, tzinfo=timezone.utc)
+        result = app.perps_backup_health_component({
+            "last_backup_at": (now + timedelta(minutes=5)).isoformat(),
+            "backup_files_last_run": 2,
+        }, now)
+        self.assertEqual(result["status"], "invalid")
 
 
 if __name__ == "__main__":

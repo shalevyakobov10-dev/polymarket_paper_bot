@@ -448,6 +448,72 @@ class ParserTests(unittest.TestCase):
                 app.SUPERVISOR_STATUS_FILE = old_supervisor
                 app.PERPS_MARKET_WORKER_STATUS_FILE = old_perps_worker
 
+    def test_perps_paper_endpoint_rejects_stale_healthy_file_while_supervisor_restarts(self):
+        server = app.ThreadingHTTPServer(("127.0.0.1", 0), app.Handler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        old_supervisor = app.SUPERVISOR_STATUS_FILE
+        old_perps_worker = app.PERPS_MARKET_WORKER_STATUS_FILE
+        with tempfile.TemporaryDirectory() as directory:
+            try:
+                root = Path(directory)
+                app.SUPERVISOR_STATUS_FILE = root / "supervisor.json"
+                app.PERPS_MARKET_WORKER_STATUS_FILE = root / "perps-worker.json"
+                now = datetime.now(timezone.utc)
+                write_supervisor_status(
+                    app.SUPERVISOR_STATUS_FILE,
+                    build_supervisor_status(
+                        service_state="running",
+                        monitor_enabled=False,
+                        monitor_state="disabled",
+                        perps_market_worker_enabled=True,
+                        perps_market_worker_state="restarting",
+                        perps_market_worker_restart_count=1,
+                        perps_market_worker_next_restart_at=(
+                            now + timedelta(seconds=30)
+                        ).isoformat(),
+                    ),
+                )
+                # The prior process left a fresh-looking healthy file. It must
+                # not be mistaken for a running worker during a restart window.
+                app.PERPS_MARKET_WORKER_STATUS_FILE.write_text(json.dumps({
+                    "schema_version": 1,
+                    "enabled": True,
+                    "worker_state": "healthy",
+                    "last_heartbeat_at": now.isoformat(),
+                    "heartbeat_timeout_seconds": 250,
+                    "last_success_at": now.isoformat(),
+                    "consecutive_failures": 0,
+                    "markets_in_last_snapshot": 10,
+                    "markets_with_fee_schedule": 10,
+                    "history_rows": 10,
+                    "paper_engine_enabled": True,
+                    "paper_engine_state": "healthy",
+                    "paper_engine": {
+                        "mode": "POLYMARKET_PERPS_ISOLATED_MARGIN_PAPER",
+                        "cash": "1000",
+                        "open_positions": 0,
+                        "closed_positions": 0,
+                        "halted": False,
+                    },
+                }), encoding="utf-8")
+                thread.start()
+                address = f"http://127.0.0.1:{server.server_port}/perps-paper"
+                with http_urlopen(address, timeout=3) as response:
+                    payload = json.loads(response.read().decode("utf-8"))
+                self.assertEqual(payload["worker_state"], "restarting")
+                self.assertEqual(payload["degraded_reason"], "supervisor_worker_restarting")
+                self.assertFalse(payload["fee_verified_entry_path_available"])
+                self.assertTrue(payload["research_only"])
+                self.assertFalse(payload["live_execution_enabled"])
+                self.assertFalse(payload["order_submission_allowed"])
+            finally:
+                server.shutdown()
+                server.server_close()
+                if thread.is_alive():
+                    thread.join(timeout=2)
+                app.SUPERVISOR_STATUS_FILE = old_supervisor
+                app.PERPS_MARKET_WORKER_STATUS_FILE = old_perps_worker
+
     def test_perps_paper_endpoint_reports_fee_gated_degraded_state(self):
         server = app.ThreadingHTTPServer(("127.0.0.1", 0), app.Handler)
         thread = threading.Thread(target=server.serve_forever, daemon=True)

@@ -190,7 +190,6 @@ class PerpsOrderJournal:
         self.database_path = str(Path(database_path).expanduser())
         Path(self.database_path).parent.mkdir(parents=True, exist_ok=True)
         self._initialize()
-        self.recover_interrupted_submissions()
 
     def _connect(self) -> sqlite3.Connection:
         connection = sqlite3.connect(
@@ -536,7 +535,7 @@ class PerpsOrderJournal:
                     if observed_quantity != Decimal(state["quantity"]):
                         mismatch = "order_quantity_mismatch"
                     observed_filled = _decimal(filled_quantity, "venue_filled_quantity")
-                        if observed_filled > observed_quantity:
+                    if observed_filled > observed_quantity:
                         mismatch = "venue_filled_quantity_exceeds_order"
                     previous_filled = Decimal(state["filled_quantity"])
                     if observed_filled < previous_filled:

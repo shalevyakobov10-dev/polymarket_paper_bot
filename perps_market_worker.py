@@ -166,6 +166,7 @@ def run_worker(
     paper_engine: Any | None = None,
     paper_engine_factory: Any | None = None,
     paper_engine_enabled: bool | None = None,
+    strategy_engine: Any | None = None,
     backup_function: Any = create_paper_data_backups,
     backup_interval_hours: int | None = None,
     backup_directory: str | Path | None = None,
@@ -213,11 +214,17 @@ def run_worker(
     auto_entry_raw = str(os.getenv("PERPS_AUTO_ENTRY_ENABLED", "false")).strip().lower()
     if signal_enabled_raw not in {"true", "false"} or auto_entry_raw not in {"true", "false"}:
         raise ValueError("Perps signal/auto-entry flags must be exactly true or false")
-    signal_evaluation_enabled = signal_enabled_raw == "true"
+    signal_evaluation_enabled = signal_enabled_raw == "true" or strategy_engine is not None
     auto_entry_enabled = auto_entry_raw == "true"
+    if strategy_engine is not None and not paper_enabled:
+        raise ValueError("Perps strategy injection requires the Paper engine")
     if auto_entry_enabled and (not paper_enabled or not signal_evaluation_enabled):
         raise ValueError("Perps auto-entry requires the Paper engine and signal evaluation")
-    strategy = strategy_from_env() if signal_evaluation_enabled and paper_enabled else None
+    strategy = (
+        strategy_engine
+        if strategy_engine is not None
+        else strategy_from_env() if signal_evaluation_enabled and paper_enabled else None
+    )
     current_paper_engine = paper_engine
     if paper_enabled and current_paper_engine is None:
         factory = paper_engine_factory or PerpsPaperEngine
@@ -266,6 +273,10 @@ def run_worker(
         "entries_opened_total": 0,
         "entry_blocks_total": 0,
         "strategy_last_reason": None,
+        "strategy_decisions_last_cycle": 0,
+        "signals_last_cycle": 0,
+        "entries_opened_last_cycle": 0,
+        "entry_blocks_last_cycle": 0,
         "paper_cash_balance": None,
         "paper_equity": None,
         "paper_daily_loss": None,
@@ -457,6 +468,10 @@ def run_worker(
                         "entries_opened_total": int(current_paper_engine.strategy_decision_summary()["entries_opened"]),
                         "entry_blocks_total": int(current_paper_engine.strategy_decision_summary()["entry_blocks"]),
                         "strategy_last_reason": strategy_last_reason,
+                        "strategy_decisions_last_cycle": strategy_decisions,
+                        "signals_last_cycle": signals_logged,
+                        "entries_opened_last_cycle": entries_opened,
+                        "entry_blocks_last_cycle": entry_blocks,
                         "paper_cash_balance": str(paper_metrics.get("cash_balance")),
                         "paper_equity": str(paper_metrics.get("equity")),
                         "paper_daily_loss": str(paper_metrics.get("daily_loss")),

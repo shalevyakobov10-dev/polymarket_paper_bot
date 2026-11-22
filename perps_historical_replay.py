@@ -112,6 +112,7 @@ def replay_perps_history(
     end_received_at: str | datetime | None = None,
     max_snapshots: int = 10_000,
     engine_options: dict[str, Any] | None = None,
+    entry_start_received_at: str | datetime | None = None,
 ) -> dict[str, Any]:
     """Replay a bounded archived Perps window through a fresh paper account.
 
@@ -126,6 +127,10 @@ def replay_perps_history(
         raise ValueError("max_snapshots must be an integer between 1 and 100000")
     if engine_options is not None and not isinstance(engine_options, dict):
         raise ValueError("engine_options must be an object")
+    entry_start = (
+        _parse_aware(entry_start_received_at, "entry_start_received_at")
+        if entry_start_received_at is not None else None
+    )
 
     store = PerpsMarketHistoryStore(source_path)
     try:
@@ -149,7 +154,14 @@ def replay_perps_history(
                     snapshot = _engine_snapshot(row)
                     received_at = _parse_aware(snapshot["received_at"], "received_at")
                     point_in_time_history = PointInTimePerpsHistory(store, received_at)
-                    engine.process_snapshot(snapshot, point_in_time_history, now=received_at)
+                    engine.process_snapshot(
+                        snapshot,
+                        point_in_time_history,
+                        now=received_at,
+                        allow_new_entries=(
+                            entry_start is None or received_at >= entry_start
+                        ),
+                    )
                     instrument_ids.add(int(row["instrument_id"]))
 
                 summary = engine.summary()
@@ -212,6 +224,7 @@ def replay_perps_history(
             "instrument_ids": sorted(instrument_ids),
             "first_received_at": first_received_at,
             "last_received_at": last_received_at,
+            "entry_start_received_at": entry_start.isoformat() if entry_start else None,
             "paper_entry_events": entry_count,
             "first_entry_at": first_entry,
             "position_records": position_count,
@@ -225,6 +238,12 @@ def replay_perps_history(
                 ),
                 "gross_closed_pnl": str(gross_closed),
                 "net_closed_pnl_after_fees_and_funding": str(net_closed),
+                "net_expectancy_per_closed_trade": (
+                    str((net_closed / Decimal(len(closed_trades))).quantize(Decimal("0.000001")))
+                    if closed_trades else None
+                ),
+                "winning_net_pnl": str(winning_pnl),
+                "losing_net_pnl_abs": str(losing_pnl),
                 "profit_factor": (
                     str((winning_pnl / losing_pnl).quantize(Decimal("0.0001")))
                     if losing_pnl > 0 else None
@@ -267,6 +286,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--from", dest="start_received_at", help="Inclusive ISO-8601 capture-time start.")
     parser.add_argument("--to", dest="end_received_at", help="Inclusive ISO-8601 capture-time end.")
     parser.add_argument("--max-snapshots", type=int, default=10_000, help="Maximum replay rows (1–100000).")
+    parser.add_argument(
+        "--entry-start",
+        dest="entry_start_received_at",
+        help="Optional ISO-8601 time before which snapshots warm up history but cannot open positions.",
+    )
     args = parser.parse_args(argv)
     try:
         report = replay_perps_history(
@@ -274,6 +298,7 @@ def main(argv: list[str] | None = None) -> int:
             start_received_at=args.start_received_at,
             end_received_at=args.end_received_at,
             max_snapshots=args.max_snapshots,
+            entry_start_received_at=args.entry_start_received_at,
         )
     except (OSError, ValueError, TypeError) as exc:
         parser.exit(2, f"Perps historical replay failed safely: {exc}\n")

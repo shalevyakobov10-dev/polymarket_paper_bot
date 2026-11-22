@@ -139,10 +139,10 @@ class PerpsWalkForwardEvaluationTests(unittest.TestCase):
                 [row["test_start"] for row in folds],
                 sorted(row["test_start"] for row in folds),
             )
-            self.assertEqual(
-                [row["test_end"] for row in folds[:-1]],
-                [row["test_end"] for row in folds[:-1]],
-            )
+            for earlier, later in zip(folds, folds[1:]):
+                earlier_end = datetime.fromisoformat(earlier["test_end"])
+                later_start = datetime.fromisoformat(later["test_start"])
+                self.assertLess(earlier_end, later_start)
             calls = replay.call_args_list
             self.assertEqual(
                 [call.kwargs["entry_start_received_at"].isoformat() for call in calls],

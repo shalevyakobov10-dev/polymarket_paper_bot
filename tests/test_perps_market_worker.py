@@ -575,6 +575,10 @@ class PerpsMarketWorkerTests(unittest.TestCase):
                 "paper_engine_state": "healthy",
                 "paper_engine": {
                     "cash": "950.00",
+                    "open_notional": "45.50",
+                    "effective_leverage": "0.0479",
+                    "peak_drawdown_pct": "1.25",
+                    "daily_pnl_pct": "-0.75",
                     "closed_positions": 4,
                     "performance": {
                         "closed_trades": 4,
@@ -606,6 +610,10 @@ class PerpsMarketWorkerTests(unittest.TestCase):
             self.assertEqual(result["markets_in_last_snapshot"], 3)
             self.assertEqual(result["heartbeat_timeout_seconds"], 180)
             self.assertFalse(result["live_execution_enabled"])
+            self.assertEqual(result["paper_engine"]["open_notional"], "45.50")
+            self.assertEqual(result["paper_engine"]["effective_leverage"], "0.0479")
+            self.assertEqual(result["paper_engine"]["peak_drawdown_pct"], "1.25")
+            self.assertEqual(result["paper_engine"]["daily_pnl_pct"], "-0.75")
             performance = result["paper_engine"]["performance"]
             self.assertEqual(performance["closed_trades"], 4)
             self.assertEqual(performance["winning_trades"], 3)

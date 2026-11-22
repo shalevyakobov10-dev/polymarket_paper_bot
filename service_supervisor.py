@@ -134,6 +134,18 @@ def build_supervisor_config(
     )
     perps_worker_env.setdefault("PERPS_POLL_INTERVAL_SECONDS", "30")
     perps_worker_env.setdefault("PERPS_MARKET_LIMIT", "10")
+    perps_worker_env.setdefault(
+        "PERPS_PAPER_DATABASE_PATH", str(data_dir / "perps_paper.sqlite3")
+    )
+    perps_worker_env.setdefault(
+        "PERPS_BACKUP_DIRECTORY", str(data_dir / "backups")
+    )
+    perps_worker_env.setdefault("PERPS_BACKUP_INTERVAL_HOURS", "6")
+    perps_worker_env.setdefault("PERPS_BACKUP_RETAIN", "30")
+    perps_worker_env.setdefault("PERPS_PAPER_STARTING_CASH", "100")
+    perps_worker_env.setdefault("PERPS_PAPER_TAKER_FEE_RATE", "0.0005")
+    perps_worker_env.setdefault("PERPS_MAX_ENTRY_IMPACT_BPS", "100")
+    perps_worker_env.setdefault("ENABLE_PERPS_PAPER_ENGINE", "false")
     perps_worker_env["DRY_RUN"] = "true"
     perps_worker_env["LIVE_EXECUTION_ENABLED"] = "false"
 

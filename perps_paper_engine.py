@@ -212,6 +212,19 @@ class PerpsPaperEngine:
                     ON perps_paper_trades(status, instrument_id);
                 CREATE INDEX IF NOT EXISTS idx_perps_paper_trades_closed_at
                     ON perps_paper_trades(closed_at);
+                CREATE TABLE IF NOT EXISTS perps_strategy_decisions (
+                    instrument_id INTEGER NOT NULL,
+                    bar_close_ms INTEGER NOT NULL,
+                    decision_status TEXT NOT NULL,
+                    side TEXT,
+                    reason TEXT,
+                    metrics_json TEXT NOT NULL DEFAULT '{}',
+                    trade_id TEXT,
+                    created_at TEXT NOT NULL,
+                    PRIMARY KEY(instrument_id, bar_close_ms)
+                );
+                CREATE INDEX IF NOT EXISTS idx_perps_strategy_decisions_created_at
+                    ON perps_strategy_decisions(created_at);
                 """
             )
             connection.execute(
@@ -456,6 +469,8 @@ class PerpsPaperEngine:
         side: str,
         requested_notional: Any,
         now: datetime | None = None,
+        stop_loss_distance_pct: Any | None = None,
+        reward_risk_multiple: Any = "2",
     ) -> dict[str, Any]:
         """Open a local paper position only after book-fill and risk validation."""
         current = _now(now)
@@ -514,6 +529,7 @@ class PerpsPaperEngine:
                     daily_loss=metrics["daily_loss"],
                     peak_equity=metrics["peak_equity"],
                     limits=self.limits,
+                    stop_loss_distance_pct=stop_loss_distance_pct,
                 )
                 if risk.get("allowed") is not True:
                     connection.rollback()
@@ -531,10 +547,19 @@ class PerpsPaperEngine:
                     connection.rollback()
                     return {"status": "PAPER_ENTRY_BLOCKED", "reason": "insufficient_paper_cash_after_fee", "risk_gate": risk, "execution": "none"}
                 entry_price = _d(fill["vwap"], "vwap")
-                stop_distance = self.limits.stop_loss_distance_pct
-                # The initial paper strategy uses fixed protective distances;
-                # actual signal design and calibration remain a separate step.
-                target_distance = stop_distance * Decimal("2")
+                stop_distance = (
+                    _d(stop_loss_distance_pct, "stop_loss_distance_pct")
+                    if stop_loss_distance_pct is not None
+                    else self.limits.stop_loss_distance_pct
+                )
+                reward_multiple = _d(reward_risk_multiple, "reward_risk_multiple")
+                if not Decimal("0.0025") <= stop_distance <= Decimal("0.03"):
+                    connection.rollback()
+                    return {"status": "PAPER_ENTRY_BLOCKED", "reason": "stop_loss_distance_out_of_bounds", "execution": "none"}
+                if not Decimal("1") <= reward_multiple <= Decimal("4"):
+                    connection.rollback()
+                    return {"status": "PAPER_ENTRY_BLOCKED", "reason": "reward_risk_multiple_out_of_bounds", "execution": "none"}
+                target_distance = stop_distance * reward_multiple
                 stop_price = entry_price * (Decimal("1") - stop_distance if direction == "LONG" else Decimal("1") + stop_distance)
                 take_profit = entry_price * (Decimal("1") + target_distance if direction == "LONG" else Decimal("1") - target_distance)
                 next_funding = int(snapshot["next_funding_ms"])
@@ -580,6 +605,8 @@ class PerpsPaperEngine:
                     "entry_fee": str(entry_fee),
                     "stop_price": str(stop_price),
                     "take_profit_price": str(take_profit),
+                    "stop_loss_distance_pct": str(stop_distance),
+                    "reward_risk_multiple": str(reward_multiple),
                     "risk_gate": risk,
                     "fill": fill,
                     "research_only": True,
@@ -770,6 +797,112 @@ class PerpsPaperEngine:
             except Exception:
                 connection.rollback()
                 raise
+
+    def recent_snapshots(
+        self,
+        instrument_id: int,
+        *,
+        limit: int = 12000,
+    ) -> list[dict[str, Any]]:
+        """Return chronological archived snapshots for one instrument."""
+        if isinstance(instrument_id, bool) or not isinstance(instrument_id, int) or instrument_id <= 0:
+            raise ValueError("instrument_id must be a positive integer")
+        if isinstance(limit, bool) or not isinstance(limit, int) or not 100 <= limit <= 25000:
+            raise ValueError("limit must be between 100 and 25000")
+        with self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT snapshot_json FROM perps_paper_snapshots
+                WHERE instrument_id=?
+                ORDER BY observed_at DESC, snapshot_id DESC LIMIT ?
+                """,
+                (instrument_id, limit),
+            ).fetchall()
+        snapshots = [json.loads(row["snapshot_json"]) for row in rows]
+        snapshots.reverse()
+        return snapshots
+
+    def claim_strategy_bar(
+        self,
+        instrument_id: int,
+        bar_close_ms: int,
+        *,
+        now: datetime | None = None,
+    ) -> bool:
+        """Persist an idempotent per-instrument candle claim before strategy action."""
+        if isinstance(instrument_id, bool) or not isinstance(instrument_id, int) or instrument_id <= 0:
+            raise ValueError("instrument_id must be a positive integer")
+        if isinstance(bar_close_ms, bool) or not isinstance(bar_close_ms, int) or bar_close_ms <= 0:
+            raise ValueError("bar_close_ms must be a positive integer")
+        with self._connect() as connection:
+            cursor = connection.execute(
+                """
+                INSERT OR IGNORE INTO perps_strategy_decisions
+                    (instrument_id, bar_close_ms, decision_status, reason, metrics_json, created_at)
+                VALUES (?, ?, 'evaluating', 'claimed', '{}', ?)
+                """,
+                (instrument_id, bar_close_ms, _iso(now)),
+            )
+            return cursor.rowcount == 1
+
+    def record_strategy_decision(
+        self,
+        instrument_id: int,
+        bar_close_ms: int,
+        *,
+        decision_status: str,
+        reason: str,
+        metrics: Mapping[str, Any] | None = None,
+        side: str | None = None,
+        trade_id: str | None = None,
+        now: datetime | None = None,
+    ) -> None:
+        """Finalize the audit row for a previously claimed candle."""
+        allowed = {"no_signal", "entry_opened", "entry_blocked", "strategy_error"}
+        if decision_status not in allowed:
+            raise ValueError("invalid_strategy_decision_status")
+        if side not in {None, "LONG", "SHORT"}:
+            raise ValueError("invalid_strategy_side")
+        safe_metrics = dict(metrics or {})
+        serialized = json.dumps(safe_metrics, ensure_ascii=False, sort_keys=True, allow_nan=False)
+        with self._connect() as connection:
+            cursor = connection.execute(
+                """
+                UPDATE perps_strategy_decisions
+                SET decision_status=?, side=?, reason=?, metrics_json=?, trade_id=?
+                WHERE instrument_id=? AND bar_close_ms=? AND decision_status='evaluating'
+                """,
+                (
+                    decision_status, side, str(reason)[:120], serialized,
+                    trade_id, instrument_id, bar_close_ms,
+                ),
+            )
+            if cursor.rowcount != 1:
+                raise RuntimeError("strategy_decision_claim_missing_or_already_finalized")
+
+    def strategy_decision_summary(self) -> dict[str, Any]:
+        with self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT decision_status, COUNT(*) AS count
+                FROM perps_strategy_decisions
+                GROUP BY decision_status
+                """
+            ).fetchall()
+            latest = connection.execute(
+                """
+                SELECT instrument_id, bar_close_ms, decision_status, side, reason, trade_id
+                FROM perps_strategy_decisions
+                ORDER BY created_at DESC, bar_close_ms DESC LIMIT 1
+                """
+            ).fetchone()
+        counts = {str(row["decision_status"]): int(row["count"]) for row in rows}
+        return {
+            "decisions_total": sum(counts.values()),
+            "signals_opened": counts.get("entry_opened", 0),
+            "entry_blocks": counts.get("entry_blocked", 0),
+            "latest": dict(latest) if latest else None,
+        }
 
     def list_trades(self, *, limit: int = 100) -> list[dict[str, Any]]:
         if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 1000:

@@ -84,6 +84,12 @@ def _sanitize_preflight_report(report: Any) -> dict[str, Any]:
     """Accept only the documented preflight contract and safe scalar telemetry."""
     if not isinstance(report, dict) or report.get("mode") != "PERPS_ACCOUNT_READ_ONLY_PREFLIGHT":
         raise ValueError("invalid_read_only_preflight_report")
+    if (
+        report.get("order_placement_authorized") is not False
+        or report.get("live_execution_enabled") is not False
+        or report.get("execution") != "none"
+    ):
+        raise ValueError("preflight_report_contains_execution_permission")
     passed = report.get("read_only_preflight_passed")
     if not isinstance(passed, bool):
         raise ValueError("invalid_read_only_preflight_result")
@@ -291,9 +297,13 @@ def read_perps_account_supervisor_status(path: str | Path) -> dict[str, Any]:
             "read_only_preflight_passed": raw.get("read_only_preflight_passed"),
             "blocked_reasons": reasons,
             "observations": observations,
+            "order_placement_authorized": False,
+            "live_execution_enabled": False,
+            "execution": "none",
         })
         if state == "healthy" and (
-            not safe_report["passed"]
+            raw.get("enabled") is not True
+            or not safe_report["passed"]
             or raw.get("consecutive_failures", 0) != 0
             or preflight_at is None
         ):
@@ -362,7 +372,10 @@ def perps_account_supervisor_freshness(
 
     state = result.get("worker_state")
     fresh = heartbeat_age is not None and -2 <= heartbeat_age <= stale_after
-    if heartbeat_age is None:
+    if result.get("enabled") is not True and state != "stopped":
+        state = "disabled"
+        fresh = False
+    elif heartbeat_age is None:
         state = "starting" if state == "starting" else "unknown"
     elif heartbeat_age < -2:
         state = "invalid"

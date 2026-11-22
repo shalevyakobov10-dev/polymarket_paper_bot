@@ -1,7 +1,13 @@
 import subprocess
+import tempfile
 import unittest
+from dataclasses import replace
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+from unittest.mock import patch
 
 from service_supervisor import (
+    _perps_worker_heartbeat_age,
     build_supervisor_config,
     monitor_restart_delay,
     run_supervisor,
@@ -199,8 +205,89 @@ class SupervisorTests(unittest.TestCase):
             config.perps_worker_env["PERPS_PAPER_DB"],
             "/persist/data/perps_paper.sqlite3",
         )
+        self.assertEqual(config.perps_worker_env["PERPS_WORKER_HEARTBEAT_TIMEOUT_SECONDS"], "279")
+        self.assertEqual(config.perps_worker_status_path, Path(
+            "/persist/data/perps_market_worker_status.json"
+        ))
+        self.assertEqual(config.perps_worker_heartbeat_timeout_seconds, 279.0)
         self.assertNotIn("LIVE_TRADING_ENABLED", config.perps_worker_env)
         self.assertNotIn("LIVE_TRADING_ARMED", config.perps_worker_env)
+
+    def test_perps_heartbeat_timeout_cannot_be_shorter_than_market_poll_budget(self):
+        with self.assertRaisesRegex(ValueError, "between 279 and 7200"):
+            build_supervisor_config({
+                "ENABLE_PERPS_MARKET_DATA_WORKER": "true",
+                "PERPS_POLL_INTERVAL_SECONDS": "45",
+                "PERPS_MARKET_LIMIT": "8",
+                "PERPS_WORKER_HEARTBEAT_TIMEOUT_SECONDS": "278",
+            })
+
+    def test_perps_heartbeat_age_ignores_old_process_files_and_rejects_future_stamps(self):
+        now = datetime(2026, 11, 22, 8, 0, tzinfo=timezone.utc)
+        started = now - timedelta(seconds=10)
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "perps-status.json"
+            path.write_text(
+                '{"last_heartbeat_at":"2026-11-22T07:59:58+00:00"}',
+                encoding="utf-8",
+            )
+            self.assertEqual(
+                _perps_worker_heartbeat_age(path, worker_started_at=started, now=now),
+                2.0,
+            )
+            path.write_text(
+                '{"last_heartbeat_at":"2026-11-22T07:59:49+00:00"}',
+                encoding="utf-8",
+            )
+            # A timestamp older than this process launch is not inherited as fresh.
+            self.assertEqual(
+                _perps_worker_heartbeat_age(path, worker_started_at=started, now=now),
+                10.0,
+            )
+            path.write_text(
+                '{"last_heartbeat_at":"2026-11-22T08:00:10+00:00"}',
+                encoding="utf-8",
+            )
+            self.assertEqual(
+                _perps_worker_heartbeat_age(path, worker_started_at=started, now=now),
+                float("inf"),
+            )
+
+    def test_perps_heartbeat_watchdog_restarts_a_hung_but_running_process(self):
+        with tempfile.TemporaryDirectory() as directory:
+            config = build_supervisor_config({
+                "ENABLE_PERPS_MARKET_DATA_WORKER": "true",
+                "DATA_DIR": directory,
+                "SERVICE_SUPERVISOR_POLL_SECONDS": "0.25",
+            }, python_executable="python-test")
+            config = replace(config, perps_worker_heartbeat_timeout_seconds=0.05)
+            app = FakeProcess()
+            hung_worker = FakeProcess()
+            restarted_worker = FakeProcess()
+            processes = [app, hung_worker, restarted_worker]
+            commands = []
+
+            def fake_popen(command, *, env):
+                commands.append((command, env))
+                return processes.pop(0)
+
+            event = FakeStopEvent(stop_after_waits=2)
+            with patch(
+                "service_supervisor._perps_worker_heartbeat_age",
+                side_effect=[0.2, 0.0],
+            ):
+                result = run_supervisor(
+                    config, popen_factory=fake_popen, stop_event=event
+                )
+            self.assertEqual(result, 0)
+            self.assertEqual(len(commands), 3)
+            self.assertEqual(commands[1][0], ["python-test", "perps_market_worker.py"])
+            self.assertEqual(commands[2][0], ["python-test", "perps_market_worker.py"])
+            self.assertEqual(hung_worker.returncode, -15)
+            self.assertTrue(restarted_worker.terminated)
+            status = read_supervisor_status(config.status_path)
+            self.assertEqual(status["perps_market_worker_restart_count"], 1)
+            self.assertEqual(status["perps_market_worker_last_exit_code"], -15)
 
     def test_perps_paper_engine_requires_public_market_worker_and_valid_flag(self):
         with self.assertRaisesRegex(ValueError, "requires ENABLE_PERPS_MARKET_DATA_WORKER"):

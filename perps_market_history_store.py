@@ -211,6 +211,40 @@ class PerpsMarketHistoryStore:
             result.append(item)
         return result
 
+    def history(self, instrument_id: int, limit: int = 100) -> list[dict[str, Any]]:
+        """Return bounded, chronological snapshots for one instrument.
+
+        The newest rows are selected first so a bounded query still preserves
+        the requested most recent window, then returned in ascending time order.
+        """
+        if isinstance(instrument_id, bool) or not isinstance(instrument_id, int) or instrument_id < 0:
+            raise ValueError("instrument_id must be a nonnegative integer")
+        if isinstance(limit, bool):
+            raise ValueError("limit must be an integer")
+        try:
+            bounded = max(1, min(5000, int(limit)))
+        except (TypeError, ValueError, OverflowError):
+            raise ValueError("limit must be an integer") from None
+        rows = self.db.execute(
+            """
+            SELECT * FROM perps_market_snapshots
+            WHERE instrument_id = ?
+            ORDER BY book_timestamp_ms DESC, snapshot_id DESC
+            LIMIT ?
+            """,
+            (instrument_id, bounded),
+        ).fetchall()
+        result = []
+        for row in rows:
+            item = dict(row)
+            item["bids"] = json.loads(item.pop("bids_json"))
+            item["asks"] = json.loads(item.pop("asks_json"))
+            item["instrument"] = json.loads(item.pop("instrument_json"))
+            item["ticker"] = json.loads(item.pop("ticker_json"))
+            result.append(item)
+        result.reverse()
+        return result
+
     def count(self) -> int:
         return int(self.db.execute(
             "SELECT COUNT(*) FROM perps_market_snapshots"

@@ -16,6 +16,10 @@ UNRESOLVED_STATES = frozenset({
     "prepared", "submission_pending", "submission_unknown",
     "acknowledged_unreconciled", "manual_review",
 })
+# Do not let old terminal trade history consume the bounded reconciliation budget.
+# Only unresolved intents and locally active orders are relevant to readiness.
+READINESS_TRACKED_STATES = tuple(sorted(UNRESOLVED_STATES | ACTIVE_LOCAL_STATES))
+REMOTE_OPEN_STATES = frozenset({"accepted", "open", "partial"})
 
 
 def _field(item: Any, name: str) -> Any:
@@ -115,7 +119,10 @@ class PerpsAccountPreflight:
         }
 
         # Reconcile all previously submitted intents before sampling open orders.
-        intents = self.journal.list_intents(limit=self.max_unresolved_orders_to_reconcile + 1)
+        intents = self.journal.list_intents(
+            statuses=READINESS_TRACKED_STATES,
+            limit=self.max_unresolved_orders_to_reconcile + 1,
+        )
         observations["local_order_count"] = len(intents)
         if len(intents) > self.max_unresolved_orders_to_reconcile:
             reasons.append("local_order_journal_exceeds_reconciliation_bound")
@@ -135,7 +142,8 @@ class PerpsAccountPreflight:
                         break
 
         refreshed_intents = self.journal.list_intents(
-            limit=self.max_unresolved_orders_to_reconcile + 1
+            statuses=READINESS_TRACKED_STATES,
+            limit=self.max_unresolved_orders_to_reconcile + 1,
         )
         unresolved = [
             item for item in refreshed_intents if item["status"] in UNRESOLVED_STATES
@@ -263,13 +271,27 @@ class PerpsAccountPreflight:
             remote_by_client[client_id] = order
             local = local_active[client_id]
             try:
+                venue_order_id = _field(order, "id")
+                if str(venue_order_id) != local["venue_order_id"]:
+                    raise ValueError("venue_order_id")
                 if int(_field(order, "instrument_id")) != local["instrument_id"]:
                     raise ValueError("instrument")
                 side_value = _field(order, "side")
                 if not isinstance(side_value, str) or side_value.lower() != local["side"]:
                     raise ValueError("side")
+                remote_status = _field(order, "status")
+                if not isinstance(remote_status, str) or remote_status.lower() not in REMOTE_OPEN_STATES:
+                    raise ValueError("remote_status")
                 if _finite_decimal(_field(order, "quantity")) != Decimal(local["quantity"]):
                     raise ValueError("quantity")
+                if _finite_decimal(_field(order, "filled_quantity")) != Decimal(local["filled_quantity"]):
+                    raise ValueError("filled_quantity")
+                remote_reduce_only = _field(order, "reduce_only")
+                if remote_reduce_only is not local["reduce_only"]:
+                    raise ValueError("reduce_only")
+                local_price = local["limit_price"]
+                if local_price is not None and _finite_decimal(_field(order, "price")) != Decimal(local_price):
+                    raise ValueError("price")
             except (ValueError, TypeError, InvalidOperation):
                 observations["unknown_remote_open_orders"] += 1
                 remote_by_client.pop(client_id, None)

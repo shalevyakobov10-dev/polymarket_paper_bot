@@ -416,6 +416,19 @@ class PerpsAccountSupervisorWorkerTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(lock_path.exists())
         self.assertEqual(raw.write_calls, [])
 
+    async def test_worker_rejects_empty_paths_before_loading_secrets_or_opening_sdk(self):
+        from perps_account_supervisor_worker import _run_from_environment
+
+        args = SimpleNamespace(
+            secrets_file="/must-not-be-opened.json",
+            database="",
+            status_file=None,
+            submission_lock=None,
+            poll_interval=None,
+        )
+        with self.assertRaisesRegex(ValueError, "PERPS_ORDER_JOURNAL_DB"):
+            await _run_from_environment(args)
+
     async def test_worker_closes_secure_client_when_journal_initialization_fails(self):
         client = FakeSecureClient(FakeRawPerpsSession())
         with self.assertRaises(Exception):

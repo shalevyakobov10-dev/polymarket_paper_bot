@@ -410,9 +410,27 @@ def main(argv: list[str] | None = None) -> int:
         "--verify-manifest",
         help="verify every database and SHA-256 hash listed in an existing manifest",
     )
+    parser.add_argument(
+        "--restore-source",
+        help="restore this source database name from a verified manifest into a new path",
+    )
+    parser.add_argument(
+        "--restore-to",
+        help="new destination path for --restore-source; an existing file is never overwritten",
+    )
     args = parser.parse_args(argv)
+    if bool(args.restore_source) != bool(args.restore_to):
+        parser.error("--restore-source and --restore-to must be provided together")
+    if args.restore_source and not args.verify_manifest:
+        parser.error("--restore-source requires --verify-manifest")
     try:
-        if args.verify_manifest:
+        if args.restore_source:
+            result = restore_paper_data_backup(
+                args.verify_manifest,
+                args.restore_source,
+                args.restore_to,
+            )
+        elif args.verify_manifest:
             result = verify_paper_data_backup(args.verify_manifest)
         else:
             result = create_paper_data_backups(

@@ -101,8 +101,11 @@ def _normalize_instrument(raw: Any) -> dict[str, Any] | None:
         raise ValueError("instrument symbol and category are required")
     settlement = raw.get("settlement")
     close_only = raw.get("close_only", False)
+    isolated_only = raw.get("isolated_only", False)
     if not isinstance(close_only, bool):
         raise ValueError("instrument close_only must be boolean")
+    if not isinstance(isolated_only, bool):
+        raise ValueError("instrument isolated_only must be boolean")
     if settlement is not None:
         return None
     min_notional = _decimal(raw.get("min_notional"), "min_notional", positive=True)
@@ -113,8 +116,14 @@ def _normalize_instrument(raw: Any) -> dict[str, Any] | None:
         raw.get("max_limit_notional"), "max_limit_notional", positive=True
     )
     max_leverage = _decimal(raw.get("max_leverage"), "max_leverage", positive=True)
+    if max_market_notional < min_notional or max_limit_notional < min_notional:
+        raise ValueError("instrument maximum notional must be >= min_notional")
     quantity_decimals = _integer(raw.get("quantity_decimals"), "quantity_decimals")
     price_decimals = _integer(raw.get("price_decimals"), "price_decimals")
+    price_bounds = _decimal(raw.get("price_bounds"), "price_bounds", positive=True)
+    liquidation_fee = _decimal(raw.get("liquidation_fee"), "liquidation_fee")
+    if price_bounds > 1 or not Decimal("0") <= liquidation_fee < 1:
+        raise ValueError("instrument price_bounds or liquidation_fee is outside valid bounds")
     risk_tiers = raw.get("risk_tiers")
     if not isinstance(risk_tiers, list) or not risk_tiers:
         raise ValueError("instrument risk_tiers must be a non-empty list")
@@ -143,15 +152,15 @@ def _normalize_instrument(raw: Any) -> dict[str, Any] | None:
         "quote_asset": str(raw.get("quote_asset") or "USD"),
         "funding_interval": str(raw.get("funding_interval") or ""),
         "close_only": close_only,
-        "isolated_only": bool(raw.get("isolated_only", False)),
+        "isolated_only": isolated_only,
         "min_notional": str(min_notional),
         "max_market_notional": str(max_market_notional),
         "max_limit_notional": str(max_limit_notional),
         "max_leverage": str(max_leverage),
         "quantity_decimals": quantity_decimals,
         "price_decimals": price_decimals,
-        "price_bounds": str(_decimal(raw.get("price_bounds"), "price_bounds", positive=True)),
-        "liquidation_fee": str(_decimal(raw.get("liquidation_fee"), "liquidation_fee")),
+        "price_bounds": str(price_bounds),
+        "liquidation_fee": str(liquidation_fee),
         "risk_tiers": normalized_tiers,
         "instrument_type": instrument_type,
     }
@@ -295,6 +304,7 @@ class PerpsPublicMarketDataProvider:
         if current.tzinfo is None or current.utcoffset() is None:
             raise ValueError("now must be timezone-aware")
         current = current.astimezone(timezone.utc)
+        fixed_time = now is not None
 
         raw_instruments = self._get_json("/v1/info/instruments")
         raw_tickers = self._get_json("/v1/info/tickers")
@@ -328,14 +338,16 @@ class PerpsPublicMarketDataProvider:
             if raw_ticker is None:
                 continue
             try:
+                ticker_check_time = current if fixed_time else datetime.now(timezone.utc)
                 ticker = _normalize_ticker(
-                    raw_ticker, instrument_id, current, self.max_age_seconds
+                    raw_ticker, instrument_id, ticker_check_time, self.max_age_seconds
                 )
                 raw_book = self._get_json(
                     "/v1/info/book", {"instrument_id": instrument_id, "depth": self.depth}
                 )
+                book_check_time = current if fixed_time else datetime.now(timezone.utc)
                 book = _normalize_book(
-                    raw_book, instrument_id, current, self.max_age_seconds
+                    raw_book, instrument_id, book_check_time, self.max_age_seconds
                 )
                 if ticker["symbol"] and ticker["symbol"] != instrument["symbol"]:
                     raise ValueError("ticker symbol does not match instrument metadata")
@@ -343,7 +355,7 @@ class PerpsPublicMarketDataProvider:
                     "instrument": instrument,
                     "ticker": ticker,
                     "book": book,
-                    "received_at": current.isoformat(),
+                    "received_at": (current if fixed_time else datetime.now(timezone.utc)).isoformat(),
                     "research_only": True,
                     "execution": "none",
                 })

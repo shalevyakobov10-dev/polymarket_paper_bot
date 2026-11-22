@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import tempfile
 import unittest
 from datetime import datetime, timedelta, timezone
@@ -31,9 +32,12 @@ class FakePreflightSession:
         self.account_configs = ()
         self.orders_by_client = {}
         self.read_error = False
+        self.hang_account_read = False
         self.fetch_orders_calls = []
 
     async def fetch_portfolio(self):
+        if self.hang_account_read:
+            await asyncio.Event().wait()
         if self.read_error:
             raise RuntimeError("account API unavailable")
         return self.portfolio
@@ -229,6 +233,28 @@ class PerpsAccountPreflightTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(report["blocked_reasons"], ["account_read_api_unavailable"])
         self.assertFalse(report["read_only_preflight_passed"])
         self.assertFalse(report["order_placement_authorized"])
+
+    async def test_account_read_timeout_fails_closed_without_waiting_indefinitely(self):
+        self.session.hang_account_read = True
+        bounded = PerpsAccountPreflight(
+            journal=self.journal,
+            session=self.session,
+            account_read_timeout_seconds=0.05,
+        )
+        report = await bounded.run(now=NOW)
+        self.assertEqual(report["blocked_reasons"], ["account_read_api_timeout"])
+        self.assertFalse(report["read_only_preflight_passed"])
+        self.assertFalse(report["order_placement_authorized"])
+
+    def test_invalid_account_read_timeout_is_rejected(self):
+        for timeout in (True, float("nan"), 0, 61):
+            with self.subTest(timeout=timeout):
+                with self.assertRaisesRegex(ValueError, "account_read_timeout_seconds"):
+                    PerpsAccountPreflight(
+                        journal=self.journal,
+                        session=self.session,
+                        account_read_timeout_seconds=timeout,
+                    )
 
     def test_invalid_preflight_limits_are_rejected(self):
         with self.assertRaisesRegex(ValueError, "max_leverage"):

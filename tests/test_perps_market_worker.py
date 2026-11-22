@@ -105,6 +105,48 @@ class PerpsMarketWorkerTests(unittest.TestCase):
             self.assertEqual(raw["consecutive_failures"], 1)
             self.assertEqual(store.rows, [])
 
+    def test_worker_records_retention_policy_and_prunes_expired_history(self):
+        class RetentionStore(FakeStore):
+            def __init__(self):
+                super().__init__()
+                self.prune_calls = []
+
+            def prune_before(self, cutoff):
+                self.prune_calls.append(cutoff)
+                return {"deleted": 2, "remaining": len(self.rows)}
+
+        with tempfile.TemporaryDirectory() as directory:
+            target = Path(directory) / "status.json"
+            store = RetentionStore()
+            result = run_worker(
+                provider=FakeProvider(),
+                store=store,
+                stop_event=FakeStopEvent(),
+                status_path=target,
+                poll_interval_seconds=15,
+                history_retention_days=14,
+                max_cycles=1,
+            )
+            self.assertEqual(result, 0)
+            self.assertEqual(len(store.prune_calls), 1)
+            raw = json.loads(target.read_text(encoding="utf-8"))
+            self.assertEqual(raw["history_retention_days"], 14)
+            self.assertEqual(raw["expired_rows_pruned_total"], 2)
+            self.assertEqual(raw["history_rows"], 1)
+
+    def test_status_reader_rejects_boolean_counts(self):
+        with tempfile.TemporaryDirectory() as directory:
+            target = Path(directory) / "status.json"
+            target.write_text(json.dumps({
+                "schema_version": 1,
+                "enabled": True,
+                "worker_state": "healthy",
+                "consecutive_failures": True,
+            }), encoding="utf-8")
+            result = read_perps_worker_status(target)
+            self.assertEqual(result["worker_state"], "unknown")
+            self.assertEqual(result["last_error"], "status_file_invalid")
+
     def test_status_reader_drops_unexpected_and_sensitive_fields(self):
         with tempfile.TemporaryDirectory() as directory:
             target = Path(directory) / "status.json"

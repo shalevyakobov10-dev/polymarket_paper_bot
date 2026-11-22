@@ -10,6 +10,7 @@ import argparse
 import asyncio
 import json
 import logging
+import math
 import os
 import re
 import signal
@@ -231,25 +232,89 @@ async def run_perps_account_supervisor_worker(
             return await supervisor.run(stop_event=stop_event, max_cycles=max_cycles)
 
 
+def _required_worker_path(value: Any, name: str) -> str:
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError(f"{name} must be a non-empty path")
+    return value
+
+
+def _bounded_worker_integer(
+    value: Any,
+    name: str,
+    *,
+    minimum: int,
+    maximum: int,
+) -> int:
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError, OverflowError):
+        raise ValueError(f"{name} is outside its permitted range") from None
+    if isinstance(value, bool) or str(value).strip() != str(parsed) or not minimum <= parsed <= maximum:
+        raise ValueError(f"{name} is outside its permitted range")
+    return parsed
+
+
 async def _run_from_environment(args: argparse.Namespace) -> int:
     data_dir = Path(os.environ.get("DATA_DIR", "data"))
-    secrets_path = args.secrets_file or os.environ.get("PERPS_ACCOUNT_SUPERVISOR_SECRETS_FILE")
-    if not isinstance(secrets_path, str) or not secrets_path.strip():
-        raise PerpsAccountSecretsError("perps_account_secrets_file_not_configured")
+    secrets_path_raw = (
+        args.secrets_file
+        if args.secrets_file is not None
+        else os.environ.get("PERPS_ACCOUNT_SUPERVISOR_SECRETS_FILE")
+    )
+    try:
+        secrets_path = _required_worker_path(
+            secrets_path_raw, "PERPS_ACCOUNT_SUPERVISOR_SECRETS_FILE"
+        )
+    except ValueError:
+        raise PerpsAccountSecretsError("perps_account_secrets_file_not_configured") from None
 
-    database_path = args.database or os.environ.get(
-        "PERPS_ORDER_JOURNAL_DB", str(data_dir / "perps_order_journal.sqlite3")
+    database_path = _required_worker_path(
+        args.database if args.database is not None else os.environ.get(
+            "PERPS_ORDER_JOURNAL_DB", str(data_dir / "perps_order_journal.sqlite3")
+        ),
+        "PERPS_ORDER_JOURNAL_DB",
     )
-    status_path = args.status_file or os.environ.get(
+    status_path = _required_worker_path(
+        args.status_file if args.status_file is not None else os.environ.get(
+            "PERPS_ACCOUNT_SUPERVISOR_STATUS_FILE",
+            str(data_dir / "perps_account_supervisor_status.json"),
+        ),
         "PERPS_ACCOUNT_SUPERVISOR_STATUS_FILE",
-        str(data_dir / "perps_account_supervisor_status.json"),
     )
-    lock_path = args.submission_lock or os.environ.get(
-        "PERPS_SUBMISSION_LOCK_PATH", str(data_dir / "perps_submission.lock")
+    lock_path = _required_worker_path(
+        args.submission_lock if args.submission_lock is not None else os.environ.get(
+            "PERPS_SUBMISSION_LOCK_PATH", str(data_dir / "perps_submission.lock")
+        ),
+        "PERPS_SUBMISSION_LOCK_PATH",
     )
-    poll = args.poll_interval or int(os.environ.get("PERPS_ACCOUNT_SUPERVISOR_POLL_SECONDS", "30"))
-    cycle_timeout = float(os.environ.get("PERPS_ACCOUNT_SUPERVISOR_CYCLE_TIMEOUT_SECONDS", "60"))
-    max_failures = int(os.environ.get("PERPS_ACCOUNT_SUPERVISOR_MAX_FAILURES", "10"))
+    poll_raw = (
+        args.poll_interval
+        if args.poll_interval is not None
+        else os.environ.get("PERPS_ACCOUNT_SUPERVISOR_POLL_SECONDS", "30")
+    )
+    poll = _bounded_worker_integer(
+        poll_raw,
+        "PERPS_ACCOUNT_SUPERVISOR_POLL_SECONDS",
+        minimum=15,
+        maximum=300,
+    )
+    try:
+        cycle_timeout = float(
+            os.environ.get("PERPS_ACCOUNT_SUPERVISOR_CYCLE_TIMEOUT_SECONDS", "60")
+        )
+    except (TypeError, ValueError, OverflowError):
+        raise ValueError("PERPS_ACCOUNT_SUPERVISOR_CYCLE_TIMEOUT_SECONDS is invalid") from None
+    if (
+        not math.isfinite(cycle_timeout)
+        or not 0.05 <= cycle_timeout <= 3600
+    ):
+        raise ValueError("PERPS_ACCOUNT_SUPERVISOR_CYCLE_TIMEOUT_SECONDS is invalid")
+    max_failures = _bounded_worker_integer(
+        os.environ.get("PERPS_ACCOUNT_SUPERVISOR_MAX_FAILURES", "10"),
+        "PERPS_ACCOUNT_SUPERVISOR_MAX_FAILURES",
+        minimum=1,
+        maximum=50,
+    )
 
     secrets = load_perps_account_secrets(secrets_path)
     try:

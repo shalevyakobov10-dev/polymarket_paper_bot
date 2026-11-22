@@ -144,6 +144,11 @@ def read_perps_worker_status(path: str | Path) -> dict[str, Any]:
             "snapshots_inserted_total": _status_count(raw.get("snapshots_inserted_total", 0), "snapshots_inserted_total"),
             "history_rows": _status_count(raw.get("history_rows", 0), "history_rows"),
             "poll_interval_seconds": _status_count(raw.get("poll_interval_seconds", 30), "poll_interval_seconds", minimum=1),
+            "heartbeat_timeout_seconds": _status_count(
+                raw.get("heartbeat_timeout_seconds", 180),
+                "heartbeat_timeout_seconds",
+                minimum=60,
+            ),
             "history_retention_days": _status_count(raw.get("history_retention_days", 14), "history_retention_days", minimum=1),
             "expired_rows_pruned_total": _status_count(raw.get("expired_rows_pruned_total", 0), "expired_rows_pruned_total"),
             "paper_engine_enabled": raw.get("paper_engine_enabled") is True,
@@ -171,6 +176,7 @@ def read_perps_worker_status(path: str | Path) -> dict[str, Any]:
             "markets_in_last_snapshot": 0, "markets_with_fee_schedule": 0,
             "snapshots_inserted_total": 0,
             "history_rows": 0, "poll_interval_seconds": None,
+            "heartbeat_timeout_seconds": 180,
             "history_retention_days": None, "expired_rows_pruned_total": 0,
             "paper_engine_enabled": False, "paper_engine_state": "unknown", "paper_engine": None,
             "research_only": True, "live_execution_enabled": False, "execution": "none",
@@ -183,6 +189,7 @@ def read_perps_worker_status(path: str | Path) -> dict[str, Any]:
             "markets_in_last_snapshot": 0, "markets_with_fee_schedule": 0,
             "snapshots_inserted_total": 0,
             "history_rows": 0, "poll_interval_seconds": None,
+            "heartbeat_timeout_seconds": 180,
             "history_retention_days": None, "expired_rows_pruned_total": 0,
             "research_only": True, "live_execution_enabled": False, "execution": "none",
         }
@@ -223,8 +230,16 @@ def run_worker(
     )
     if isinstance(failure_limit, bool) or not isinstance(failure_limit, int) or not 1 <= failure_limit <= 50:
         raise ValueError("max_consecutive_failures must be an integer between 1 and 50")
+    market_limit = _positive_int_env("PERPS_MARKET_LIMIT", 10, 1, 50)
+    minimum_heartbeat_timeout = max(180, interval * 3 + market_limit * 8 + 80)
+    heartbeat_timeout = _positive_int_env(
+        "PERPS_WORKER_HEARTBEAT_TIMEOUT_SECONDS",
+        minimum_heartbeat_timeout,
+        minimum_heartbeat_timeout,
+        7200,
+    )
     current_provider = provider or PerpsPublicMarketDataProvider(
-        market_limit=_positive_int_env("PERPS_MARKET_LIMIT", 10, 1, 50),
+        market_limit=market_limit,
         max_age_seconds=10.0,
         depth=10,
     )
@@ -304,6 +319,7 @@ def run_worker(
         "last_error": None, "consecutive_failures": 0,
         "markets_in_last_snapshot": 0, "snapshots_inserted_total": 0,
         "history_rows": current_store.count(), "poll_interval_seconds": interval,
+        "heartbeat_timeout_seconds": heartbeat_timeout,
         "history_retention_days": retention_days, "expired_rows_pruned_total": 0,
         "paper_engine_enabled": engine_enabled,
         "paper_engine_state": (

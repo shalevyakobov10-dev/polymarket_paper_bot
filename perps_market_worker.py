@@ -284,6 +284,12 @@ def run_worker(
             maximum_drawdown_pct=os.getenv("PERPS_PAPER_MAXIMUM_DRAWDOWN_PCT", "0.10"),
             max_data_age_seconds=_positive_int_env("PERPS_PAPER_MAX_DATA_AGE_SECONDS", 15, 1, 60),
             max_entry_impact_bps=os.getenv("PERPS_PAPER_MAX_ENTRY_IMPACT_BPS", "50"),
+            funding_schedule_grace_seconds=_positive_int_env(
+                "PERPS_PAPER_FUNDING_SCHEDULE_GRACE_SECONDS", 60, 5, 300
+            ),
+            max_post_funding_mark_delay_seconds=_positive_int_env(
+                "PERPS_PAPER_MAX_POST_FUNDING_MARK_DELAY_SECONDS", 45, 15, 120
+            ),
         )
         engine_created = True
     if current_engine is not None and not engine_enabled:

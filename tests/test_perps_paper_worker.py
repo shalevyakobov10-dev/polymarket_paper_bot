@@ -121,7 +121,7 @@ class PerpsPaperWorkerTests(unittest.TestCase):
             self.assertEqual(status["consecutive_failures"], 0)
             self.assertEqual(status["worker_state"], "stopped")
             raw = json.loads(path.read_text())
-            self.assertNotIn("private response", raw.get("last_error_type", ""))
+            self.assertNotIn("private response", raw.get("last_error_type") or "")
 
     def test_exits_after_bounded_consecutive_failures_for_supervisor_restart(self):
         with tempfile.TemporaryDirectory() as directory:

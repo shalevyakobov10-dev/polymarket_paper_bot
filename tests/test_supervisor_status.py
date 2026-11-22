@@ -137,6 +137,43 @@ class SupervisorStatusTests(unittest.TestCase):
                 event_paper_worker_state="running",
             )
 
+    def test_perps_market_worker_status_round_trips_without_secrets(self):
+        payload = build_supervisor_status(
+            service_state="running",
+            monitor_enabled=False,
+            monitor_state="disabled",
+            event_paper_worker_enabled=True,
+            event_paper_worker_state="running",
+            perps_market_worker_enabled=True,
+            perps_market_worker_state="restarting",
+            perps_market_worker_restart_count=3,
+            perps_market_worker_last_exit_code=9,
+            perps_market_worker_next_restart_at="2026-11-22T08:00:05+00:00",
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            target = Path(directory) / "status.json"
+            write_supervisor_status(target, payload)
+            loaded = read_supervisor_status(target)
+        self.assertTrue(loaded["perps_market_worker_enabled"])
+        self.assertEqual(loaded["perps_market_worker_state"], "restarting")
+        self.assertEqual(loaded["perps_market_worker_restart_count"], 3)
+        self.assertEqual(loaded["perps_market_worker_last_exit_code"], 9)
+        self.assertEqual(
+            loaded["perps_market_worker_next_restart_at"],
+            "2026-11-22T08:00:05+00:00",
+        )
+        self.assertEqual(loaded["execution"], "none")
+
+    def test_disabled_perps_worker_must_use_disabled_status(self):
+        with self.assertRaisesRegex(ValueError, "disabled Perps market worker"):
+            build_supervisor_status(
+                service_state="running",
+                monitor_enabled=False,
+                monitor_state="disabled",
+                perps_market_worker_enabled=False,
+                perps_market_worker_state="running",
+            )
+
     def test_status_builder_rejects_invalid_or_inconsistent_state(self):
         common = {
             "service_state": "running",

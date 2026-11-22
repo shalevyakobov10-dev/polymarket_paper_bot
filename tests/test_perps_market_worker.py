@@ -130,7 +130,14 @@ class PerpsMarketWorkerTests(unittest.TestCase):
             store = FakeStore()
             engine = FakePaperEngine()
             result = run_worker(
-                provider=FakeProvider(),
+                provider=FakeProvider(snapshots=[{
+                    **FakeProvider().snapshots[0],
+                    "fees": {
+                        "taker_fee_rate": "0.0004",
+                        "maker_fee_rate": "0.0001",
+                        "source": "public_perps_fee_schedule",
+                    },
+                }]),
                 store=store,
                 paper_engine=engine,
                 paper_engine_enabled=True,
@@ -151,6 +158,32 @@ class PerpsMarketWorkerTests(unittest.TestCase):
             self.assertEqual(sanitized["paper_engine"]["equity"], "1000")
             self.assertFalse(sanitized["paper_engine"]["order_submission_allowed"])
             self.assertNotIn("POLYMARKET_PRIVATE_KEY", sanitized["paper_engine"])
+
+    def test_enabled_paper_engine_degrades_when_no_verified_fee_schedule_is_available(self):
+        with tempfile.TemporaryDirectory() as directory:
+            target = Path(directory) / "status.json"
+            engine = FakePaperEngine()
+            result = run_worker(
+                provider=FakeProvider(),  # no public fee metadata
+                store=FakeStore(),
+                paper_engine=engine,
+                paper_engine_enabled=True,
+                stop_event=FakeStopEvent(),
+                status_path=target,
+                poll_interval_seconds=15,
+                max_cycles=1,
+                backup_function=None,
+            )
+            self.assertEqual(result, 0)
+            raw = json.loads(target.read_text(encoding="utf-8"))
+            self.assertEqual(raw["worker_state"], "healthy")
+            self.assertEqual(raw["paper_engine_state"], "degraded")
+            self.assertEqual(raw["paper_engine_degraded_reason"], "no_verified_fee_schedule")
+            self.assertEqual(raw["markets_with_fee_schedule"], 0)
+            safe = read_perps_worker_status(target)
+            self.assertEqual(safe["paper_engine_state"], "degraded")
+            self.assertEqual(safe["paper_engine_degraded_reason"], "no_verified_fee_schedule")
+            self.assertFalse(safe["paper_engine"]["order_submission_allowed"])
 
     def test_worker_backups_perps_position_ledger_and_funding_history_together(self):
         import os

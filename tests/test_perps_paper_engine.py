@@ -224,6 +224,25 @@ class PerpsPaperEngineTests(unittest.TestCase):
         repeated = self.engine.list_trades()[0]
         self.assertEqual(repeated["funding_paid"], trade["funding_paid"])
 
+    def test_funding_gap_does_not_disable_a_protective_stop_exit(self):
+        self.engine.open_position(
+            self.snap, side="LONG", requested_notional="9.5", now=BASE_TIME,
+        )
+        later = BASE_TIME + timedelta(hours=2)
+        gap_and_stop = market_snapshot(
+            now=later,
+            mark="98.5",
+            bid="98.45",
+            ask="98.55",
+            next_funding_offset_ms=3_600_000,
+            funding_rate="0.0002",
+        )
+        result = self.engine.process_snapshot(gap_and_stop, now=later)
+        self.assertEqual(result["status"], "PAPER_POSITION_CLOSED")
+        self.assertEqual(result["close_reason"], "stop_loss")
+        self.assertEqual(result["funding_reconciliation"], "incomplete")
+        self.assertEqual(result["warning"], "position_closed_despite_funding_gap")
+
     def test_missed_funding_interval_is_flagged_and_blocks_new_entries(self):
         self.engine.open_position(
             self.snap, side="LONG", requested_notional="9.5", now=BASE_TIME,

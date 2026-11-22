@@ -20,6 +20,7 @@ from typing import Any, Callable
 from backup_paper_data import create_paper_data_backups
 from perps_market_data import PerpsMarketDataProvider, provider_from_env
 from perps_paper_engine import PerpsPaperEngine
+from perps_signal_strategy import strategy_from_env
 
 
 STATUS_SCHEMA_VERSION = 1
@@ -147,7 +148,12 @@ def read_perps_worker_status(
             "cash_balance": str(raw.get("cash_balance", ""))[:80],
             "equity": str(raw.get("equity", ""))[:80],
             "mode": "PERPS_PAPER_ONLY",
-            "strategy_status": "not_configured",
+            "strategy_status": str(raw.get("strategy_status") or "disabled")[:40],
+            "strategy_decisions_last_cycle": max(0, int(raw.get("strategy_decisions_last_cycle", 0))),
+            "signals_last_cycle": max(0, int(raw.get("signals_last_cycle", 0))),
+            "entries_opened_last_cycle": max(0, int(raw.get("entries_opened_last_cycle", 0))),
+            "entry_blocks_last_cycle": max(0, int(raw.get("entry_blocks_last_cycle", 0))),
+            "strategy_last_reason": str(raw.get("strategy_last_reason") or "")[:120] or None,
             "research_only": True,
             "live_execution_enabled": False,
             "execution": "none",
@@ -239,7 +245,12 @@ def run_worker(
         "cash_balance": None,
         "equity": None,
         "mode": "PERPS_PAPER_ONLY",
-        "strategy_status": "not_configured",
+        "strategy_status": "disabled",
+        "strategy_decisions_last_cycle": 0,
+        "signals_last_cycle": 0,
+        "entries_opened_last_cycle": 0,
+        "entry_blocks_last_cycle": 0,
+        "strategy_last_reason": None,
         "research_only": True,
         "live_execution_enabled": False,
         "execution": "none",
@@ -249,7 +260,17 @@ def run_worker(
     exit_code = 0
     backup_due_at = 0.0
     backup_failures = 0
+    auto_entry_raw = os.getenv("PERPS_AUTO_ENTRY_ENABLED", "false").strip().lower()
+    if auto_entry_raw not in {"true", "false"}:
+        raise ValueError("PERPS_AUTO_ENTRY_ENABLED must be exactly true or false")
+    auto_entry_enabled = auto_entry_raw == "true"
+    strategy = None
     try:
+        if auto_entry_enabled:
+            strategy = strategy_from_env()
+            status["strategy_status"] = "warming_up"
+        else:
+            status["strategy_status"] = "disabled"
         provider = provider_factory()
         if engine_factory is None:
             engine = PerpsPaperEngine(
@@ -271,6 +292,11 @@ def run_worker(
                 closed = 0
                 funding_gaps = 0
                 processed = 0
+                strategy_decisions = 0
+                signals_seen = 0
+                entries_opened = 0
+                entry_blocks = 0
+                strategy_last_reason = None
                 for snapshot in snapshots:
                     outcome = engine.process_snapshot(snapshot)
                     processed += 1
@@ -278,6 +304,76 @@ def run_worker(
                         closed += 1
                     elif outcome.get("status") == "PAPER_POSITION_FUNDING_GAP":
                         funding_gaps += 1
+
+                    if strategy is not None:
+                        instrument_id = int(snapshot["instrument_id"])
+                        history = engine.recent_snapshots(instrument_id, limit=12000)
+                        strategy_now = datetime.now(timezone.utc)
+                        decision = strategy.evaluate(
+                            history,
+                            current_snapshot=snapshot,
+                            now=strategy_now,
+                        )
+                        if decision.get("reason") not in {
+                            "warming_up_insufficient_completed_bars",
+                            "incomplete_contiguous_minute_history",
+                            "completed_bar_is_stale",
+                            "snapshot_not_research_only",
+                            "instrument_not_entry_eligible",
+                            "instrument_settled",
+                        }:
+                            bar_close_ms = decision.get("bar_close_ms")
+                            if isinstance(bar_close_ms, int) and engine.claim_strategy_bar(
+                                instrument_id, bar_close_ms, now=strategy_now
+                            ):
+                                strategy_decisions += 1
+                                strategy_last_reason = str(decision.get("reason") or "unknown")[:120]
+                                if decision.get("signal") is True:
+                                    signals_seen += 1
+                                    entry = engine.open_position(
+                                        snapshot,
+                                        side=str(decision["side"]),
+                                        requested_notional=decision["entry_notional_usd"],
+                                        now=strategy_now,
+                                        stop_loss_distance_pct=decision["stop_loss_distance_pct"],
+                                        reward_risk_multiple=decision["reward_risk_multiple"],
+                                    )
+                                    if entry.get("status") == "PAPER_POSITION_OPEN":
+                                        entries_opened += 1
+                                        engine.record_strategy_decision(
+                                            instrument_id,
+                                            bar_close_ms,
+                                            decision_status="entry_opened",
+                                            reason=str(decision.get("reason") or "signal"),
+                                            side=str(decision["side"]),
+                                            trade_id=str(entry["trade_id"]),
+                                            metrics=decision,
+                                            now=strategy_now,
+                                        )
+                                    else:
+                                        entry_blocks += 1
+                                        engine.record_strategy_decision(
+                                            instrument_id,
+                                            bar_close_ms,
+                                            decision_status="entry_blocked",
+                                            reason=str(entry.get("reason") or "paper_risk_gate_blocked"),
+                                            side=str(decision["side"]),
+                                            metrics={
+                                                "signal": decision,
+                                                "risk_gate": entry.get("risk_gate"),
+                                                "fill": entry.get("fill"),
+                                            },
+                                            now=strategy_now,
+                                        )
+                                else:
+                                    engine.record_strategy_decision(
+                                        instrument_id,
+                                        bar_close_ms,
+                                        decision_status="no_signal",
+                                        reason=str(decision.get("reason") or "no_signal"),
+                                        metrics=decision,
+                                        now=strategy_now,
+                                    )
                 metrics = engine.account_metrics()
                 warning = "open_position_funding_gap" if funding_gaps else None
                 status.update({
@@ -290,6 +386,12 @@ def run_worker(
                     "snapshots_processed_last_cycle": processed,
                     "positions_closed_last_cycle": closed,
                     "funding_gaps_last_cycle": funding_gaps,
+                    "strategy_status": "active" if strategy is not None else "disabled",
+                    "strategy_decisions_last_cycle": strategy_decisions,
+                    "signals_last_cycle": signals_seen,
+                    "entries_opened_last_cycle": entries_opened,
+                    "entry_blocks_last_cycle": entry_blocks,
+                    "strategy_last_reason": strategy_last_reason,
                     "last_error_type": None,
                     "last_cycle_warning": warning,
                     "open_positions": int(metrics["open_positions"]),

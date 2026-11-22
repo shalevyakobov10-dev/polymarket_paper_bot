@@ -164,10 +164,11 @@ class PerpsMarketHistoryStore:
         if fees is not None:
             if not isinstance(fees, dict):
                 raise ValueError("snapshot fees must be an object")
-            _finite_decimal(fees.get("taker_fee_rate"), "fees.taker_fee_rate", nonnegative=True)
-            _finite_decimal(fees.get("maker_fee_rate"), "fees.maker_fee_rate", nonnegative=True)
-            if fees.get("source") != "public_perps_fee_schedule":
-                raise ValueError("fees must come from the public Perps fee schedule")
+            if fees:
+                _finite_decimal(fees.get("taker_fee_rate"), "fees.taker_fee_rate", nonnegative=True)
+                _finite_decimal(fees.get("maker_fee_rate"), "fees.maker_fee_rate", nonnegative=True)
+                if fees.get("source") != "public_perps_fee_schedule":
+                    raise ValueError("fees must come from the public Perps fee schedule")
         return {
             "instrument": instrument,
             "ticker": ticker,
@@ -273,6 +274,7 @@ class PerpsMarketHistoryStore:
             item["asks"] = json.loads(item.pop("asks_json"))
             item["instrument"] = json.loads(item.pop("instrument_json"))
             item["ticker"] = json.loads(item.pop("ticker_json"))
+            item["fees"] = json.loads(item.pop("fees_json"))
             result.append(item)
         result.reverse()
         return result

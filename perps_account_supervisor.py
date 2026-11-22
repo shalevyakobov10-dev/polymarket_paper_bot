@@ -337,6 +337,48 @@ def read_perps_account_supervisor_status(path: str | Path) -> dict[str, Any]:
         return result
 
 
+def perps_account_supervisor_freshness(
+    snapshot: dict[str, Any],
+    now: datetime | None = None,
+) -> dict[str, Any]:
+    """Downgrade stale/future heartbeats so an old status file cannot look healthy."""
+    current = _aware_utc(now or _utc_now(), "now")
+    result = dict(snapshot) if isinstance(snapshot, dict) else _default_status()
+    raw_poll = result.get("poll_interval_seconds")
+    poll = (
+        raw_poll
+        if isinstance(raw_poll, int) and not isinstance(raw_poll, bool) and 15 <= raw_poll <= 300
+        else DEFAULT_POLL_INTERVAL_SECONDS
+    )
+    stale_after = max(60, poll * 3)
+    heartbeat_age: float | None = None
+    try:
+        stamp = datetime.fromisoformat(
+            str(result.get("last_heartbeat_at") or "").replace("Z", "+00:00")
+        )
+        heartbeat_age = (current - _aware_utc(stamp, "last_heartbeat_at")).total_seconds()
+    except (TypeError, ValueError, OverflowError):
+        heartbeat_age = None
+
+    state = result.get("worker_state")
+    fresh = heartbeat_age is not None and -2 <= heartbeat_age <= stale_after
+    if heartbeat_age is None:
+        state = "starting" if state == "starting" else "unknown"
+    elif heartbeat_age < -2:
+        state = "invalid"
+    elif heartbeat_age > stale_after:
+        state = "stale"
+    result.update({
+        "worker_state": state,
+        "heartbeat_fresh": fresh,
+        "heartbeat_age_seconds": (
+            round(max(0.0, heartbeat_age), 1) if heartbeat_age is not None else None
+        ),
+        "heartbeat_stale_after_seconds": stale_after,
+    })
+    return result
+
+
 class PerpsAccountSupervisor:
     """Periodically inspect an injected account; it has no execution methods."""
 
@@ -507,4 +549,5 @@ class PerpsAccountSupervisor:
 __all__ = [
     "PerpsAccountSupervisor",
     "read_perps_account_supervisor_status",
+    "perps_account_supervisor_freshness",
 ]

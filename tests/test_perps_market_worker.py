@@ -242,8 +242,10 @@ class PerpsMarketWorkerTests(unittest.TestCase):
             target = root / "status.json"
             paper_db = root / "perps_paper.sqlite3"
             market_db = root / "perps_market_history.sqlite3"
+            journal_db = root / "perps_order_journal.sqlite3"
             paper_db.write_bytes(b"paper database placeholder")
             market_db.write_bytes(b"market history placeholder")
+            journal_db.write_bytes(b"perps order journal placeholder")
             store = FakeStore()
             engine = FakePaperEngine()
             calls = []
@@ -253,13 +255,18 @@ class PerpsMarketWorkerTests(unittest.TestCase):
                 return {
                     "created_at": "2026-11-22T08:00:00+00:00",
                     "manifest_name": "perps-backup-manifest.json",
-                    "files": [{"backup_name": "paper.sqlite3"}, {"backup_name": "history.sqlite3"}],
+                    "files": [
+                        {"source_name": paper_db.name, "backup_name": "paper.sqlite3"},
+                        {"source_name": market_db.name, "backup_name": "history.sqlite3"},
+                        {"source_name": journal_db.name, "backup_name": "perps-journal.sqlite3"},
+                    ],
                     "skipped_missing_sources": [],
                 }
 
             with patch.dict(os.environ, {
                 "PERPS_PAPER_DB": str(paper_db),
                 "PERPS_MARKET_HISTORY_DB": str(market_db),
+                "PERPS_ORDER_JOURNAL_DB": str(journal_db),
                 "PERPS_BACKUP_DIRECTORY": str(root / "backups"),
             }, clear=False):
                 result = run_worker(
@@ -278,15 +285,21 @@ class PerpsMarketWorkerTests(unittest.TestCase):
 
             self.assertEqual(result, 0)
             self.assertEqual(len(calls), 1)
-            self.assertEqual(calls[0][0], [paper_db, market_db])
+            self.assertEqual(calls[0][0], [paper_db, market_db, journal_db])
             self.assertEqual(calls[0][1], root / "backups")
             self.assertEqual(calls[0][2], 7)
             raw = json.loads(target.read_text(encoding="utf-8"))
-            self.assertEqual(raw["backup_files_last_run"], 2)
+            self.assertEqual(raw["backup_files_last_run"], 3)
+            self.assertEqual(raw["backup_files_expected_last_run"], 3)
+            self.assertTrue(raw["perps_order_journal_present"])
+            self.assertTrue(raw["perps_order_journal_backed_up"])
             self.assertEqual(raw["last_backup_manifest_name"], "perps-backup-manifest.json")
             self.assertIsNone(raw["backup_error_type"])
             safe = read_perps_worker_status(target)
-            self.assertEqual(safe["backup_files_last_run"], 2)
+            self.assertEqual(safe["backup_files_last_run"], 3)
+            self.assertEqual(safe["backup_files_expected_last_run"], 3)
+            self.assertTrue(safe["perps_order_journal_present"])
+            self.assertTrue(safe["perps_order_journal_backed_up"])
             self.assertEqual(safe["backup_consecutive_failures"], 0)
 
     def test_worker_fetches_and_persists_exact_funding_before_engine_processing(self):

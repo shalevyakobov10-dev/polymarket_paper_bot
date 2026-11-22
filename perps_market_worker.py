@@ -12,8 +12,10 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
+from backup_paper_data import create_paper_data_backups
 from perps_market_data import PerpsPublicMarketDataProvider
 from perps_market_history_store import PerpsMarketHistoryStore
+from perps_paper_engine import PerpsPaperEngine
 
 
 def _utc_now() -> str:
@@ -87,6 +89,18 @@ def read_perps_worker_status(path: str | Path) -> dict[str, Any]:
             "poll_interval_seconds": _status_count(raw.get("poll_interval_seconds", 30), "poll_interval_seconds", minimum=1),
             "history_retention_days": _status_count(raw.get("history_retention_days", 14), "history_retention_days", minimum=1),
             "expired_rows_pruned_total": _status_count(raw.get("expired_rows_pruned_total", 0), "expired_rows_pruned_total"),
+            "paper_engine_enabled": raw.get("paper_engine_enabled") is True,
+            "paper_worker_state": raw.get("paper_worker_state") if raw.get("paper_worker_state") in {"disabled", "starting", "running", "degraded"} else "unknown",
+            "paper_open_positions": _status_count(raw.get("paper_open_positions", 0), "paper_open_positions"),
+            "paper_closed_trades": _status_count(raw.get("paper_closed_trades", 0), "paper_closed_trades"),
+            "paper_closed_last_cycle": _status_count(raw.get("paper_closed_last_cycle", 0), "paper_closed_last_cycle"),
+            "paper_funding_gaps_last_cycle": _status_count(raw.get("paper_funding_gaps_last_cycle", 0), "paper_funding_gaps_last_cycle"),
+            "paper_snapshot_rejections_last_cycle": _status_count(raw.get("paper_snapshot_rejections_last_cycle", 0), "paper_snapshot_rejections_last_cycle"),
+            "paper_cash_balance": str(raw.get("paper_cash_balance"))[:80] if raw.get("paper_cash_balance") is not None else None,
+            "paper_equity": str(raw.get("paper_equity"))[:80] if raw.get("paper_equity") is not None else None,
+            "paper_daily_loss": str(raw.get("paper_daily_loss"))[:80] if raw.get("paper_daily_loss") is not None else None,
+            "backup_at": str(raw.get("backup_at"))[:80] if raw.get("backup_at") else None,
+            "backup_error_type": str(raw.get("backup_error_type"))[:80] if raw.get("backup_error_type") else None,
             "research_only": True,
             "live_execution_enabled": False,
             "execution": "none",
@@ -123,8 +137,15 @@ def run_worker(
     poll_interval_seconds: int | None = None,
     history_retention_days: int | None = None,
     max_cycles: int | None = None,
+    paper_engine: Any | None = None,
+    paper_engine_factory: Any | None = None,
+    paper_engine_enabled: bool | None = None,
+    backup_function: Any = create_paper_data_backups,
+    backup_interval_hours: int | None = None,
+    backup_directory: str | Path | None = None,
+    backup_retain: int | None = None,
 ) -> int:
-    """Poll read-only Perps market data, archive it, and retry with bounded backoff."""
+    """Collect public Perps data, maintain a separate Paper account, and back up state."""
     stopping = stop_event or threading.Event()
     interval = poll_interval_seconds or _positive_int_env(
         "PERPS_POLL_INTERVAL_SECONDS", 30, 15, 300
@@ -146,6 +167,44 @@ def run_worker(
     status_file = Path(status_path or os.getenv(
         "PERPS_MARKET_WORKER_STATUS_FILE", "data/perps_market_worker_status.json"
     ))
+    enabled_raw = str(os.getenv("ENABLE_PERPS_PAPER_ENGINE", "false")).strip().lower()
+    if enabled_raw not in {"true", "false"}:
+        raise ValueError("ENABLE_PERPS_PAPER_ENGINE must be exactly true or false")
+    if paper_engine_enabled is None:
+        paper_enabled = enabled_raw == "true" or paper_engine is not None
+    else:
+        if not isinstance(paper_engine_enabled, bool):
+            raise ValueError("paper_engine_enabled must be boolean")
+        paper_enabled = paper_engine_enabled
+    if paper_engine is not None:
+        paper_enabled = True
+    current_paper_engine = paper_engine
+    if paper_enabled and current_paper_engine is None:
+        factory = paper_engine_factory or PerpsPaperEngine
+        paper_database = Path(os.getenv(
+            "PERPS_PAPER_DATABASE_PATH", "data/perps_paper.sqlite3"
+        ))
+        current_paper_engine = factory(
+            paper_database,
+            starting_cash=os.getenv("PERPS_PAPER_STARTING_CASH", "100"),
+            taker_fee_rate=os.getenv("PERPS_PAPER_TAKER_FEE_RATE", "0.0005"),
+            max_entry_impact_bps=os.getenv("PERPS_MAX_ENTRY_IMPACT_BPS", "100"),
+            max_market_data_age_seconds="10",
+            snapshot_retention_days=retention_days,
+        )
+    interval_backup = backup_interval_hours or _positive_int_env(
+        "PERPS_BACKUP_INTERVAL_HOURS", 6, 1, 168
+    )
+    if not 1 <= interval_backup <= 168:
+        raise ValueError("PERPS_BACKUP_INTERVAL_HOURS must be between 1 and 168")
+    retain_backup = backup_retain or _positive_int_env(
+        "PERPS_BACKUP_RETAIN", 30, 1, 365
+    )
+    if not 1 <= retain_backup <= 365:
+        raise ValueError("PERPS_BACKUP_RETAIN must be between 1 and 365")
+    backup_path = Path(backup_directory or os.getenv(
+        "PERPS_BACKUP_DIRECTORY", str(Path(os.getenv("DATA_DIR", "data")) / "backups")
+    ))
     state: dict[str, Any] = {
         "schema_version": 1, "enabled": True, "worker_state": "starting",
         "last_heartbeat_at": _utc_now(), "last_success_at": None,
@@ -153,9 +212,22 @@ def run_worker(
         "markets_in_last_snapshot": 0, "snapshots_inserted_total": 0,
         "history_rows": current_store.count(), "poll_interval_seconds": interval,
         "history_retention_days": retention_days, "expired_rows_pruned_total": 0,
+        "paper_engine_enabled": paper_enabled,
+        "paper_worker_state": "starting" if paper_enabled else "disabled",
+        "paper_open_positions": 0,
+        "paper_closed_trades": 0,
+        "paper_closed_last_cycle": 0,
+        "paper_funding_gaps_last_cycle": 0,
+        "paper_snapshot_rejections_last_cycle": 0,
+        "paper_cash_balance": None,
+        "paper_equity": None,
+        "paper_daily_loss": None,
+        "backup_at": None,
+        "backup_error_type": None,
         "research_only": True, "live_execution_enabled": False, "execution": "none",
     }
     cycles = 0
+    last_backup_monotonic: float | None = None
     last_prune_monotonic: float | None = None
     try:
         _write_status(status_file, state)
@@ -168,6 +240,24 @@ def run_worker(
                 recorded = current_store.record_snapshots(snapshots)
                 if int(recorded["inserted"]) < 0:
                     raise RuntimeError("history store returned an invalid insert count")
+
+                paper_closed = 0
+                paper_funding_gaps = 0
+                paper_rejections = 0
+                paper_metrics = None
+                if current_paper_engine is not None:
+                    for snapshot in snapshots:
+                        outcome = current_paper_engine.process_snapshot(snapshot)
+                        if outcome.get("status") == "PAPER_POSITION_CLOSED":
+                            paper_closed += 1
+                        elif outcome.get("status") == "PAPER_POSITION_FUNDING_GAP":
+                            paper_funding_gaps += 1
+                        elif outcome.get("status") == "PAPER_SNAPSHOT_REJECTED":
+                            paper_rejections += 1
+                    paper_metrics = current_paper_engine.account_metrics()
+                    if paper_metrics.get("stale_open_position"):
+                        paper_rejections += 1
+
                 monotonic_now = time.monotonic()
                 prune_before = getattr(current_store, "prune_before", None)
                 if callable(prune_before) and (
@@ -182,14 +272,56 @@ def run_worker(
                     state["expired_rows_pruned_total"] += deleted
                     state["history_rows"] = int(pruned.get("remaining", current_store.count()))
                     last_prune_monotonic = monotonic_now
-                state["worker_state"] = "healthy"
+                paper_warning = bool(paper_funding_gaps or paper_rejections)
+                if current_paper_engine is not None and paper_metrics is not None:
+                    paper_status = current_paper_engine.status()
+                    state.update({
+                        "paper_worker_state": "degraded" if paper_warning else "running",
+                        "paper_open_positions": int(paper_metrics.get("open_positions") or 0),
+                        "paper_closed_trades": int(paper_status.get("closed_trades") or 0),
+                        "paper_closed_last_cycle": paper_closed,
+                        "paper_funding_gaps_last_cycle": paper_funding_gaps,
+                        "paper_snapshot_rejections_last_cycle": paper_rejections,
+                        "paper_cash_balance": str(paper_metrics.get("cash_balance")),
+                        "paper_equity": str(paper_metrics.get("equity")),
+                        "paper_daily_loss": str(paper_metrics.get("daily_loss")),
+                    })
+                state["worker_state"] = "degraded" if paper_warning or state.get("backup_error_type") else "healthy"
                 state["last_success_at"] = _utc_now()
-                state["last_error"] = None
+                state["last_error"] = (
+                    "paper_funding_gap_or_snapshot_rejection" if paper_warning else None
+                )
                 state["consecutive_failures"] = 0
                 state["markets_in_last_snapshot"] = len(snapshots)
                 state["snapshots_inserted_total"] += int(recorded["inserted"])
                 state["history_rows"] = int(current_store.count())
                 state["last_heartbeat_at"] = _utc_now()
+
+                if backup_function is not None and (
+                    last_backup_monotonic is None
+                    or monotonic_now - last_backup_monotonic >= interval_backup * 3600
+                ):
+                    backup_sources = []
+                    store_path = getattr(current_store, "path", None)
+                    if store_path is not None and Path(store_path).exists():
+                        backup_sources.append(Path(store_path))
+                    paper_database = getattr(current_paper_engine, "database_path", None)
+                    if paper_database is not None and Path(paper_database).exists():
+                        backup_sources.append(Path(paper_database))
+                    if backup_sources:
+                        try:
+                            backup_result = backup_function(
+                                backup_sources, backup_path, retain=retain_backup
+                            )
+                            backed_up = backup_result.get("files") or []
+                            if len(backed_up) != len(backup_sources):
+                                raise RuntimeError("perps_backup_incomplete")
+                            state["backup_at"] = str(backup_result.get("created_at") or _utc_now())
+                            state["backup_error_type"] = None
+                            last_backup_monotonic = monotonic_now
+                        except Exception as exc:
+                            state["backup_error_type"] = type(exc).__name__[:80]
+                            state["worker_state"] = "degraded"
                 _write_status(status_file, state)
                 cycles += 1
                 if max_cycles is not None and cycles >= max_cycles:

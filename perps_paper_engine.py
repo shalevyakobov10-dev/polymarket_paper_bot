@@ -454,11 +454,38 @@ class PerpsPaperEngine:
                 int(position["instrument_id"]), old_next, tolerance_ms=1000
             ) if callable(getattr(history_store, "funding_rate_at", None)) else None
             if settled is None:
-                self._halt("published_funding_settlement_missing")
-                self._event(snapshot_key, int(position["instrument_id"]), "FUNDING_RECONCILIATION_REQUIRED", now, {
+                conflict_reader = getattr(history_store, "funding_conflict_at", None)
+                conflict = (
+                    conflict_reader(
+                        int(position["instrument_id"]), old_next, tolerance_ms=1000
+                    )
+                    if callable(conflict_reader) else None
+                )
+                has_conflict = isinstance(conflict, dict)
+                halt_reason = (
+                    "published_funding_settlement_conflict"
+                    if has_conflict else "published_funding_settlement_missing"
+                )
+                self._halt(halt_reason)
+                details = {
                     "scheduled_funding_timestamp_ms": old_next,
-                    "reason": "public settled funding rate missing, conflicting, or ambiguous; no ticker-rate estimate applied",
-                })
+                    "reason": (
+                        "public funding settlement has conflicting published rates; "
+                        "manual reconciliation required; no ticker-rate estimate applied"
+                        if has_conflict else
+                        "public settled funding rate missing or ambiguous; "
+                        "no ticker-rate estimate applied"
+                    ),
+                }
+                if has_conflict:
+                    details["observed_funding_rates"] = conflict.get("observed_rates", [])
+                self._event(
+                    snapshot_key,
+                    int(position["instrument_id"]),
+                    "FUNDING_RECONCILIATION_REQUIRED",
+                    now,
+                    details,
+                )
                 return False
             mark = _decimal(ticker.get("mark_price"), "mark_price", positive=True)
             quantity = Decimal(position["quantity"])

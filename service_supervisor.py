@@ -149,10 +149,11 @@ def build_supervisor_config(
         "PERPS_PAPER_DATABASE_PATH", str(data_dir / "perps_paper.sqlite3")
     )
     perps_worker_env.setdefault(
-        "PERPS_BACKUP_DIRECTORY", str(data_dir / "backups")
+        "PERPS_BACKUP_DIRECTORY", str(data_dir / "perps-backups")
     )
     perps_worker_env.setdefault("PERPS_BACKUP_INTERVAL_HOURS", "6")
     perps_worker_env.setdefault("PERPS_BACKUP_RETAIN", "30")
+    perps_worker_env.setdefault("PERPS_MAX_CONSECUTIVE_FAILURES", "8")
     perps_worker_env.setdefault("PERPS_PAPER_STARTING_CASH", "100")
     perps_worker_env.setdefault("PERPS_PAPER_TAKER_FEE_RATE", "0.0005")
     perps_worker_env.setdefault("PERPS_MAX_ENTRY_IMPACT_BPS", "100")

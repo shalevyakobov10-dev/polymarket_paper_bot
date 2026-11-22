@@ -155,6 +155,8 @@ class PerpsPaperEngine:
                 entry_price TEXT NOT NULL,
                 margin_balance TEXT NOT NULL,
                 entry_fee TEXT NOT NULL,
+                taker_fee_rate TEXT NOT NULL DEFAULT '0',
+                liquidation_fee_rate TEXT NOT NULL DEFAULT '0',
                 funding_paid TEXT NOT NULL DEFAULT '0',
                 stop_price TEXT NOT NULL,
                 take_profit_price TEXT NOT NULL,
@@ -189,6 +191,25 @@ class PerpsPaperEngine:
                 ON perps_paper_events(event_at, event_id);
             """
         )
+        position_columns = {
+            row[1] for row in self.db.execute("PRAGMA table_info(perps_paper_positions)").fetchall()
+        }
+        if "taker_fee_rate" not in position_columns:
+            self.db.execute(
+                "ALTER TABLE perps_paper_positions ADD COLUMN taker_fee_rate TEXT NOT NULL DEFAULT '0'"
+            )
+            self.db.execute(
+                "UPDATE perps_paper_positions SET taker_fee_rate=? WHERE taker_fee_rate='0'",
+                (str(self.taker_fee_rate),),
+            )
+        if "liquidation_fee_rate" not in position_columns:
+            self.db.execute(
+                "ALTER TABLE perps_paper_positions ADD COLUMN liquidation_fee_rate TEXT NOT NULL DEFAULT '0'"
+            )
+            self.db.execute(
+                "UPDATE perps_paper_positions SET liquidation_fee_rate=? WHERE liquidation_fee_rate='0'",
+                (str(self.liquidation_fee_rate),),
+            )
         self.db.execute(
             """
             INSERT OR IGNORE INTO perps_paper_account
@@ -215,6 +236,21 @@ class PerpsPaperEngine:
         return self.db.execute(
             "SELECT * FROM perps_paper_positions WHERE status='OPEN' ORDER BY position_id"
         ).fetchall()
+
+    @staticmethod
+    def _current_fee_rate(snapshot: dict[str, Any], now: datetime) -> Decimal | None:
+        fees = snapshot.get("fees")
+        if not isinstance(fees, dict) or fees.get("source") != "public_perps_fee_schedule":
+            return None
+        try:
+            rate = _decimal(fees.get("taker_fee_rate"), "fees.taker_fee_rate")
+            retrieved = _timestamp(fees.get("retrieved_at"), "fees.retrieved_at")
+        except ValueError:
+            return None
+        age = (now.astimezone(timezone.utc) - retrieved).total_seconds()
+        if not ZERO <= rate < ONE or not -2 <= age <= 900:
+            return None
+        return rate
 
     @staticmethod
     def _unrealized(position: sqlite3.Row, mark: Decimal) -> Decimal:
@@ -322,6 +358,7 @@ class PerpsPaperEngine:
         ticker: dict[str, Any],
         now: datetime,
         snapshot_key: str,
+        history_store: Any,
     ) -> bool:
         old_next = int(position["next_funding_ms"])
         current_next = ticker.get("next_funding_ms")
@@ -360,10 +397,30 @@ class PerpsPaperEngine:
                     "reason": "one or more funding observations may be missing; no estimate applied",
                 })
                 return False
+            now_ms = int(now.timestamp() * 1000)
+            ticker_ms = ticker.get("timestamp_ms")
+            if isinstance(ticker_ms, bool) or not isinstance(ticker_ms, int) or not 0 <= ticker_ms - old_next <= 15_000:
+                self._halt("funding_mark_observation_missing")
+                self._event(snapshot_key, int(position["instrument_id"]), "FUNDING_RECONCILIATION_REQUIRED", now, {
+                    "scheduled_funding_timestamp_ms": old_next,
+                    "ticker_timestamp_ms": ticker_ms,
+                    "reason": "no fresh Mark Price observation within 15 seconds after settlement",
+                })
+                return False
+            settled = history_store.funding_rate_at(
+                int(position["instrument_id"]), old_next, tolerance_ms=1000
+            ) if callable(getattr(history_store, "funding_rate_at", None)) else None
+            if settled is None:
+                self._halt("published_funding_settlement_missing")
+                self._event(snapshot_key, int(position["instrument_id"]), "FUNDING_RECONCILIATION_REQUIRED", now, {
+                    "scheduled_funding_timestamp_ms": old_next,
+                    "reason": "public settled funding rate missing or ambiguous; no ticker-rate estimate applied",
+                })
+                return False
             mark = _decimal(ticker.get("mark_price"), "mark_price", positive=True)
             quantity = Decimal(position["quantity"])
             sign = ONE if position["side"] == "LONG" else Decimal("-1")
-            previous_rate = Decimal(position["last_funding_rate"])
+            previous_rate = _decimal(settled.get("funding_rate"), "settled_funding_rate")
             payment = quantity * mark * previous_rate * sign
             margin = Decimal(position["margin_balance"]) - payment
             total_paid = Decimal(position["funding_paid"]) + payment
@@ -378,7 +435,9 @@ class PerpsPaperEngine:
             self._event(snapshot_key, int(position["instrument_id"]), "FUNDING_SETTLED", now, {
                 "payment": str(payment),
                 "funding_rate": str(previous_rate),
+                "funding_timestamp_ms": int(settled["timestamp_ms"]),
                 "mark_price": str(mark),
+                "mark_price_method": "first_fresh_post_settlement_observation",
                 "next_funding_ms": current_next,
             })
         else:
@@ -424,8 +483,12 @@ class PerpsPaperEngine:
         entry_price = Decimal(position["entry_price"])
         sign = ONE if position["side"] == "LONG" else Decimal("-1")
         gross = (exit_price - entry_price) * quantity * sign
-        exit_fee = exit_notional * self.taker_fee_rate
-        liquidation_fee = exit_notional * self.liquidation_fee_rate if liquidated else ZERO
+        stored_taker_fee = Decimal(position["taker_fee_rate"])
+        current_taker_fee = self._current_fee_rate(snapshot, now)
+        exit_fee_rate = max(stored_taker_fee, current_taker_fee or ZERO)
+        exit_fee = exit_notional * exit_fee_rate
+        liquidation_fee_rate = Decimal(position["liquidation_fee_rate"])
+        liquidation_fee = exit_notional * liquidation_fee_rate if liquidated else ZERO
         entry_fee = Decimal(position["entry_fee"])
         funding_paid = Decimal(position["funding_paid"])
         net = gross - entry_fee - exit_fee - liquidation_fee - funding_paid
@@ -457,7 +520,9 @@ class PerpsPaperEngine:
             "gross_pnl": str(gross),
             "entry_fee": str(entry_fee),
             "exit_fee": str(exit_fee),
+            "exit_taker_fee_rate": str(exit_fee_rate),
             "funding_paid": str(funding_paid),
+            "liquidation_fee_rate": str(liquidation_fee_rate),
             "liquidation_fee": str(liquidation_fee),
             "net_pnl": str(net),
             "reason": reason,
@@ -516,6 +581,9 @@ class PerpsPaperEngine:
             max_market_notional = _decimal(instrument.get("max_market_notional"), "max_market_notional", positive=True)
             max_instrument_leverage = _decimal(instrument.get("max_leverage"), "max_leverage", positive=True)
             interval = _interval_ms(instrument.get("funding_interval"))
+            liquidation_fee_rate = _decimal(instrument.get("liquidation_fee"), "liquidation_fee")
+            if not ZERO <= liquidation_fee_rate < ONE:
+                raise ValueError("instrument liquidation fee must be in [0, 1)")
             next_funding = ticker.get("next_funding_ms")
             if isinstance(next_funding, bool) or not isinstance(next_funding, int) or next_funding <= 0:
                 raise ValueError("next_funding_ms is unavailable")
@@ -535,6 +603,12 @@ class PerpsPaperEngine:
             self._event(snapshot_key, instrument_id, "ENTRY_BLOCKED", now, {"reason": "spread_too_wide", "spread_bps": str(spread_bps)})
             return
 
+        taker_fee_rate = self._current_fee_rate(snapshot, now)
+        if taker_fee_rate is None:
+            self._event(snapshot_key, instrument_id, "ENTRY_BLOCKED", now, {
+                "reason": "current_public_taker_fee_schedule_missing_or_stale"
+            })
+            return
         side, signal = self._signal(instrument_id, history_store)
         if side is None:
             self._event(snapshot_key, instrument_id, "NO_SIGNAL", now, signal)
@@ -592,7 +666,7 @@ class PerpsPaperEngine:
             self._event(snapshot_key, instrument_id, "ENTRY_BLOCKED", now, {"reason": "invalid_leverage_tier"})
             return
         margin = entry_notional / leverage
-        entry_fee = entry_notional * self.taker_fee_rate
+        entry_fee = entry_notional * taker_fee_rate
         if Decimal(account["cash"]) < margin + entry_fee:
             self._event(snapshot_key, instrument_id, "ENTRY_BLOCKED", now, {"reason": "insufficient_free_cash"})
             return
@@ -608,15 +682,17 @@ class PerpsPaperEngine:
             """
             INSERT INTO perps_paper_positions (
                 instrument_id,symbol,side,quantity,entry_price,margin_balance,entry_fee,
-                funding_paid,stop_price,take_profit_price,last_mark,last_funding_rate,
+                taker_fee_rate,liquidation_fee_rate,funding_paid,
+                stop_price,take_profit_price,last_mark,last_funding_rate,
                 next_funding_ms,funding_interval_ms,maintenance_leverage,opened_at,status
-            ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?, 'OPEN')
+            ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?, 'OPEN')
             """,
             (
                 instrument_id, str(instrument.get("symbol") or "")[:80], side,
-                str(quantity), str(entry_price), str(margin), str(entry_fee), "0",
+                str(quantity), str(entry_price), str(margin), str(entry_fee),
+                str(taker_fee_rate), str(liquidation_fee_rate), "0",
                 str(stop), str(target), str(mark), str(_decimal(ticker.get("funding_rate"), "funding_rate")),
-                next_funding, interval, str(tier_max), now.isoformat(),
+                next_funding, interval, str(max_instrument_leverage), now.isoformat(),
             ),
         )
         self.db.execute(
@@ -632,6 +708,9 @@ class PerpsPaperEngine:
             "leverage": str(leverage),
             "isolated_margin": str(margin),
             "entry_fee": str(entry_fee),
+            "taker_fee_rate": str(taker_fee_rate),
+            "liquidation_fee_rate": str(liquidation_fee_rate),
+            "maintenance_margin_rate": str(Decimal("0.5") / max_instrument_leverage),
             "stop_price": str(stop),
             "take_profit_price": str(target),
             "signal": signal,
@@ -705,7 +784,7 @@ class PerpsPaperEngine:
             ).fetchone()
             had_open_position = existing is not None
             if existing:
-                if not self._funding(existing, instrument, ticker, captured_now, snapshot_key):
+                if not self._funding(existing, instrument, ticker, captured_now, snapshot_key, history_store):
                     pass
                 current = self.db.execute(
                     "SELECT * FROM perps_paper_positions WHERE position_id=?",
@@ -721,7 +800,7 @@ class PerpsPaperEngine:
                 ).fetchone()
                 quantity = Decimal(current["quantity"])
                 notional = quantity * mark
-                maintenance_rate = Decimal("0.5") / Decimal(current["maintenance_leverage"])
+                maintenance_rate = Decimal("0.5") / Decimal(instrument["max_leverage"])
                 maintenance = notional * maintenance_rate
                 position_equity = Decimal(current["margin_balance"]) + self._unrealized(current, mark)
                 margin_ratio = position_equity / maintenance if maintenance > ZERO else Decimal("0")
@@ -757,6 +836,32 @@ class PerpsPaperEngine:
                 self._try_open(snapshot, history_store, captured_now, snapshot_key)
             self._refresh_account(captured_now)
             return self.summary()
+
+    def funding_requirements(self, snapshots: list[dict[str, Any]]) -> list[dict[str, int]]:
+        """Return exact funding settlement windows required by open positions."""
+        required: list[dict[str, int]] = []
+        with self._lock:
+            for snapshot in snapshots:
+                instrument = snapshot.get("instrument", {})
+                ticker = snapshot.get("ticker", {})
+                instrument_id = instrument.get("instrument_id")
+                if isinstance(instrument_id, bool) or not isinstance(instrument_id, int):
+                    continue
+                position = self.db.execute(
+                    "SELECT next_funding_ms FROM perps_paper_positions WHERE instrument_id=? AND status='OPEN' ORDER BY position_id DESC LIMIT 1",
+                    (instrument_id,),
+                ).fetchone()
+                if position is None:
+                    continue
+                old_next = int(position["next_funding_ms"])
+                new_next = ticker.get("next_funding_ms")
+                if isinstance(new_next, int) and not isinstance(new_next, bool) and new_next > old_next:
+                    required.append({
+                        "instrument_id": instrument_id,
+                        "start_timestamp_ms": old_next,
+                        "end_timestamp_ms": new_next,
+                    })
+        return required
 
     def summary(self) -> dict[str, Any]:
         with self._lock:
@@ -796,8 +901,8 @@ class PerpsPaperEngine:
                 "max_leverage": str(self.max_leverage),
                 "max_position_notional": str(self.max_position_notional),
                 "max_total_notional": str(self.max_total_notional),
-                "taker_fee_rate_assumption": str(self.taker_fee_rate),
-                "liquidation_fee_rate_assumption": str(self.liquidation_fee_rate),
+                "fee_rate_source": "public_perps_fee_schedule_highest_published_category_rate",
+                "liquidation_fee_source": "instrument_liquidation_fee_rate",
                 "event_counts": {row["event_type"]: int(row["count"]) for row in events},
                 "research_only": True,
                 "live_execution_enabled": False,

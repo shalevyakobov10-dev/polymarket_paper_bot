@@ -1128,7 +1128,15 @@ def health_payload(
         perps_component["strategy_status"] = perps_worker_snapshot.get("strategy_status", "not_configured")
         perps_component["heartbeat_fresh"] = bool(perps_worker_snapshot.get("heartbeat_fresh"))
         perps_component["open_positions"] = int(perps_worker_snapshot.get("open_positions") or 0)
+        perps_component["funding_gaps_last_cycle"] = int(perps_worker_snapshot.get("funding_gaps_last_cycle") or 0)
+        perps_component["exit_blocks_last_cycle"] = int(perps_worker_snapshot.get("exit_blocks_last_cycle") or 0)
+        perps_component["signals_last_cycle"] = int(perps_worker_snapshot.get("signals_last_cycle") or 0)
+        perps_component["entries_opened_last_cycle"] = int(perps_worker_snapshot.get("entries_opened_last_cycle") or 0)
+        perps_component["entry_blocks_last_cycle"] = int(perps_worker_snapshot.get("entry_blocks_last_cycle") or 0)
+        perps_component["strategy_decisions_last_cycle"] = int(perps_worker_snapshot.get("strategy_decisions_last_cycle") or 0)
+        perps_component["strategy_last_reason"] = perps_worker_snapshot.get("strategy_last_reason")
         perps_component["last_cycle_warning"] = perps_worker_snapshot.get("last_cycle_warning")
+        perps_component["last_exit_block_reason"] = perps_worker_snapshot.get("last_exit_block_reason")
         perps_component["backup_error_type"] = perps_worker_snapshot.get("backup_error_type")
         if not perps_component["heartbeat_fresh"]:
             perps_component["status"] = "stale"

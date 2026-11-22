@@ -125,6 +125,17 @@ def build_supervisor_config(
         raise ValueError("ENABLE_PERPS_MARKET_DATA_WORKER must be exactly true or false")
     perps_worker_enabled = perps_enabled_raw == "true"
     perps_worker_env = dict(app_env)
+    # The Perps collector and Paper manager use public market data only. Never
+    # pass account, wallet, signing, or future Perps auth variables to this child.
+    for environment_name in tuple(perps_worker_env):
+        if (
+            environment_name.startswith("POLYMARKET_")
+            or environment_name.startswith("LIVE_")
+            or environment_name.startswith("PERPS_API_")
+            or environment_name.startswith("PERPS_PRIVATE_")
+            or environment_name.startswith("PERPS_SECRET")
+        ):
+            perps_worker_env.pop(environment_name, None)
     perps_worker_env["DATA_DIR"] = str(data_dir)
     perps_worker_env["PERPS_MARKET_HISTORY_DB"] = str(
         source.get("PERPS_MARKET_HISTORY_DB", str(data_dir / "perps_market_history.sqlite3"))

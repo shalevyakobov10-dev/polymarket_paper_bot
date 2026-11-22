@@ -206,9 +206,15 @@ def build_supervisor_config(
         minimum=1,
         maximum=50,
     )
+    # Existing open positions are fetched before the ordinary discovery slice.
+    # Reserve the maximum ten priority instruments in addition to market_limit
+    # when calculating the watchdog lease so a healthy poll is not killed early.
+    maximum_prioritized_open_positions = 10
     minimum_heartbeat_timeout = max(
         180,
-        perps_poll_interval * 3 + perps_market_limit * 8 + 80,
+        perps_poll_interval * 3
+        + (perps_market_limit + maximum_prioritized_open_positions) * 8
+        + 80,
     )
     configured_heartbeat_timeout = source.get("PERPS_WORKER_HEARTBEAT_TIMEOUT_SECONDS")
     perps_heartbeat_timeout = (

@@ -8,7 +8,7 @@ import signal
 import tempfile
 import threading
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable
 
@@ -54,6 +54,12 @@ def _write_status(path: Path, payload: dict[str, Any]) -> None:
                 pass
 
 
+def _status_count(value: Any, field: str, *, minimum: int = 0) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or value < minimum:
+        raise ValueError(f"{field} must be an integer >= {minimum}")
+    return value
+
+
 def read_perps_worker_status(path: str | Path) -> dict[str, Any]:
     """Return a fixed allowlisted status view; discard unknown fields."""
     target = Path(path).expanduser()
@@ -70,11 +76,13 @@ def read_perps_worker_status(path: str | Path) -> dict[str, Any]:
             "last_heartbeat_at": raw.get("last_heartbeat_at"),
             "last_success_at": raw.get("last_success_at"),
             "last_error": str(raw.get("last_error"))[:240] if raw.get("last_error") else None,
-            "consecutive_failures": max(0, int(raw.get("consecutive_failures", 0))),
-            "markets_in_last_snapshot": max(0, int(raw.get("markets_in_last_snapshot", 0))),
-            "snapshots_inserted_total": max(0, int(raw.get("snapshots_inserted_total", 0))),
-            "history_rows": max(0, int(raw.get("history_rows", 0))),
-            "poll_interval_seconds": max(1, int(raw.get("poll_interval_seconds", 30))),
+            "consecutive_failures": _status_count(raw.get("consecutive_failures", 0), "consecutive_failures"),
+            "markets_in_last_snapshot": _status_count(raw.get("markets_in_last_snapshot", 0), "markets_in_last_snapshot"),
+            "snapshots_inserted_total": _status_count(raw.get("snapshots_inserted_total", 0), "snapshots_inserted_total"),
+            "history_rows": _status_count(raw.get("history_rows", 0), "history_rows"),
+            "poll_interval_seconds": _status_count(raw.get("poll_interval_seconds", 30), "poll_interval_seconds", minimum=1),
+            "history_retention_days": _status_count(raw.get("history_retention_days", 14), "history_retention_days", minimum=1),
+            "expired_rows_pruned_total": _status_count(raw.get("expired_rows_pruned_total", 0), "expired_rows_pruned_total"),
             "research_only": True,
             "live_execution_enabled": False,
             "execution": "none",
@@ -87,6 +95,7 @@ def read_perps_worker_status(path: str | Path) -> dict[str, Any]:
             "last_error": "status_file_missing", "consecutive_failures": 0,
             "markets_in_last_snapshot": 0, "snapshots_inserted_total": 0,
             "history_rows": 0, "poll_interval_seconds": None,
+            "history_retention_days": None, "expired_rows_pruned_total": 0,
             "research_only": True, "live_execution_enabled": False, "execution": "none",
         }
     except (OSError, UnicodeError, ValueError, TypeError, json.JSONDecodeError):
@@ -107,6 +116,7 @@ def run_worker(
     stop_event: Any | None = None,
     status_path: str | Path | None = None,
     poll_interval_seconds: int | None = None,
+    history_retention_days: int | None = None,
     sleeper: Callable[[float], None] = time.sleep,
     max_cycles: int | None = None,
 ) -> int:
@@ -117,6 +127,11 @@ def run_worker(
     )
     if not 15 <= interval <= 300:
         raise ValueError("poll_interval_seconds must be between 15 and 300")
+    retention_days = history_retention_days or _positive_int_env(
+        "PERPS_HISTORY_RETENTION_DAYS", 14, 1, 365
+    )
+    if not 1 <= retention_days <= 365:
+        raise ValueError("history_retention_days must be between 1 and 365")
     current_provider = provider or PerpsPublicMarketDataProvider(
         market_limit=_positive_int_env("PERPS_MARKET_LIMIT", 10, 1, 50),
         max_age_seconds=10.0,
@@ -133,9 +148,11 @@ def run_worker(
         "last_error": None, "consecutive_failures": 0,
         "markets_in_last_snapshot": 0, "snapshots_inserted_total": 0,
         "history_rows": current_store.count(), "poll_interval_seconds": interval,
+        "history_retention_days": retention_days, "expired_rows_pruned_total": 0,
         "research_only": True, "live_execution_enabled": False, "execution": "none",
     }
     cycles = 0
+    last_prune_monotonic: float | None = None
     try:
         _write_status(status_file, state)
         while not stopping.is_set():
@@ -147,6 +164,20 @@ def run_worker(
                 recorded = current_store.record_snapshots(snapshots)
                 if int(recorded["inserted"]) < 0:
                     raise RuntimeError("history store returned an invalid insert count")
+                monotonic_now = time.monotonic()
+                prune_before = getattr(current_store, "prune_before", None)
+                if callable(prune_before) and (
+                    last_prune_monotonic is None
+                    or monotonic_now - last_prune_monotonic >= 21_600
+                ):
+                    cutoff = datetime.now(timezone.utc) - timedelta(days=retention_days)
+                    pruned = prune_before(cutoff)
+                    deleted = int(pruned.get("deleted", 0))
+                    if deleted < 0:
+                        raise RuntimeError("history retention returned an invalid delete count")
+                    state["expired_rows_pruned_total"] += deleted
+                    state["history_rows"] = int(pruned.get("remaining", current_store.count()))
+                    last_prune_monotonic = monotonic_now
                 state["worker_state"] = "healthy"
                 state["last_success_at"] = _utc_now()
                 state["last_error"] = None

@@ -358,6 +358,65 @@ class PerpsPaperEngineTests(unittest.TestCase):
                     1,
                 )
 
+    def test_funding_schedule_grace_matches_thirty_second_worker_polling(self):
+        with tempfile.TemporaryDirectory() as directory:
+            with self.make_engine(directory) as engine:
+                process_snapshot_at_capture(engine, make_snapshot(), FakeHistory())
+                grace_snapshot = make_snapshot(
+                    sequence=4,
+                    timestamp_ms=FUNDING_MS + 30_000,
+                    next_funding_ms=FUNDING_MS,
+                )
+                within_grace = process_snapshot_at_capture(
+                    engine, grace_snapshot, FakeHistory()
+                )
+                self.assertFalse(within_grace["halted"])
+                self.assertEqual(within_grace["open_positions"], 1)
+
+                settled_snapshot = make_snapshot(
+                    sequence=5,
+                    timestamp_ms=FUNDING_MS + 40_000,
+                    next_funding_ms=FUNDING_MS + 3_600_000,
+                )
+                settled = process_snapshot_at_capture(
+                    engine, settled_snapshot, FakeHistory(settled_rate="0.00025")
+                )
+                self.assertFalse(settled["halted"])
+                self.assertEqual(
+                    engine.db.execute(
+                        "SELECT COUNT(*) FROM perps_paper_events WHERE event_type='FUNDING_SETTLED'"
+                    ).fetchone()[0],
+                    1,
+                )
+
+    def test_funding_schedule_that_never_advances_halts_after_grace(self):
+        with tempfile.TemporaryDirectory() as directory:
+            with self.make_engine(directory) as engine:
+                process_snapshot_at_capture(engine, make_snapshot(), FakeHistory())
+                late = make_snapshot(
+                    sequence=4,
+                    timestamp_ms=FUNDING_MS + 61_000,
+                    next_funding_ms=FUNDING_MS,
+                )
+                result = process_snapshot_at_capture(engine, late, FakeHistory())
+                self.assertTrue(result["halted"])
+                self.assertEqual(result["halt_reason"], "funding_schedule_not_advanced")
+
+    def test_funding_mark_observation_beyond_configured_window_halts(self):
+        with tempfile.TemporaryDirectory() as directory:
+            with self.make_engine(
+                directory, max_post_funding_mark_delay_seconds=45
+            ) as engine:
+                process_snapshot_at_capture(engine, make_snapshot(), FakeHistory())
+                too_late = make_snapshot(
+                    sequence=4,
+                    timestamp_ms=FUNDING_MS + 46_000,
+                    next_funding_ms=FUNDING_MS + 3_600_000,
+                )
+                result = process_snapshot_at_capture(engine, too_late, FakeHistory())
+                self.assertTrue(result["halted"])
+                self.assertEqual(result["halt_reason"], "funding_mark_observation_missing")
+
     def test_funding_gap_halts_new_risk_instead_of_guessing_missing_rates(self):
         with tempfile.TemporaryDirectory() as directory:
             with self.make_engine(directory) as engine:

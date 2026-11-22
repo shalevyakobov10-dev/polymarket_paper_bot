@@ -581,8 +581,8 @@ def run_worker(
                                 "backup_files_expected_last_run": len(backup_paths),
                                 "perps_order_journal_present": journal_present,
                                 "perps_order_journal_backed_up": (
-                                    not journal_present
-                                    or perps_order_journal_database.name in backed_up_source_names
+                                    journal_present
+                                    and perps_order_journal_database.name in backed_up_source_names
                                 ),
                                 "backup_error_type": None,
                                 "backup_consecutive_failures": 0,

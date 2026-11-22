@@ -80,6 +80,7 @@ class PerpsSdkReconcilerTests(unittest.IsolatedAsyncioTestCase):
         status="accepted",
         quantity="2",
         filled_quantity="0",
+        resting_quantity=None,
         side="BUY",
         instrument_id=17,
         order_id=123,
@@ -90,6 +91,15 @@ class PerpsSdkReconcilerTests(unittest.IsolatedAsyncioTestCase):
             side=side,
             quantity=quantity,
             filled_quantity=filled_quantity,
+            resting_quantity=(
+                resting_quantity
+                if resting_quantity is not None
+                else (
+                    str(Decimal(quantity) - Decimal(filled_quantity))
+                    if status in {"open", "accepted", "partial", "partially_filled"}
+                    else "0"
+                )
+            ),
             status=status,
             client_order_id=client_order_id or self.client_id,
             created_at=datetime(2026, 11, 22, 8, 0, tzinfo=timezone.utc),
@@ -170,6 +180,23 @@ class PerpsSdkReconcilerTests(unittest.IsolatedAsyncioTestCase):
         state = await self.reconciler.reconcile(self.client_id)
         self.assertEqual(state["status"], "submission_unknown")
         self.assertEqual(state["last_reason_code"], "fill_history_not_yet_reconciled")
+
+    async def test_ioc_partial_fill_with_zero_resting_quantity_is_terminal_cancelled(self):
+        self.prepare_pending()
+        self.reconciler_session.orders[self.client_id] = [
+            self.order(
+                status="partial",
+                filled_quantity="1.5",
+                resting_quantity="0",
+            )
+        ]
+        self.reconciler_session.fills = [
+            self.fill(quantity="1.5", price="2501")
+        ]
+        state = await self.reconciler.reconcile(self.client_id)
+        self.assertEqual(state["status"], "cancelled")
+        self.assertEqual(state["filled_quantity"], "1.5")
+        self.assertEqual(state["average_fill_price"], "2501")
 
     async def test_sdk_filled_status_requires_complete_fills_and_closes_order_state(self):
         self.prepare_pending()

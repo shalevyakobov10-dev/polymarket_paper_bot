@@ -389,6 +389,29 @@ class PerpsPaperEngineTests(unittest.TestCase):
                     1,
                 )
 
+    def test_funding_schedule_update_after_sixty_one_seconds_fits_default_mark_window(self):
+        with tempfile.TemporaryDirectory() as directory:
+            with self.make_engine(directory) as engine:
+                process_snapshot_at_capture(engine, make_snapshot(), FakeHistory())
+                delayed_update = make_snapshot(
+                    sequence=4,
+                    timestamp_ms=FUNDING_MS + 61_000,
+                    next_funding_ms=FUNDING_MS + 3_600_000,
+                )
+                result = process_snapshot_at_capture(
+                    engine,
+                    delayed_update,
+                    FakeHistory(settled_rate="0.00025"),
+                )
+                self.assertFalse(result["halted"])
+                self.assertEqual(result["open_positions"], 1)
+                self.assertEqual(
+                    engine.db.execute(
+                        "SELECT COUNT(*) FROM perps_paper_events WHERE event_type='FUNDING_SETTLED'"
+                    ).fetchone()[0],
+                    1,
+                )
+
     def test_funding_schedule_that_never_advances_halts_after_grace(self):
         with tempfile.TemporaryDirectory() as directory:
             with self.make_engine(directory) as engine:

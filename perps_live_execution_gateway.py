@@ -294,8 +294,13 @@ class PerpsLiveExecutionGateway:
             estimated_round_trip_fee = estimated_entry_fee * Decimal("2")
             if max_round_trip_fee_budget < estimated_round_trip_fee:
                 return self._blocked("risk_fee_budget_below_current_taker_fee_estimate", client_order_id=identifier)
-            if required_margin + estimated_entry_fee > margin_available:
-                return self._blocked("insufficient_available_initial_margin_and_entry_fee", client_order_id=identifier)
+            # Reserve the estimated close fee as well as the entry fee so
+            # the account has room for the planned round trip, not only entry.
+            if required_margin + estimated_round_trip_fee > margin_available:
+                return self._blocked(
+                    "insufficient_available_initial_margin_and_round_trip_fees",
+                    client_order_id=identifier,
+                )
 
             # Confirm the target instrument's own margin mode and leverage.
             try:

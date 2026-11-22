@@ -139,6 +139,17 @@ def _perps_account_worker_heartbeat_age(
     return max(0.0, age)
 
 
+def _required_configured_path(
+    source: Mapping[str, str],
+    name: str,
+    default: str | Path,
+) -> Path:
+    value = source.get(name, str(default))
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError(f"{name} must be a non-empty path")
+    return Path(value).expanduser()
+
+
 def _bounded_integer(value: Any, name: str, *, minimum: int, maximum: int) -> int:
     if isinstance(value, bool):
         raise ValueError(f"{name} must be an integer between {minimum} and {maximum}")
@@ -362,18 +373,21 @@ def build_supervisor_config(
                 maximum=7200,
             )
         )
-        account_worker_status_path = Path(source.get(
+        account_worker_status_path = _required_configured_path(
+            source,
             "PERPS_ACCOUNT_SUPERVISOR_STATUS_FILE",
-            str(data_dir / "perps_account_supervisor_status.json"),
-        )).expanduser()
-        shared_submission_lock = Path(source.get(
+            data_dir / "perps_account_supervisor_status.json",
+        )
+        shared_submission_lock = _required_configured_path(
+            source,
             "PERPS_SUBMISSION_LOCK_PATH",
-            str(data_dir / "perps_submission.lock"),
-        )).expanduser()
-        perps_order_journal = Path(source.get(
+            data_dir / "perps_submission.lock",
+        )
+        perps_order_journal = _required_configured_path(
+            source,
             "PERPS_ORDER_JOURNAL_DB",
-            str(data_dir / "perps_order_journal.sqlite3"),
-        )).expanduser()
+            data_dir / "perps_order_journal.sqlite3",
+        )
 
         # This is a strict child-environment allowlist. No inherited wallet/API
         # keys, no LIVE_* values, and no unrelated process configuration.

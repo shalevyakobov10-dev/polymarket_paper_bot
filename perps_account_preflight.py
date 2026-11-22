@@ -59,6 +59,8 @@ class PerpsAccountPreflight:
         portfolio_max_age_seconds: int = 120,
         auto_cancel_min_remaining_seconds: int = 10,
         account_read_timeout_seconds: float = 10.0,
+        fee_schedule_provider: Any | None = None,
+        fee_schedule_max_age_seconds: int = 900,
     ) -> None:
         required = (
             "fetch_portfolio", "fetch_balances", "fetch_open_orders",
@@ -92,8 +94,90 @@ class PerpsAccountPreflight:
             raise ValueError("account_read_timeout_seconds must be between 0.05 and 60")
         self.portfolio_max_age_seconds = portfolio_max_age_seconds
         self.auto_cancel_min_remaining_seconds = auto_cancel_min_remaining_seconds
+        if fee_schedule_provider is not None and not callable(fee_schedule_provider):
+            raise ValueError("fee_schedule_provider must be an async callable")
+        if (
+            isinstance(fee_schedule_max_age_seconds, bool)
+            or not isinstance(fee_schedule_max_age_seconds, int)
+            or not 30 <= fee_schedule_max_age_seconds <= 3600
+        ):
+            raise ValueError("fee_schedule_max_age_seconds must be between 30 and 3600")
         self.account_read_timeout_seconds = float(account_read_timeout_seconds)
+        self.fee_schedule_provider = fee_schedule_provider
+        self.fee_schedule_max_age_seconds = fee_schedule_max_age_seconds
         self.reconciler = PerpsSdkReconciler(journal=journal, session=session)
+
+    def _resolve_account_fee_tier(
+        self,
+        fee_snapshot: Any,
+        fee_tier: int,
+        now: datetime,
+    ) -> tuple[Decimal, Decimal]:
+        """Resolve the authenticated account tier against a fresh public Perps schedule.
+
+        Polymarket documents one Perps tier ladder; legacy category labels must
+        not be used to select different fee ladders for different instruments.
+        If a response contains several perpetual entries, their complete tier
+        ladders must agree before the account's fee_tier index is applied.
+        """
+        if not isinstance(fee_snapshot, dict):
+            raise ValueError("fee schedule response must be an object")
+        retrieved_raw = fee_snapshot.get("retrieved_at")
+        if isinstance(retrieved_raw, datetime):
+            retrieved = retrieved_raw
+        elif isinstance(retrieved_raw, str):
+            try:
+                retrieved = datetime.fromisoformat(retrieved_raw.replace("Z", "+00:00"))
+            except (TypeError, ValueError, OverflowError):
+                raise ValueError("fee schedule retrieval timestamp is invalid") from None
+        else:
+            raise ValueError("fee schedule retrieval timestamp is missing")
+        if retrieved.tzinfo is None or retrieved.utcoffset() is None:
+            raise ValueError("fee schedule retrieval timestamp must be timezone-aware")
+        age = (now - retrieved.astimezone(timezone.utc)).total_seconds()
+        if age < -2 or age > self.fee_schedule_max_age_seconds:
+            raise ValueError("fee schedule snapshot is stale or future-dated")
+
+        rows = fee_snapshot.get("fee_schedule")
+        if not isinstance(rows, (tuple, list)):
+            raise ValueError("fee schedule entries are missing")
+        perps_rows = [
+            row for row in rows
+            if isinstance(row, dict)
+            and str(row.get("instrument_type") or "").strip().lower() == "perpetual"
+        ]
+        if not perps_rows:
+            raise ValueError("no perpetual fee schedule entry is available")
+
+        normalized_ladders: list[tuple[tuple[str, str, str], ...]] = []
+        for entry in perps_rows:
+            tiers = entry.get("tiers")
+            if not isinstance(tiers, list) or not tiers:
+                raise ValueError("perpetual fee tiers are missing")
+            normalized: list[tuple[str, str, str]] = []
+            previous_volume = Decimal("-1")
+            for tier in tiers:
+                if not isinstance(tier, dict):
+                    raise ValueError("perpetual fee tier has an invalid shape")
+                volume = _finite_decimal(tier.get("min_volume_30d"))
+                taker = _finite_decimal(tier.get("taker_fee_rate"))
+                maker = _finite_decimal(tier.get("maker_fee_rate"))
+                if volume < 0 or volume <= previous_volume:
+                    raise ValueError("perpetual fee tier thresholds are not strictly increasing")
+                if not Decimal("0") <= taker < Decimal("1"):
+                    raise ValueError("perpetual taker fee rate is outside valid bounds")
+                if not Decimal("-1") < maker < Decimal("1"):
+                    raise ValueError("perpetual maker fee rate is outside valid bounds")
+                previous_volume = volume
+                normalized.append((str(volume), str(taker), str(maker)))
+            normalized_ladders.append(tuple(normalized))
+
+        if any(ladder != normalized_ladders[0] for ladder in normalized_ladders[1:]):
+            raise ValueError("perpetual fee schedules differ across legacy categories")
+        if isinstance(fee_tier, bool) or not isinstance(fee_tier, int) or not 0 <= fee_tier < len(normalized_ladders[0]):
+            raise ValueError("account fee tier is outside the published perpetual fee schedule")
+        selected = normalized_ladders[0][fee_tier]
+        return Decimal(selected[1]), Decimal(selected[2])
 
     async def run(self, *, now: datetime | None = None) -> dict[str, Any]:
         current = now or datetime.now(timezone.utc)
@@ -117,6 +201,10 @@ class PerpsAccountPreflight:
             "account_maintenance_margin_ratio": None,
             "unknown_remote_open_orders": 0,
             "missing_remote_open_orders": 0,
+            "fee_schedule_fresh": False,
+            "account_fee_tier": None,
+            "effective_taker_fee_rate": None,
+            "effective_maker_fee_rate": None,
             "execution": "none",
             "order_placement_authorized": False,
         }
@@ -235,6 +323,29 @@ class PerpsAccountPreflight:
         fee_tier = _field(portfolio, "fee_tier")
         if isinstance(fee_tier, bool) or not isinstance(fee_tier, int) or fee_tier < 0:
             reasons.append("account_fee_tier_invalid")
+        else:
+            observations["account_fee_tier"] = fee_tier
+            if self.fee_schedule_provider is None:
+                reasons.append("public_perps_fee_schedule_provider_missing")
+            else:
+                try:
+                    pending_fee_snapshot = self.fee_schedule_provider()
+                    if not hasattr(pending_fee_snapshot, "__await__"):
+                        raise TypeError("fee schedule provider must return an awaitable")
+                    fee_snapshot = await asyncio.wait_for(
+                        pending_fee_snapshot,
+                        timeout=self.account_read_timeout_seconds,
+                    )
+                    taker_rate, maker_rate = self._resolve_account_fee_tier(
+                        fee_snapshot, fee_tier, current
+                    )
+                    observations["fee_schedule_fresh"] = True
+                    observations["effective_taker_fee_rate"] = str(taker_rate)
+                    observations["effective_maker_fee_rate"] = str(maker_rate)
+                except asyncio.TimeoutError:
+                    reasons.append("public_perps_fee_schedule_timeout")
+                except Exception:
+                    reasons.append("public_perps_fee_schedule_missing_stale_or_ambiguous")
 
         positions = _field(portfolio, "positions")
         if not isinstance(positions, (tuple, list)):

@@ -128,6 +128,7 @@ class PerpsLiveExecutionGateway:
         max_leverage: int = 2,
         account_read_timeout_seconds: float = 5.0,
         submission_timeout_seconds: float = 10.0,
+        risk_decision_max_age_seconds: int = 5,
     ) -> None:
         if not callable(getattr(session, "place_order", None)):
             raise ValueError("session must expose place_order")
@@ -174,8 +175,15 @@ class PerpsLiveExecutionGateway:
                 raise ValueError(f"{name} must be between 0.05 and 60")
         self.max_order_notional_usd = max_notional
         self.max_leverage = max_leverage
+        if (
+            isinstance(risk_decision_max_age_seconds, bool)
+            or not isinstance(risk_decision_max_age_seconds, int)
+            or not 1 <= risk_decision_max_age_seconds <= 60
+        ):
+            raise ValueError("risk_decision_max_age_seconds must be between 1 and 60")
         self.account_read_timeout_seconds = float(account_read_timeout_seconds)
         self.submission_timeout_seconds = float(submission_timeout_seconds)
+        self.risk_decision_max_age_seconds = risk_decision_max_age_seconds
 
     def _blocked(self, reason: str, *, client_order_id: str | None = None) -> dict[str, Any]:
         return {
@@ -234,11 +242,27 @@ class PerpsLiveExecutionGateway:
 
         if not isinstance(risk_decision, dict) or risk_decision.get("approved") is not True:
             return self._blocked("independent_risk_decision_not_approved")
+        captured_raw = risk_decision.get("captured_at")
+        if isinstance(captured_raw, datetime):
+            captured_at = captured_raw
+        elif isinstance(captured_raw, str):
+            try:
+                captured_at = datetime.fromisoformat(captured_raw.replace("Z", "+00:00"))
+            except (TypeError, ValueError, OverflowError):
+                return self._blocked("risk_snapshot_timestamp_invalid")
+        else:
+            return self._blocked("risk_snapshot_timestamp_missing")
+        if captured_at.tzinfo is None or captured_at.utcoffset() is None:
+            return self._blocked("risk_snapshot_timestamp_invalid")
+        risk_age = (current - captured_at.astimezone(timezone.utc)).total_seconds()
+        if risk_age < -2 or risk_age > self.risk_decision_max_age_seconds:
+            return self._blocked("risk_decision_stale_or_future_dated")
         try:
             risk_cap = _decimal(risk_decision.get("max_notional_usd"), "risk_max_notional", positive=True)
             required_margin = _decimal(
                 risk_decision.get("required_initial_margin_usd"),
                 "required_initial_margin_usd",
+                positive=True,
             )
         except ValueError:
             return self._blocked("risk_snapshot_missing_or_invalid")

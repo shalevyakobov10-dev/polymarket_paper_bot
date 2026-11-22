@@ -18,6 +18,19 @@ on:
       - ".github/workflows/perps-sdk-contract.yml"
   pull_request:
     paths:
+      - "requirements.txt"
+      - "perps_sdk_contract.py"
+      - "perps_sdk_reconciler.py"
+      - "perps_account_preflight.py"
+      - "perps_live_release_gate.py"
+      - "perps_auto_cancel_guard.py"
+      - "perps_live_execution_gateway.py"
+      - "tests/test_perps_sdk_contract.py"
+      - "tests/test_perps_account_preflight.py"
+      - "tests/test_perps_live_release_gate.py"
+      - "tests/test_perps_auto_cancel_guard.py"
+      - "tests/test_perps_live_execution_gateway.py"
+      - ".github/workflows/perps-sdk-contract.yml"
 
 permissions:
   contents: read

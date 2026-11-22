@@ -87,8 +87,9 @@ def _perps_worker_heartbeat_age(
         stamp = stamp.astimezone(timezone.utc)
     except (OSError, UnicodeError, ValueError, TypeError, json.JSONDecodeError):
         return process_age
-    # A heartbeat from an earlier process must not make a restarted child look live.
-    if stamp < started - timedelta(seconds=2):
+    # A heartbeat captured before this child started belongs to an earlier
+    # process instance; even a one-second-old file must not extend its lease.
+    if stamp < started:
         return process_age
     age = (current - stamp).total_seconds()
     # A materially future-dated heartbeat is corrupt and must fail closed.

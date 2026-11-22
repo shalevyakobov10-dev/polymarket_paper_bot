@@ -22,6 +22,7 @@ MONITOR_STATES = frozenset({
 PAPER_WORKER_STATES = frozenset({
     "disabled", "starting", "running", "restarting", "stopped",
 })
+PERPS_WORKER_STATES = PAPER_WORKER_STATES
 STATUS_SCHEMA_VERSION = 1
 
 
@@ -39,6 +40,11 @@ def build_supervisor_status(
     event_paper_worker_restart_count: int = 0,
     event_paper_worker_last_exit_code: int | None = None,
     event_paper_worker_next_restart_at: str | None = None,
+    perps_paper_worker_enabled: bool = False,
+    perps_paper_worker_state: str = "disabled",
+    perps_paper_worker_restart_count: int = 0,
+    perps_paper_worker_last_exit_code: int | None = None,
+    perps_paper_worker_next_restart_at: str | None = None,
     updated_at: str | None = None,
 ) -> dict[str, Any]:
     if service_state not in SERVICE_STATES:
@@ -112,6 +118,29 @@ def build_supervisor_status(
             raise ValueError("event_paper_worker_next_restart_at must be timezone-aware")
     if event_paper_worker_state != "restarting" and event_paper_worker_next_restart_at is not None:
         raise ValueError("event_paper_worker_next_restart_at is valid only while restarting")
+    if not isinstance(perps_paper_worker_enabled, bool):
+        raise ValueError("perps_paper_worker_enabled must be boolean")
+    if perps_paper_worker_state not in PERPS_WORKER_STATES:
+        raise ValueError("invalid perps_paper_worker_state")
+    if not perps_paper_worker_enabled and perps_paper_worker_state != "disabled":
+        raise ValueError("disabled Perps paper worker must use disabled state")
+    if perps_paper_worker_enabled and perps_paper_worker_state == "disabled":
+        raise ValueError("enabled Perps paper worker cannot use disabled state")
+    if isinstance(perps_paper_worker_restart_count, bool) or not isinstance(perps_paper_worker_restart_count, int) or perps_paper_worker_restart_count < 0:
+        raise ValueError("perps_paper_worker_restart_count must be a nonnegative integer")
+    if perps_paper_worker_last_exit_code is not None and (isinstance(perps_paper_worker_last_exit_code, bool) or not isinstance(perps_paper_worker_last_exit_code, int)):
+        raise ValueError("perps_paper_worker_last_exit_code must be an integer or null")
+    if perps_paper_worker_next_restart_at is not None:
+        if not isinstance(perps_paper_worker_next_restart_at, str) or not perps_paper_worker_next_restart_at.strip():
+            raise ValueError("perps_paper_worker_next_restart_at must be an ISO timestamp or null")
+        try:
+            perps_restart_time = datetime.fromisoformat(perps_paper_worker_next_restart_at)
+        except ValueError:
+            raise ValueError("perps_paper_worker_next_restart_at must be a valid ISO timestamp") from None
+        if perps_restart_time.tzinfo is None or perps_restart_time.utcoffset() is None:
+            raise ValueError("perps_paper_worker_next_restart_at must be timezone-aware")
+    if perps_paper_worker_state != "restarting" and perps_paper_worker_next_restart_at is not None:
+        raise ValueError("perps_paper_worker_next_restart_at is valid only while restarting")
 
     return {
         "schema_version": STATUS_SCHEMA_VERSION,
@@ -128,6 +157,11 @@ def build_supervisor_status(
         "event_paper_worker_restart_count": event_paper_worker_restart_count,
         "event_paper_worker_last_exit_code": event_paper_worker_last_exit_code,
         "event_paper_worker_next_restart_at": event_paper_worker_next_restart_at,
+        "perps_paper_worker_enabled": perps_paper_worker_enabled,
+        "perps_paper_worker_state": perps_paper_worker_state,
+        "perps_paper_worker_restart_count": perps_paper_worker_restart_count,
+        "perps_paper_worker_last_exit_code": perps_paper_worker_last_exit_code,
+        "perps_paper_worker_next_restart_at": perps_paper_worker_next_restart_at,
         "updated_at": parsed.astimezone(timezone.utc).isoformat(),
         "execution": "none",
     }
@@ -150,6 +184,11 @@ def write_supervisor_status(path: str | Path, payload: dict[str, Any]) -> None:
         event_paper_worker_restart_count=payload.get("event_paper_worker_restart_count", 0),
         event_paper_worker_last_exit_code=payload.get("event_paper_worker_last_exit_code"),
         event_paper_worker_next_restart_at=payload.get("event_paper_worker_next_restart_at"),
+        perps_paper_worker_enabled=payload.get("perps_paper_worker_enabled", False),
+        perps_paper_worker_state=payload.get("perps_paper_worker_state", "disabled"),
+        perps_paper_worker_restart_count=payload.get("perps_paper_worker_restart_count", 0),
+        perps_paper_worker_last_exit_code=payload.get("perps_paper_worker_last_exit_code"),
+        perps_paper_worker_next_restart_at=payload.get("perps_paper_worker_next_restart_at"),
         updated_at=payload.get("updated_at"),
     )
     target = Path(path).expanduser()
@@ -215,6 +254,11 @@ def read_supervisor_status(
             event_paper_worker_restart_count=raw.get("event_paper_worker_restart_count", 0),
             event_paper_worker_last_exit_code=raw.get("event_paper_worker_last_exit_code"),
             event_paper_worker_next_restart_at=raw.get("event_paper_worker_next_restart_at"),
+            perps_paper_worker_enabled=raw.get("perps_paper_worker_enabled", False),
+            perps_paper_worker_state=raw.get("perps_paper_worker_state", "disabled"),
+            perps_paper_worker_restart_count=raw.get("perps_paper_worker_restart_count", 0),
+            perps_paper_worker_last_exit_code=raw.get("perps_paper_worker_last_exit_code"),
+            perps_paper_worker_next_restart_at=raw.get("perps_paper_worker_next_restart_at"),
             updated_at=raw.get("updated_at"),
         )
         current = now or datetime.now(timezone.utc)
@@ -241,6 +285,11 @@ def read_supervisor_status(
             "event_paper_worker_restart_count": 0,
             "event_paper_worker_last_exit_code": None,
             "event_paper_worker_next_restart_at": None,
+            "perps_paper_worker_enabled": False,
+            "perps_paper_worker_state": "disabled",
+            "perps_paper_worker_restart_count": 0,
+            "perps_paper_worker_last_exit_code": None,
+            "perps_paper_worker_next_restart_at": None,
             "updated_at": None,
             "status_age_seconds": None,
             "status_fresh": False,

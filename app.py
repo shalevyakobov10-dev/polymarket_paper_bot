@@ -1402,9 +1402,13 @@ class Handler(BaseHTTPRequestHandler):
                             str(perps_snapshot.get("last_heartbeat_at") or "").replace("Z", "+00:00")
                         )
                         if perps_stamp.tzinfo is not None and perps_stamp.utcoffset() is not None:
-                            perps_age = max(0.0, (
+                            raw_perps_age = (
                                 datetime.now(timezone.utc) - perps_stamp.astimezone(timezone.utc)
-                            ).total_seconds())
+                            ).total_seconds()
+                            if raw_perps_age < -2:
+                                perps_status = "future_dated"
+                            else:
+                                perps_age = max(0.0, raw_perps_age)
                     except (TypeError, ValueError, OverflowError):
                         perps_age = None
                     stale_after = max(

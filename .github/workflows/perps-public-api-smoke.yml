@@ -42,6 +42,7 @@ jobs:
           status = json.loads(Path(os.environ["PERPS_MARKET_WORKER_STATUS_FILE"]).read_text())
           assert status["worker_state"] == "healthy", status
           assert status["markets_in_last_snapshot"] >= 1, status
+          assert status["markets_with_fee_schedule"] >= 1, status
           assert status["history_rows"] >= 1, status
           assert status["research_only"] is True, status
           assert status["live_execution_enabled"] is False, status

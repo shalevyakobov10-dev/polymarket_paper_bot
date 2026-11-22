@@ -52,6 +52,11 @@ class PerpsOrderJournalTests(unittest.TestCase):
             self.journal.begin_submission(client_order_id)
             current = self.journal.get_intent(client_order_id)
         actual_venue_id = venue_order_id or current.get("venue_order_id") or "venue-123"
+        if current["status"] == "submission_pending":
+            self.journal.record_submission_acknowledgement(
+                client_order_id,
+                venue_order_id=actual_venue_id,
+            )
         return self.journal.record_reconciliation(
             client_order_id,
             outcome="found",

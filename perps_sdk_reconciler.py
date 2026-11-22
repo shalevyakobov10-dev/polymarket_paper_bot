@@ -210,12 +210,26 @@ class PerpsSdkReconciler:
         try:
             requested_quantity = _decimal(_field(order, "quantity"), "order_quantity")
             filled_quantity = _decimal(_field(order, "filled_quantity"), "filled_quantity")
+            resting_quantity = _decimal(_field(order, "resting_quantity"), "resting_quantity")
         except ValueError:
             return self.journal.record_reconciliation(
                 client_order_id,
                 outcome="lookup_error",
                 reason_code="venue_order_quantities_invalid",
             )
+        # IOC orders may have a partial fill with the unfilled remainder
+        # cancelled immediately. A zero resting amount is terminal, not open.
+        if remote_status == "partially_filled":
+            if filled_quantity == requested_quantity:
+                remote_status = "filled"
+            elif resting_quantity == 0:
+                remote_status = "cancelled"
+            elif resting_quantity != requested_quantity - filled_quantity:
+                return self.journal.record_reconciliation(
+                    client_order_id,
+                    outcome="lookup_error",
+                    reason_code="venue_resting_quantity_mismatch",
+                )
         average_price: Decimal | None = None
         if filled_quantity > 0:
             try:

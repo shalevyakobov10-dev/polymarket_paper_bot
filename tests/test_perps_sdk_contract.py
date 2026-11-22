@@ -27,7 +27,7 @@ class CompatiblePerpsSession:
     def cancel_order(
         self, *, order_id=None, client_order_id=None, expires_at=None, retry=None
     ): pass
-    def arm_auto_cancel(self, *, expires_at=None): pass
+    def arm_auto_cancel(self, *, cancel_at, expires_at=None): pass
     def disarm_auto_cancel(self, *, expires_at=None): pass
     def update_leverage(self, *, instrument_id, leverage, cross_margin): pass
     def update_margin(self, *, instrument_id, amount): pass

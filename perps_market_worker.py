@@ -402,6 +402,10 @@ def run_worker(
         _write_status(status_file, state)
         while not stopping.is_set():
             state["last_heartbeat_at"] = _utc_now()
+            journal_present_now = perps_order_journal_database.is_file()
+            state["perps_order_journal_present"] = journal_present_now
+            if not journal_present_now:
+                state["perps_order_journal_backed_up"] = False
             try:
                 open_position_ids: list[int] = []
                 if current_engine is not None:
@@ -530,9 +534,14 @@ def run_worker(
                     and database.is_file()
                 ):
                     backup_now = datetime.now(timezone.utc)
+                    journal_backup_required = (
+                        perps_order_journal_database.is_file()
+                        and state.get("perps_order_journal_backed_up") is not True
+                    )
                     backup_due = (
                         last_backup_monotonic is None
                         or time.monotonic() - last_backup_monotonic >= backup_interval * 3600
+                        or journal_backup_required
                     )
                     retry_delay = int(state["backup_retry_delay_seconds"])
                     retry_ready = (

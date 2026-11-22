@@ -90,7 +90,7 @@ class PerpsBookFillTests(unittest.TestCase):
         self.assertEqual(insufficient["reason"], "insufficient_visible_depth")
 
         wide_impact = market_snapshot(
-            ask="100", asks=None,
+            ask="100",
         )
         wide_impact["asks"] = [
             {"price": "100", "quantity": "0.01"},

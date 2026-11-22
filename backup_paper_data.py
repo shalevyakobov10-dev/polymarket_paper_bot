@@ -181,6 +181,11 @@ def main() -> int:
         default=os.environ.get("MARKET_HISTORY_DATABASE_PATH", str(data_dir / "market_history.sqlite3")),
     )
     parser.add_argument(
+        "--perps-order-journal",
+        default=os.environ.get("PERPS_ORDER_JOURNAL_DB", str(data_dir / "perps_order_journal.sqlite3")),
+        help="optional durable Perps order journal path",
+    )
+    parser.add_argument(
         "--backup-directory",
         default=os.environ.get("PAPER_BACKUP_DIRECTORY", str(data_dir / "backups")),
     )
@@ -192,7 +197,7 @@ def main() -> int:
     args = parser.parse_args()
     try:
         result = create_paper_data_backups(
-            [args.paper_database, args.market_history_database],
+            [args.paper_database, args.market_history_database, args.perps_order_journal],
             args.backup_directory,
             retain=args.retain,
         )

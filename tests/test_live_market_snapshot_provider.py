@@ -176,6 +176,45 @@ class LiveMarketSnapshotProviderTests(unittest.TestCase):
         self.assertEqual(rows, [])
         fetch.assert_not_called()
 
+    def test_default_watchlist_and_orderbook_batch_cover_thirty_binary_markets(self):
+        now = datetime(2026, 11, 23, 12, 0, tzinfo=timezone.utc)
+        stamp = now.isoformat()
+        markets = []
+        books = {}
+        for index in range(32):
+            row = market()
+            row["conditionId"] = f"condition-{index}"
+            row["question"] = f"Will example event {index} happen?"
+            row["clobTokenIds"] = json.dumps([f"yes-{index}", f"no-{index}"])
+            row["volume24hr"] = str(100_000 - index)
+            markets.append(row)
+            books[f"yes-{index}"] = book(f"yes-{index}", 0.50, 0.52, stamp)
+            books[f"no-{index}"] = book(f"no-{index}", 0.48, 0.50, stamp)
+
+        with patch.dict("os.environ", {
+            "PAPER_LIVE_MARKETS_LIMIT": "30",
+            "PAPER_GAMMA_PAGE_SIZE": "200",
+            "ORDERBOOK_TOKENS_PER_POLL": "60",
+        }):
+            with patch.object(live, "urlopen", return_value=FakeResponse(markets)) as request:
+                with patch.object(live, "fetch_order_books", return_value=books) as fetch:
+                    provider = live.LiveClobMarketSnapshotProvider()
+                    rows = provider.load(now=now)
+
+        self.assertEqual(len(rows), 30)
+        self.assertEqual(provider.last_discovered_market_count, 32)
+        self.assertEqual(provider.last_selected_market_count, 30)
+        self.assertEqual(provider.last_orderbook_token_requests, 60)
+        self.assertEqual(provider.last_usable_market_count, 30)
+        self.assertEqual(
+            [row["market_id"] for row in rows],
+            [f"condition-{index}" for index in range(30)],
+        )
+        fetch.assert_called_once()
+        self.assertEqual(len(fetch.call_args.args[0]), 60)
+        query = request.call_args.args[0].full_url
+        self.assertIn("limit=200", query)
+
     def test_supports_gamma_json_string_fields_and_deduplicates_market_ids(self):
         now = datetime(2026, 11, 7, 10, 0, tzinfo=timezone.utc)
         stamp = now.isoformat()

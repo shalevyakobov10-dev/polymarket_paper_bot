@@ -1230,6 +1230,7 @@ def health_payload(
             "gdelt_topics_succeeded_last_cycle",
             "gdelt_topics_failed_last_cycle",
             "gdelt_items_added_last_cycle",
+            "gdelt_items_total_recent_last_cycle",
             "gdelt_topics_seen_in_archive_count",
             "gdelt_network_requests_made_last_cycle",
         ):

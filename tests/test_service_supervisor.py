@@ -428,6 +428,20 @@ class SupervisorTests(unittest.TestCase):
         self.assertNotIn("PERPS_ACCOUNT_SUPERVISOR_SECRETS_FILE", config.app_env)
         self.assertNotIn("PERPS_ACCOUNT_SUPERVISOR_SECRETS_FILE", config.perps_worker_env)
 
+    def test_perps_account_supervisor_rejects_secret_owned_by_another_uid(self):
+        from unittest.mock import patch
+
+        with tempfile.TemporaryDirectory() as directory:
+            secret_path = self._account_supervisor_secret_file(directory)
+            with patch("service_supervisor.os.getuid", return_value=os.getuid() + 1):
+                with self.assertRaisesRegex(ValueError, "owned by the service UID"):
+                    build_supervisor_config({
+                        "ENABLE_PERPS_ACCOUNT_SUPERVISOR": "true",
+                        "ENABLE_PERPS_MARKET_DATA_WORKER": "true",
+                        "DATA_DIR": directory,
+                        "PERPS_ACCOUNT_SUPERVISOR_SECRETS_FILE": str(secret_path),
+                    })
+
     def test_perps_account_supervisor_secret_file_permissions_must_be_private(self):
         with tempfile.TemporaryDirectory() as directory:
             for mode in (0o640, 0o644, 0o660):

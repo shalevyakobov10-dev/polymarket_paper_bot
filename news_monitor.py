@@ -306,10 +306,10 @@ def parse_feed(
             "url": link,
             "published_at": published[:100],
             "fetched_at": observed_at,
-            "source_language": str((feed_metadata or {}).get("language") or "und")[:12].lower(),
-            "coverage_region": str((feed_metadata or {}).get("region") or "unspecified")[:48].lower(),
+            "source_language": str((feed_metadata or {}).get("language") or "en")[:12].lower(),
+            "coverage_region": str((feed_metadata or {}).get("region") or "global")[:48].lower(),
             "directional_analysis_supported": (
-                str((feed_metadata or {}).get("language") or "und").lower() in {"en", "eng"}
+                str((feed_metadata or {}).get("language") or "en").lower() in {"en", "eng"}
             ),
         })
     return records
@@ -836,12 +836,20 @@ class NewsCollector:
         self.items = self.items[-MAX_RECENT_ITEMS:]
         if len(self.seen_ids) > 20_000:
             self.seen_ids = {str(item["id"]) for item in self.items if item.get("id")}
-        successful_regions = sorted({
-            str(item.get("coverage_region") or "unspecified")
-            for item in added
-        })
+        metadata_by_source = {
+            str(feed.get("source") or "Unknown feed")[:100]: feed
+            for feed in self.feeds
+        }
+        successful_languages = set()
+        successful_regions = set()
+        for source, _parsed, error in results:
+            if error is not None:
+                continue
+            metadata = metadata_by_source.get(source, {})
+            successful_languages.add(str(metadata.get("language") or "en").lower())
+            successful_regions.add(str(metadata.get("region") or "global").lower())
         configured_languages = sorted({
-            str(feed.get("language") or "und").lower()
+            str(feed.get("language") or "en").lower()
             for feed in self.feeds
         })
         return {
@@ -853,7 +861,12 @@ class NewsCollector:
             "new_items": added,
             "items_total_recent": len(self.items),
             "languages_configured": configured_languages,
-            "regions_with_new_items": successful_regions,
+            "languages_succeeded": sorted(successful_languages),
+            "regions_configured": sorted({
+                str(feed.get("region") or "global").lower()
+                for feed in self.feeds
+            }),
+            "regions_succeeded": sorted(successful_regions),
             "directional_analysis_languages": ["en"],
             "non_english_items_added": sum(
                 1 for item in added

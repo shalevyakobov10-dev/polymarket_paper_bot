@@ -537,6 +537,13 @@ class ParserTests(unittest.TestCase):
                 self.assertEqual(payload["observations"]["unknown_remote_open_orders"], 1)
                 self.assertNotIn("private_key", payload)
                 self.assertNotIn("private_key", payload["observations"])
+                self.assertEqual(payload["read_only_enforcement"], "application_allowlist_only")
+                self.assertEqual(
+                    payload["credential_write_capability"],
+                    "delegated_session_may_sign_write_operations",
+                )
+                self.assertFalse(payload["credential_scope_enforced_by_venue"])
+                self.assertFalse(payload["same_uid_process_isolation_verified"])
                 self.assertTrue(payload["read_only"])
                 self.assertFalse(payload["order_submission_allowed"])
                 self.assertFalse(payload["order_signing_allowed"])
@@ -1191,6 +1198,9 @@ class ParserTests(unittest.TestCase):
             self.assertIn("/perps-live-gate", html)
             self.assertIn("/perps-account-supervisor", html)
             self.assertIn("Perps account supervision", html)
+            self.assertIn("application_allowlist_only", html)
+            self.assertIn("credential_scope_enforced_by_venue", html)
+            self.assertIn("same_uid_process_isolation_verified", html)
             self.assertIn("perps_order_journal_present", html)
             self.assertIn("perps_order_journal_backed_up", html)
             self.assertIn("backup_files_expected_last_run", html)

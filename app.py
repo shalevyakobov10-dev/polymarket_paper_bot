@@ -1843,6 +1843,10 @@ class Handler(BaseHTTPRequestHandler):
                     payload["read_only_preflight_passed"] = False
                 payload.update({
                     "read_only": True,
+                    "read_only_enforcement": "application_allowlist_only",
+                    "credential_write_capability": "delegated_session_may_sign_write_operations",
+                    "credential_scope_enforced_by_venue": False,
+                    "same_uid_process_isolation_verified": False,
                     "order_submission_allowed": False,
                     "order_signing_allowed": False,
                     "new_order_permission": False,

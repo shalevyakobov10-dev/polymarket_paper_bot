@@ -63,6 +63,11 @@ class FakeRawPerpsSession:
         self.calls.append(("list_fills", instrument_id, start, end, sort))
         return result
 
+    def list_funding_payments(self, *, instrument_id=None, start=None, end=None):
+        result = object()
+        self.calls.append(("list_funding_payments", instrument_id, start, end))
+        return result
+
     async def place_order(self, **kwargs):
         self.write_calls.append(("place_order", kwargs))
         raise AssertionError("write method must never be forwarded")
@@ -127,6 +132,10 @@ class ReadOnlyPerpsSessionTests(unittest.IsolatedAsyncioTestCase):
             instrument_id=17, start="start", end="end", sort="asc"
         )
         self.assertIsNotNone(paginator)
+        funding_paginator = session.list_funding_payments(
+            instrument_id=17, start="funding-start", end="funding-end"
+        )
+        self.assertIsNotNone(funding_paginator)
         self.assertEqual(raw.write_calls, [])
         self.assertTrue(all(call[0] in READ_ONLY_PERPS_METHODS for call in raw.calls))
 

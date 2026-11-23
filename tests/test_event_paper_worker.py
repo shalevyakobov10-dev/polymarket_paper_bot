@@ -59,6 +59,14 @@ class EventPaperWorkerTests(unittest.TestCase):
                 "news_feeds_succeeded": 25,
                 "news_feeds_failed": 3,
                 "news_items_considered": 412,
+                "news_source_coverage": {
+                    "unique_article_count": 380,
+                    "distinct_publisher_count": 21,
+                    "articles_with_publisher_publication_time": 300,
+                    "articles_with_index_time_only_or_unknown_publication_time": 80,
+                },
+                "news_distinct_publishers": 21,
+                "news_sources_used": ["rss_atom", "gdelt_doc_api", "<script>"],
                 "news_non_english_items_unscored": 138,
                 "gdelt_topics_configured": 18,
                 "gdelt_topics_succeeded": 4,
@@ -119,6 +127,11 @@ class EventPaperWorkerTests(unittest.TestCase):
             self.assertEqual(status["news_feeds_succeeded_last_cycle"], 25)
             self.assertEqual(status["news_feeds_failed_last_cycle"], 3)
             self.assertEqual(status["news_items_considered_last_cycle"], 412)
+            self.assertEqual(status["news_unique_articles_last_cycle"], 380)
+            self.assertEqual(status["news_distinct_publishers_last_cycle"], 21)
+            self.assertEqual(status["news_source_types_seen"], ["gdelt_doc_api", "rss_atom"])
+            self.assertEqual(status["news_articles_with_publisher_time_last_cycle"], 300)
+            self.assertEqual(status["news_articles_with_index_time_only_last_cycle"], 80)
             self.assertEqual(status["news_non_english_items_unscored_last_cycle"], 138)
             self.assertEqual(status["gdelt_topics_configured_last_cycle"], 18)
             self.assertEqual(status["gdelt_topics_succeeded_last_cycle"], 4)

@@ -875,6 +875,15 @@ class OfflineNewsPaperBot:
             self.db.commit()
 
         summary = self.summary()
+        discovery_pages_attempted = getattr(
+            self.snapshot_provider, "last_discovery_pages_attempted", None
+        )
+        discovery_pages_succeeded = getattr(
+            self.snapshot_provider, "last_discovery_pages_succeeded", None
+        )
+        discovery_pages_failed = getattr(
+            self.snapshot_provider, "last_discovery_pages_failed", None
+        )
         return {
             "mode": ENGINE_MODE, "dry_run": DRY_RUN, "live_execution_enabled": LIVE_EXECUTION_ENABLED,
             "markets_loaded": len(snapshots),
@@ -885,7 +894,16 @@ class OfflineNewsPaperBot:
             "market_selected_categories": list(
                 getattr(self.snapshot_provider, "last_selected_categories", []) or []
             ),
-            "market_sampling_policy": "top_24h_volume_from_bounded_gamma_sample",
+            "market_discovery_pages_attempted": discovery_pages_attempted,
+            "market_discovery_pages_succeeded": discovery_pages_succeeded,
+            "market_discovery_pages_failed": discovery_pages_failed,
+            "market_discovery_scan_complete": (
+                discovery_pages_succeeded is not None
+                and discovery_pages_succeeded > 0
+                and discovery_pages_failed == 0
+            ),
+            "market_category_quota": getattr(self.snapshot_provider, "max_markets_per_category", None),
+            "market_sampling_policy": "top_24h_volume_bounded_multi_page_gamma_sample_with_category_diversity",
             "market_data_source": self.config.market_data_source,
             "market_history": market_history,
             "news_feeds_configured": int(news_result.get("feeds_configured") or 0),

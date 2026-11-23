@@ -11,7 +11,7 @@ from __future__ import annotations
 import json
 import sys
 from importlib import metadata
-from inspect import signature
+from inspect import iscoroutinefunction, signature
 from typing import Any
 
 EXPECTED_DISTRIBUTION = "polymarket-client"
@@ -26,6 +26,18 @@ CREDENTIAL_MODEL_FIELDS: dict[str, set[str]] = {
     "ApiKeyCreds": {"key", "secret", "passphrase"},
     "PerpsCredentials": {"proxy", "private_key", "secret", "expires_at"},
 }
+
+ASYNC_PERPS_SESSION_METHODS = frozenset({
+    "fetch_balances",
+    "fetch_portfolio",
+    "fetch_auto_cancel_status",
+    "fetch_account_config",
+    "fetch_open_orders",
+    "fetch_orders",
+    "list_funding_payments",
+    "close",
+})
+SYNC_PERPS_SESSION_METHODS = frozenset({"list_fills"})
 
 PERPS_SESSION_METHODS: dict[str, set[str]] = {
     "fetch_balances": set(),
@@ -58,6 +70,9 @@ PERPS_SESSION_METHODS: dict[str, set[str]] = {
 def _check_methods(
     owner: type[Any],
     expected: dict[str, set[str]],
+    *,
+    must_be_async: frozenset[str] = frozenset(),
+    must_be_sync: frozenset[str] = frozenset(),
 ) -> dict[str, list[str]]:
     failures: dict[str, list[str]] = {}
     for name, required_parameters in expected.items():
@@ -71,8 +86,12 @@ def _check_methods(
             failures[name] = ["signature_unavailable"]
             continue
         missing = sorted(required_parameters - parameters)
+        if name in must_be_async and not iscoroutinefunction(method):
+            missing.append("method_must_be_async")
+        if name in must_be_sync and iscoroutinefunction(method):
+            missing.append("method_must_be_sync")
         if missing:
-            failures[name] = missing
+            failures[name] = sorted(missing)
     return failures
 
 
@@ -100,8 +119,17 @@ def evaluate_sdk_contract(
 ) -> dict[str, Any]:
     """Evaluate a supplied SDK surface; safe to call with test doubles."""
     version_matches = installed_version == EXPECTED_VERSION
-    async_failures = _check_methods(async_secure_client, ASYNC_SECURE_METHODS)
-    session_failures = _check_methods(perps_session, PERPS_SESSION_METHODS)
+    async_failures = _check_methods(
+        async_secure_client,
+        ASYNC_SECURE_METHODS,
+        must_be_async=frozenset(ASYNC_SECURE_METHODS),
+    )
+    session_failures = _check_methods(
+        perps_session,
+        PERPS_SESSION_METHODS,
+        must_be_async=ASYNC_PERPS_SESSION_METHODS,
+        must_be_sync=SYNC_PERPS_SESSION_METHODS,
+    )
     model_failures = {
         "ApiKeyCreds": _check_credential_model(
             api_key_credentials, CREDENTIAL_MODEL_FIELDS["ApiKeyCreds"]

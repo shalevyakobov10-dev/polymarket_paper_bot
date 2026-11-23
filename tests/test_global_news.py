@@ -16,7 +16,13 @@ class GDELTCollectorTests(unittest.TestCase):
         ]}
         rows = global_news.normalize_gdelt_articles(payload, "2026-10-30T12:01:00+00:00")
         self.assertEqual(len(rows), 1)
-        self.assertEqual(rows[0]["published_at"], "2026-10-30T12:00:00+00:00")
+        self.assertEqual(rows[0]["published_at"], "")
+        self.assertEqual(rows[0]["indexed_at"], "2026-10-30T12:00:00+00:00")
+        self.assertEqual(rows[0]["publication_time_status"], "unknown")
+        self.assertEqual(
+            rows[0]["timestamp_basis"],
+            "gdelt_index_observation_not_publisher_publication",
+        )
         self.assertEqual(rows[0]["source_country"], "US")
         self.assertEqual(rows[0]["source_type"], "gdelt_doc_api")
         self.assertEqual(rows[0]["publisher_id"], "example.org")
@@ -114,6 +120,50 @@ class GDELTCollectorTests(unittest.TestCase):
             payload, topic_category="technology_cyber_ai"
         )
         self.assertEqual(rows[0]["topic_categories"], ["technology_cyber_ai"])
+
+    def test_fetch_once_enforces_five_second_spacing_between_topic_requests(self):
+        import json
+
+        payload = {"articles": [{
+            "title": "Global policy update",
+            "url": "https://example.org/rate-limit",
+            "seendate": "20261123T120000Z",
+            "domain": "example.org",
+        }]}
+
+        class FakeResponse:
+            status = 200
+            def __enter__(self): return self
+            def __exit__(self, *args): return False
+            def read(self): return json.dumps(payload).encode("utf-8")
+
+        clock = [100.0]
+        sleeps = []
+
+        def fake_sleep(seconds):
+            sleeps.append(seconds)
+            clock[0] += seconds
+
+        with tempfile.TemporaryDirectory() as directory, patch.dict(
+            "os.environ",
+            {
+                "GDELT_TOPICS": "geopolitics_security,macroeconomics_finance,business_trade",
+                "GDELT_TOPICS_PER_POLL": "3",
+                "GDELT_MIN_REQUEST_INTERVAL_SECONDS": "5",
+            },
+        ):
+            collector = global_news.GDELTCollector(
+                Path(directory) / "gdelt.jsonl",
+                sleep=fake_sleep,
+                monotonic=lambda: clock[0],
+            )
+            with patch("global_news.urlopen", return_value=FakeResponse()) as mocked:
+                result = collector.fetch_once()
+
+        self.assertEqual(mocked.call_count, 3)
+        self.assertEqual(sleeps, [5.0, 5.0])
+        self.assertEqual(result["topics_succeeded"], 3)
+        self.assertEqual(result["topics_failed"], 0)
 
     def test_fetch_once_rotates_topics_and_merges_cross_topic_duplicates(self):
         payload = {"articles": [
@@ -231,6 +281,25 @@ class GDELTCollectorTests(unittest.TestCase):
             self.assertEqual(first_result["topics_attempted"], ["geopolitics_security"])
             self.assertEqual(second_result["topics_attempted"], ["macroeconomics_finance"])
             self.assertEqual(mocked.call_count, 1)
+
+    def test_legacy_gdelt_seendate_is_migrated_as_index_time_not_published_time(self):
+        import json
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "gdelt.jsonl"
+            path.write_text(json.dumps({
+                "id": "legacy-id",
+                "source_type": "gdelt_doc_api",
+                "url": "https://example.org/legacy",
+                "title": "Legacy article",
+                "published_at": "2026-11-23T09:00:00+00:00",
+            }) + "\\n", encoding="utf-8")
+            collector = global_news.GDELTCollector(path)
+        self.assertEqual(collector.items[0]["published_at"], "")
+        self.assertEqual(
+            collector.items[0]["indexed_at"],
+            "2026-11-23T09:00:00+00:00",
+        )
+        self.assertEqual(collector.items[0]["publication_time_status"], "unknown")
 
     def test_rejects_missing_articles_collection(self):
         with self.assertRaises(ValueError):

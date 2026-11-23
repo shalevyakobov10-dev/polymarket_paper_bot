@@ -57,34 +57,41 @@ class ReadOnlyPerpsSession:
     def __repr__(self) -> str:
         return "ReadOnlyPerpsSession(methods=allowlisted, execution=none)"
 
-    def _require_open(self) -> Any:
+    async def fetch_balances(self) -> Any:
         if self.__closed:
             raise RuntimeError("read-only Perps session is closed")
-        return self.__session
-
-    async def fetch_balances(self) -> Any:
-        return await self._require_open().fetch_balances()
+        return await self.__session.fetch_balances()
 
     async def fetch_portfolio(self) -> Any:
-        return await self._require_open().fetch_portfolio()
+        if self.__closed:
+            raise RuntimeError("read-only Perps session is closed")
+        return await self.__session.fetch_portfolio()
 
     async def fetch_auto_cancel_status(self) -> Any:
-        return await self._require_open().fetch_auto_cancel_status()
+        if self.__closed:
+            raise RuntimeError("read-only Perps session is closed")
+        return await self.__session.fetch_auto_cancel_status()
 
     async def fetch_account_config(self, *, instrument_id: int | None = None) -> Any:
-        return await self._require_open().fetch_account_config(
+        if self.__closed:
+            raise RuntimeError("read-only Perps session is closed")
+        return await self.__session.fetch_account_config(
             instrument_id=instrument_id
         )
 
     async def fetch_open_orders(self, *, instrument_id: int | None = None) -> Any:
-        return await self._require_open().fetch_open_orders(
+        if self.__closed:
+            raise RuntimeError("read-only Perps session is closed")
+        return await self.__session.fetch_open_orders(
             instrument_id=instrument_id
         )
 
     async def fetch_orders(self, *, client_order_id: str) -> Any:
+        if self.__closed:
+            raise RuntimeError("read-only Perps session is closed")
         if not isinstance(client_order_id, str) or not client_order_id.strip():
             raise ValueError("client_order_id must be non-empty text")
-        return await self._require_open().fetch_orders(
+        return await self.__session.fetch_orders(
             client_order_id=client_order_id
         )
 
@@ -96,13 +103,15 @@ class ReadOnlyPerpsSession:
         end: Any,
         sort: str = "asc",
     ) -> Any:
+        if self.__closed:
+            raise RuntimeError("read-only Perps session is closed")
         if isinstance(instrument_id, bool) or not isinstance(instrument_id, int) or instrument_id <= 0:
             raise ValueError("instrument_id must be a positive integer")
         if sort not in {"asc", "desc"}:
             raise ValueError("fill sort must be asc or desc")
         # SDK paginator is intentionally synchronous to construct and async to
         # iterate. Do not await it or expose any additional session methods.
-        return self._require_open().list_fills(
+        return self.__session.list_fills(
             instrument_id=instrument_id,
             start=start,
             end=end,
@@ -116,13 +125,15 @@ class ReadOnlyPerpsSession:
         start: Any = None,
         end: Any = None,
     ) -> Any:
+        if self.__closed:
+            raise RuntimeError("read-only Perps session is closed")
         if instrument_id is not None and (
             isinstance(instrument_id, bool)
             or not isinstance(instrument_id, int)
             or instrument_id <= 0
         ):
             raise ValueError("instrument_id must be a positive integer")
-        return self._require_open().list_funding_payments(
+        return self.__session.list_funding_payments(
             instrument_id=instrument_id,
             start=start,
             end=end,
@@ -135,7 +146,8 @@ class ReadOnlyPerpsSession:
         await self.__session.close()
 
     async def __aenter__(self) -> "ReadOnlyPerpsSession":
-        self._require_open()
+        if self.__closed:
+            raise RuntimeError("read-only Perps session is closed")
         return self
 
     async def __aexit__(self, exc_type, exc, traceback) -> None:

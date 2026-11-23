@@ -333,6 +333,8 @@ def build_supervisor_config(
             raise ValueError("Perps account supervisor secret file is unavailable") from None
         if secrets_path.is_symlink() or not secrets_path.is_file():
             raise ValueError("Perps account supervisor secret file must be a regular non-symlink file")
+        if secrets_stat.st_uid != os.getuid():
+            raise ValueError("Perps account supervisor secret file must be owned by the service UID")
         if secrets_stat.st_size <= 0 or secrets_stat.st_size > 16 * 1024:
             raise ValueError("Perps account supervisor secret file has invalid size")
         permissions = stat.S_IMODE(secrets_stat.st_mode)

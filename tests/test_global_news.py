@@ -292,7 +292,7 @@ class GDELTCollectorTests(unittest.TestCase):
                 "url": "https://example.org/legacy",
                 "title": "Legacy article",
                 "published_at": "2026-11-23T09:00:00+00:00",
-            }) + "\\n", encoding="utf-8")
+            }) + "\n", encoding="utf-8")
             collector = global_news.GDELTCollector(path)
         self.assertEqual(collector.items[0]["published_at"], "")
         self.assertEqual(

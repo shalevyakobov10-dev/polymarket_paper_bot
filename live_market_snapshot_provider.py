@@ -92,6 +92,7 @@ class LiveClobMarketSnapshotProvider:
         self.last_selected_market_count = 0
         self.last_orderbook_token_requests = 0
         self.last_usable_market_count = 0
+        self.last_selected_categories: list[str] = []
 
     def _discover_markets(self) -> list[dict[str, Any]]:
         limit = self.gamma_page_size
@@ -160,6 +161,10 @@ class LiveClobMarketSnapshotProvider:
                 break
 
         self.last_selected_market_count = len(candidates)
+        self.last_selected_categories = sorted({
+            str(row.get("market_category") or "uncategorized")
+            for row in candidates
+        })
         token_rows = [
             {"token_id": token}
             for row in candidates

@@ -1230,6 +1230,8 @@ def health_payload(
             "gdelt_topics_succeeded_last_cycle",
             "gdelt_topics_failed_last_cycle",
             "gdelt_items_added_last_cycle",
+            "gdelt_topics_seen_in_archive_count",
+            "gdelt_network_requests_made_last_cycle",
         ):
             paper_component[metric] = int(paper_worker_snapshot.get(metric) or 0)
         paper_component["gdelt_error_type"] = paper_worker_snapshot.get("gdelt_error_type")

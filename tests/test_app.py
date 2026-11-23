@@ -272,10 +272,26 @@ class ParserTests(unittest.TestCase):
             "consecutive_failures": 0,
             "total_failures": 1,
             "heartbeat_fresh": True,
+            "news_feeds_configured_last_cycle": 28,
+            "news_feeds_succeeded_last_cycle": 25,
+            "news_feeds_failed_last_cycle": 3,
+            "news_items_considered_last_cycle": 412,
+            "news_non_english_items_unscored_last_cycle": 138,
+            "gdelt_topics_configured_last_cycle": 18,
+            "gdelt_topics_succeeded_last_cycle": 4,
+            "gdelt_topics_failed_last_cycle": 0,
+            "gdelt_items_added_last_cycle": 87,
+            "gdelt_error_type": None,
+            "news_languages_seen": ["en", "ar", "es", "hi", "ja"],
+            "news_regions_seen": ["global", "east_asia", "latin_america"],
         }
         healthy, payload = app.health_payload(core, now, paper_worker_snapshot=paper)
         self.assertTrue(healthy)
         self.assertEqual(payload["components"]["event_paper_worker"]["status"], "healthy")
+        self.assertEqual(payload["components"]["event_paper_worker"]["news_feeds_succeeded_last_cycle"], 25)
+        self.assertEqual(payload["components"]["event_paper_worker"]["gdelt_topics_succeeded_last_cycle"], 4)
+        self.assertEqual(payload["components"]["event_paper_worker"]["news_languages_seen"], ["en", "ar", "es", "hi", "ja"])
+        self.assertEqual(payload["components"]["event_paper_worker"]["news_non_english_items_unscored_last_cycle"], 138)
         self.assertNotIn("event_paper_worker", payload["degraded_components"])
 
         backup_degraded = {**paper, "backup_error_type": "OSError",
@@ -1198,6 +1214,10 @@ class ParserTests(unittest.TestCase):
             self.assertIn("/perps-live-gate", html)
             self.assertIn("/perps-account-supervisor", html)
             self.assertIn("Perps account supervision", html)
+            self.assertIn("RSS feeds succeeded / configured", html)
+            self.assertIn("GDELT topics succeeded / configured", html)
+            self.assertIn("Non-English articles kept unscored", html)
+            self.assertIn("Coverage tags (regions / countries)", html)
             self.assertIn("d.read_only_enforcement", html)
             self.assertIn("d.credential_scope_enforced_by_venue", html)
             self.assertIn("d.credential_write_capability", html)

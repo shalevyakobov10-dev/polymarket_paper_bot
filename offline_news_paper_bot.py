@@ -146,7 +146,7 @@ class PaperConfig:
         self.news_log_path = Path(os.getenv("NEWS_LOG_PATH", "./data/offline_news_events.jsonl"))
         self.gdelt_log_path = Path(os.getenv(
             "GDELT_LOG_PATH",
-            str(self.news_log_path.with_name("offline_news_gdelt.jsonl")),
+            str(self.news_log_path.with_name("gdelt_news.jsonl")),
         ))
         self.poll_seconds = _int_env("PAPER_POLL_SECONDS", 60, 30, 86_400)
 
@@ -764,10 +764,18 @@ class OfflineNewsPaperBot:
         gdelt_error_type: str | None = None
         if fetch_news and self.gdelt_collector is not None:
             try:
-                gdelt_result = self.gdelt_collector.fetch_once()
+                archive_reader = getattr(self.gdelt_collector, "read_archive_snapshot", None)
+                if callable(archive_reader):
+                    # Production Paper consumes the app-owned shared archive; it
+                    # must not open a second GDELT request stream of its own.
+                    gdelt_result = archive_reader()
+                else:
+                    # Deterministic injected test/research collectors may provide
+                    # their own one-shot source without the shared archive API.
+                    gdelt_result = self.gdelt_collector.fetch_once()
             except Exception as exc:
-                # A GDELT outage must not discard working RSS sources or stop the
-                # Paper cycle. Record only the exception type, never URL/body text.
+                # A GDELT archive outage must not discard working RSS sources or
+                # stop the Paper cycle. Record only the exception type.
                 gdelt_error_type = type(exc).__name__[:80]
 
         rss_items = list(self.news_collector.items[-500:])
@@ -871,6 +879,8 @@ class OfflineNewsPaperBot:
             "gdelt_topics_configured": int(gdelt_result.get("topics_configured") or 0),
             "gdelt_topics_succeeded": int(gdelt_result.get("topics_succeeded") or 0),
             "gdelt_topics_failed": int(gdelt_result.get("topics_failed") or 0),
+            "gdelt_topics_seen_in_archive": list(gdelt_result.get("topics_seen_in_archive") or []),
+            "gdelt_network_requests_made": int(gdelt_result.get("network_requests_made", 0) or 0),
             "gdelt_items_added": int(gdelt_result.get("items_added") or 0),
             "gdelt_items_total_recent": int(gdelt_result.get("items_total_recent") or 0),
             "gdelt_error_type": gdelt_error_type,

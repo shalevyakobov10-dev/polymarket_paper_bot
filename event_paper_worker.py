@@ -417,6 +417,7 @@ def read_event_paper_worker_status(
             "gdelt_items_total_recent_last_cycle": _safe_nonnegative_count(raw.get("gdelt_items_total_recent_last_cycle", 0)),
             "gdelt_topics_seen_in_archive_count": _safe_nonnegative_count(raw.get("gdelt_topics_seen_in_archive_count", 0)),
             "gdelt_network_requests_made_last_cycle": _safe_nonnegative_count(raw.get("gdelt_network_requests_made_last_cycle", 0)),
+            "gdelt_poll_status_available_last_cycle": raw.get("gdelt_poll_status_available_last_cycle") is True,
             "gdelt_error_type": (
                 str(raw.get("gdelt_error_type"))[:80]
                 if isinstance(raw.get("gdelt_error_type"), str)
@@ -541,6 +542,7 @@ def run_worker(
         "gdelt_items_total_recent_last_cycle": 0,
         "gdelt_topics_seen_in_archive_count": 0,
         "gdelt_network_requests_made_last_cycle": 0,
+        "gdelt_poll_status_available_last_cycle": False,
         "gdelt_error_type": None,
         "news_languages_seen": [],
         "news_regions_seen": [],
@@ -592,6 +594,7 @@ def run_worker(
                     "gdelt_items_total_recent_last_cycle": _safe_nonnegative_count(result.get("gdelt_items_total_recent", 0)),
                     "gdelt_topics_seen_in_archive_count": _safe_nonnegative_count(result.get("gdelt_topics_seen_in_archive_count", 0)),
                     "gdelt_network_requests_made_last_cycle": _safe_nonnegative_count(result.get("gdelt_network_requests_made", 0)),
+                    "gdelt_poll_status_available_last_cycle": result.get("gdelt_poll_status_available") is True,
                     "gdelt_error_type": (
                         str(result.get("gdelt_error_type"))[:80]
                         if isinstance(result.get("gdelt_error_type"), str)

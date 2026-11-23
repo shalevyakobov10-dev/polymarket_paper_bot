@@ -60,8 +60,8 @@ class EventPaperWorkerTests(unittest.TestCase):
                 "gdelt_topics_failed": 0,
                 "gdelt_items_added": 87,
                 "gdelt_error_type": None,
-                "news_languages_seen": ["en", "ar", "es", "hi", "ja"],
-                "news_regions_seen": ["global", "east_asia", "latin_america", "middle_east_north_africa"],
+                "news_languages_seen": ["en", "ar", "es", "hi", "ja", "<script>"],
+                "news_regions_seen": ["global", "east_asia", "latin_america", "middle_east_north_africa", "MENA<script>"],
                 "portfolio": {"cash": 98.0, "equity": 100.0, "realized_pnl": 0.0,
                               "open_positions": 1, "closed_positions": 0, "win_rate_pct": None,
                               "active_event_evidence_threshold": 0.75,
@@ -109,6 +109,8 @@ class EventPaperWorkerTests(unittest.TestCase):
             self.assertEqual(status["gdelt_items_added_last_cycle"], 87)
             self.assertEqual(status["news_languages_seen"], ["ar", "en", "es", "hi", "ja"])
             self.assertIn("middle_east_north_africa", status["news_regions_seen"])
+            self.assertNotIn("<script>", status["news_languages_seen"])
+            self.assertNotIn("mena<script>", status["news_regions_seen"])
             self.assertEqual(status["portfolio"]["cash"], 98.0)
             self.assertEqual(status["portfolio"]["open_positions"], 1)
             self.assertNotIn("POLYMARKET_PRIVATE_KEY", status["portfolio"])

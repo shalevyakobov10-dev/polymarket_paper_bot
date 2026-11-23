@@ -61,6 +61,30 @@ class NewsMonitorTests(unittest.TestCase):
         self.assertEqual(rows[0]["title"], "Atom headline")
         self.assertEqual(rows[0]["url"], "https://example.org/story/2")
 
+    def test_shared_rss_archive_reads_persisted_feed_items_without_network(self):
+        feeds = (
+            {"source": "BBC English", "url": "https://example.org/en", "language": "en", "region": "global"},
+            {"source": "BBC Arabic", "url": "https://example.org/ar", "language": "ar", "region": "middle_east_north_africa"},
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "news_events.jsonl"
+            collector = news_monitor.NewsCollector(path, feeds)
+            with patch("news_monitor.urlopen", return_value=FakeResponse(RSS)):
+                polled = collector.fetch_once()
+            self.assertEqual(polled["feeds_succeeded"], 2)
+
+            with patch("news_monitor.urlopen", side_effect=AssertionError("archive read must not poll feeds")):
+                snapshot = collector.read_archive_snapshot()
+                repeated = collector.read_archive_snapshot()
+
+        self.assertFalse(snapshot["poll_status_available"])
+        self.assertEqual(snapshot["network_requests_made"], 0)
+        self.assertEqual(snapshot["feeds_configured"], 2)
+        self.assertEqual(snapshot["items_total_recent"], 1)
+        self.assertEqual(snapshot["languages_seen"], ["en"])
+        self.assertEqual(repeated["items_total_recent"], 1)
+        self.assertEqual(len(collector.items), 1)
+
     def test_parse_feed_preserves_language_region_and_directional_support_metadata(self):
         english = news_monitor.parse_feed(
             RSS,

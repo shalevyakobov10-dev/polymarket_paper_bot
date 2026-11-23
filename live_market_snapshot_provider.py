@@ -79,11 +79,16 @@ class LiveClobMarketSnapshotProvider:
         timeout_seconds: float = 15.0,
     ) -> None:
         self.max_age_seconds = float(max_age_seconds)
-        self.market_limit = market_limit or _bounded_int_env("PAPER_LIVE_MARKETS_LIMIT", 10, 1, 50)
+        self.market_limit = market_limit or _bounded_int_env("PAPER_LIVE_MARKETS_LIMIT", 20, 1, 50)
+        self.gamma_page_size = _bounded_int_env("PAPER_GAMMA_PAGE_SIZE", 200, 20, 200)
         self.timeout_seconds = max(2.0, min(30.0, float(timeout_seconds)))
+        self.last_discovered_market_count = 0
+        self.last_selected_market_count = 0
+        self.last_orderbook_token_requests = 0
+        self.last_usable_market_count = 0
 
     def _discover_markets(self) -> list[dict[str, Any]]:
-        limit = _bounded_int_env("PAPER_GAMMA_PAGE_SIZE", 100, 20, 200)
+        limit = self.gamma_page_size
         query = urlencode({
             "active": "true",
             "closed": "false",
@@ -110,9 +115,11 @@ class LiveClobMarketSnapshotProvider:
             current = current.replace(tzinfo=timezone.utc)
         current = current.astimezone(timezone.utc)
 
+        discovered_markets = self._discover_markets()
+        self.last_discovered_market_count = len(discovered_markets)
         candidates: list[dict[str, Any]] = []
         seen: set[str] = set()
-        for market in self._discover_markets():
+        for market in discovered_markets:
             market_id = str(market.get("conditionId") or market.get("id") or "").strip()
             question = str(market.get("question") or "").strip()
             tokens = _list_field(market.get("clobTokenIds"))
@@ -142,11 +149,13 @@ class LiveClobMarketSnapshotProvider:
             if len(candidates) >= self.market_limit:
                 break
 
+        self.last_selected_market_count = len(candidates)
         token_rows = [
             {"token_id": token}
             for row in candidates
             for token in (row["yes_token_id"], row["no_token_id"])
         ]
+        self.last_orderbook_token_requests = len(token_rows)
         books = fetch_order_books(token_rows) if token_rows else {}
         snapshots: list[dict[str, Any]] = []
         for market in candidates:
@@ -212,4 +221,5 @@ class LiveClobMarketSnapshotProvider:
                 "research_only": True,
                 "execution": "none",
             })
+        self.last_usable_market_count = len(snapshots)
         return snapshots

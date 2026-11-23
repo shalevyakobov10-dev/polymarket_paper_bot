@@ -397,10 +397,33 @@ class GDELTCollector:
         self.items = self.items[-500:]
         if len(self.seen_ids) > 20000:
             self.seen_ids = {str(item["id"]) for item in self.items if item.get("id")}
+        languages_seen = sorted({
+            str(item.get("source_language") or "und").lower()
+            for item in self.items
+        })
+        countries_seen = sorted({
+            str(item.get("source_country") or "").lower()
+            for item in self.items
+            if item.get("source_country")
+        })
+        topic_categories_seen = sorted({
+            str(category).lower()
+            for item in self.items
+            for category in (item.get("topic_categories") or [])
+            if isinstance(category, str)
+        })
+        non_english_items_total_recent = sum(
+            1 for item in self.items
+            if item.get("directional_analysis_supported") is False
+        )
         return {
             "items_added": len(added),
             "items_total_recent": len(self.items),
             "latest_items": list(reversed(self.items[-500:])),
+            "languages_seen": languages_seen,
+            "countries_seen": countries_seen,
+            "topic_categories_seen": topic_categories_seen,
+            "non_english_items_total_recent": non_english_items_total_recent,
             "query_window": window,
             "source": "GDELT DOC 2.0",
             "topics_configured": len(self._topic_queries),

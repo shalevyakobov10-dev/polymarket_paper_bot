@@ -18,6 +18,28 @@ class FakeNewsCollector:
         return {"feeds_configured": 0, "feeds_succeeded": 0, "feeds_failed": 0}
 
 
+class FakeArchiveGDELTCollector:
+    def __init__(self, items=None):
+        self.items = list(items or [])
+        self.calls = 0
+        self.fetch_calls = 0
+
+    def read_archive_snapshot(self):
+        self.calls += 1
+        return {
+            "topics_configured": 18,
+            "topics_seen_in_archive": ["geopolitics_security", "macroeconomics_finance"],
+            "network_requests_made": 0,
+            "items_added": 0,
+            "items_total_recent": len(self.items),
+            "latest_items": list(self.items),
+        }
+
+    def fetch_once(self):
+        self.fetch_calls += 1
+        raise AssertionError("Paper must not poll GDELT independently")
+
+
 class FakeGDELTCollector:
     def __init__(self, items=None, result=None):
         self.items = list(items or [])
@@ -601,6 +623,48 @@ class OfflineNewsPaperBotTests(unittest.TestCase):
                     self.assertEqual(merged_bbc["indexed_at"], now.isoformat())
                     self.assertEqual(merged_bbc["source_types"], ["gdelt_doc_api", "rss_atom"])
                     self.assertTrue(merged_bbc["directional_analysis_supported"])
+                finally:
+                    bot.close()
+
+    def test_paper_reads_shared_gdelt_archive_without_duplicate_network_polling(self):
+        now = datetime.now(timezone.utc).replace(microsecond=0)
+        row = {
+            "market_id": "market-fed",
+            "question": "Will the Fed cut interest rates in December?",
+            "yes_token_id": "market-fed:YES",
+            "no_token_id": "market-fed:NO",
+            "observed_at": now.isoformat(),
+            "yes_price": 0.45, "no_price": 0.55,
+            "yes_bid": 0.44, "yes_ask": 0.46,
+            "no_bid": 0.54, "no_ask": 0.56,
+        }
+        rss = FakeNewsCollector()
+        gdelt = FakeArchiveGDELTCollector([{
+            "id": "shared-archive-article",
+            "source": "Reuters",
+            "publisher_id": "reuters.com",
+            "source_language": "en",
+            "directional_analysis_supported": True,
+            "coverage_region": "global",
+            "title": "Fed holds interest rates steady",
+            "summary": "Officials made no change.",
+            "published_at": now.isoformat(),
+        }])
+        with tempfile.TemporaryDirectory() as folder:
+            with self._make_config(folder):
+                bot = OfflineNewsPaperBot(
+                    PaperConfig(),
+                    news_collector=rss,
+                    gdelt_collector=gdelt,
+                    snapshot_provider=StaticProvider(row),
+                )
+                try:
+                    result = bot.run_once(now=now, fetch_news=True)
+                    self.assertEqual(gdelt.calls, 1)
+                    self.assertEqual(gdelt.fetch_calls, 0)
+                    self.assertEqual(result["gdelt_items_total_recent"], 1)
+                    self.assertEqual(result["gdelt_topics_seen_in_archive_count"], 2)
+                    self.assertEqual(result["gdelt_network_requests_made"], 0)
                 finally:
                     bot.close()
 

@@ -17,6 +17,25 @@ class FakeNewsCollector:
         return {"feeds_configured": 0, "feeds_succeeded": 0, "feeds_failed": 0}
 
 
+class FakeGDELTCollector:
+    def __init__(self, items=None, result=None):
+        self.items = list(items or [])
+        self.result = dict(result or {
+            "topics_configured": 17,
+            "topics_succeeded": 4,
+            "topics_failed": 0,
+            "items_added": len(self.items),
+            "items_total_recent": len(self.items),
+            "topics_attempted": ["geopolitics_security", "macroeconomics_finance"],
+            "topic_errors": [],
+        })
+        self.calls = 0
+
+    def fetch_once(self):
+        self.calls += 1
+        return dict(self.result)
+
+
 class StaticProvider:
     def __init__(self, row):
         self.row = row
@@ -418,6 +437,85 @@ class OfflineNewsPaperBotTests(unittest.TestCase):
                     last_tuning = bot.summary()["last_tuning"]
                     self.assertEqual(last_tuning["status"], "unreadable_audit_record")
                     self.assertFalse(last_tuning["applied"])
+                finally:
+                    bot.close()
+
+    def test_paper_cycle_merges_gdelt_news_and_keeps_non_english_out_of_directional_scoring(self):
+        now = datetime.now(timezone.utc).replace(microsecond=0)
+        row = {
+            "market_id": "market-fed",
+            "question": "Will the Fed cut interest rates in December?",
+            "yes_token_id": "market-fed:YES",
+            "no_token_id": "market-fed:NO",
+            "observed_at": now.isoformat(),
+            "yes_price": 0.45, "no_price": 0.55,
+            "yes_bid": 0.44, "yes_ask": 0.46,
+            "no_bid": 0.54, "no_ask": 0.56,
+        }
+        rss = FakeNewsCollector([{
+            "id": "rss-english", "source": "BBC World", "publisher_id": "bbc",
+            "source_language": "en", "directional_analysis_supported": True,
+            "coverage_region": "global",
+            "title": "Fed holds interest rates steady",
+            "summary": "Officials made no change to interest rates.",
+            "published_at": now.isoformat(),
+        }])
+        gdelt = FakeGDELTCollector([
+            {
+                "id": "gdelt-english", "source": "example.com",
+                "publisher_id": "example.com", "source_language": "en",
+                "directional_analysis_supported": True, "coverage_region": "US",
+                "title": "Fed holds interest rates steady",
+                "summary": "", "published_at": now.isoformat(),
+            },
+            {
+                "id": "gdelt-arabic", "source": "example-ar.org",
+                "publisher_id": "example-ar.org", "source_language": "ar",
+                "directional_analysis_supported": False, "coverage_region": "MENA",
+                "title": "قرار جديد بشأن السياسة النقدية في الولايات المتحدة",
+                "summary": "", "published_at": now.isoformat(),
+            },
+        ])
+        with tempfile.TemporaryDirectory() as folder:
+            with self._make_config(folder):
+                bot = OfflineNewsPaperBot(
+                    PaperConfig(),
+                    news_collector=rss,
+                    gdelt_collector=gdelt,
+                    snapshot_provider=StaticProvider(row),
+                )
+                try:
+                    result = bot.run_once(now=now, fetch_news=True)
+                    self.assertEqual(gdelt.calls, 1)
+                    self.assertEqual(result["gdelt_topics_configured"], 17)
+                    self.assertEqual(result["gdelt_topics_succeeded"], 4)
+                    self.assertEqual(result["gdelt_items_added"], 2)
+                    self.assertEqual(result["news_items_considered"], 3)
+                    self.assertEqual(result["news_languages_seen"], ["ar", "en"])
+                    self.assertEqual(result["news_regions_seen"], ["MENA", "US", "global"])
+                    self.assertEqual(result["news_non_english_items_unscored"], 1)
+
+                    signal = bot._build_signals(
+                        rss.items + gdelt.items, [row], now
+                    )["market-fed"]
+                    self.assertEqual(signal["publisher_count"], 2)
+                    self.assertEqual(signal["direction"], "NO")
+                    self.assertEqual(signal["article_count"], 2)
+                    self.assertFalse(result["live_execution_enabled"])
+                    self.assertEqual(result["execution"], "none")
+                finally:
+                    bot.close()
+
+    def test_injected_rss_collector_does_not_implicitly_start_network_gdelt(self):
+        with tempfile.TemporaryDirectory() as folder:
+            with self._make_config(folder):
+                bot = OfflineNewsPaperBot(
+                    PaperConfig(),
+                    news_collector=FakeNewsCollector(),
+                    snapshot_provider=StaticProvider({}),
+                )
+                try:
+                    self.assertIsNone(bot.gdelt_collector)
                 finally:
                     bot.close()
 

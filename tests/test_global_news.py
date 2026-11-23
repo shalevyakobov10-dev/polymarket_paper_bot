@@ -22,6 +22,40 @@ class GDELTCollectorTests(unittest.TestCase):
         self.assertEqual(rows[0]["publisher_id"], "example.org")
         self.assertEqual(rows[0]["execution"], "none")
 
+    def test_normalized_gdelt_language_metadata_gates_directional_analysis(self):
+        rows = global_news.normalize_gdelt_articles({
+            "articles": [
+                {
+                    "title": "Global English headline",
+                    "url": "https://example.org/en",
+                    "domain": "example.org",
+                    "language": "English",
+                    "sourcecountry": "US",
+                },
+                {
+                    "title": "Arabic headline",
+                    "url": "https://example.org/ar",
+                    "domain": "example.org",
+                    "language": "Arabic",
+                    "sourcecountry": "EG",
+                },
+                {
+                    "title": "Unknown language headline",
+                    "url": "https://example.org/unknown",
+                    "domain": "example.org",
+                },
+            ]
+        })
+        by_url = {row["url"]: row for row in rows}
+        self.assertEqual(by_url["https://example.org/en"]["source_language"], "en")
+        self.assertTrue(by_url["https://example.org/en"]["directional_analysis_supported"])
+        self.assertEqual(by_url["https://example.org/en"]["coverage_region"], "us")
+        self.assertEqual(by_url["https://example.org/ar"]["source_language"], "ar")
+        self.assertFalse(by_url["https://example.org/ar"]["directional_analysis_supported"])
+        self.assertEqual(by_url["https://example.org/ar"]["coverage_region"], "eg")
+        self.assertEqual(by_url["https://example.org/unknown"]["source_language"], "und")
+        self.assertFalse(by_url["https://example.org/unknown"]["directional_analysis_supported"])
+
     def test_normalizes_known_gdelt_publisher_domain(self):
         rows = global_news.normalize_gdelt_articles({
             "articles": [{

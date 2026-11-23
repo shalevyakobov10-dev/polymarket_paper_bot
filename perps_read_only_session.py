@@ -32,6 +32,7 @@ READ_ONLY_PERPS_METHODS = frozenset({
     "fetch_open_orders",
     "fetch_orders",
     "list_fills",
+    "list_funding_payments",
 })
 
 
@@ -106,6 +107,25 @@ class ReadOnlyPerpsSession:
             start=start,
             end=end,
             sort=sort,
+        )
+
+    def list_funding_payments(
+        self,
+        *,
+        instrument_id: int | None = None,
+        start: Any = None,
+        end: Any = None,
+    ) -> Any:
+        if instrument_id is not None and (
+            isinstance(instrument_id, bool)
+            or not isinstance(instrument_id, int)
+            or instrument_id <= 0
+        ):
+            raise ValueError("instrument_id must be a positive integer")
+        return self._require_open().list_funding_payments(
+            instrument_id=instrument_id,
+            start=start,
+            end=end,
         )
 
     async def close(self) -> None:

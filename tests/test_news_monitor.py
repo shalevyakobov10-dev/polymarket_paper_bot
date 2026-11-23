@@ -106,7 +106,15 @@ class NewsMonitorTests(unittest.TestCase):
         def fake_urlopen(request, timeout=10):
             if "offline.example" in request.full_url:
                 raise URLError("offline")
-            return FakeResponse(RSS)
+            if "/ar" in request.full_url:
+                return FakeResponse(RSS.replace(
+                    b"https://example.org/story/1",
+                    b"https://example.org/story/arabic",
+                ))
+            return FakeResponse(RSS.replace(
+                b"https://example.org/story/1",
+                b"https://example.org/story/english",
+            ))
 
         with tempfile.TemporaryDirectory() as directory:
             collector = news_monitor.NewsCollector(Path(directory) / "news.jsonl", feeds)

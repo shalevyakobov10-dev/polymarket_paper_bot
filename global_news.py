@@ -303,6 +303,7 @@ class GDELTCollector:
             "languages_seen": languages,
             "countries_seen": countries,
             "network_requests_made": 0,
+            "poll_status_available": False,
             "interpretation": "shared_archive_snapshot_not_a_new_gdelt_poll",
         }
 
@@ -320,6 +321,7 @@ class GDELTCollector:
         aggregated: dict[str, dict[str, Any]] = {}
         topic_results: dict[str, int] = {}
         topic_errors: list[dict[str, str]] = []
+        network_requests_made = 0
         for category, query in topics:
             params = {
                 "query": query,
@@ -348,6 +350,7 @@ class GDELTCollector:
                 if not math_is_finite_nonnegative(request_started):
                     raise RuntimeError("GDELT monotonic clock returned an invalid value")
                 self._last_request_monotonic = request_started
+                network_requests_made += 1
                 with urlopen(request, timeout=12) as response:
                     if getattr(response, "status", 200) != 200:
                         raise RuntimeError(f"GDELT API returned HTTP {response.status}")
@@ -430,6 +433,9 @@ class GDELTCollector:
             "topics_attempted": [category for category, _ in topics],
             "topics_succeeded": len(topic_results),
             "topics_failed": len(topic_errors),
+            "topics_seen_in_archive": topic_categories_seen,
+            "network_requests_made": network_requests_made,
+            "poll_status_available": True,
             "topic_results": topic_results,
             "topic_errors": topic_errors,
             "max_records_per_topic": max_records,

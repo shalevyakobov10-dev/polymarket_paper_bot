@@ -176,6 +176,123 @@ class LiveMarketSnapshotProviderTests(unittest.TestCase):
         self.assertEqual(rows, [])
         fetch.assert_not_called()
 
+    def test_multi_page_gamma_discovery_diversifies_categories_and_deduplicates_ids(self):
+        from urllib.parse import parse_qs, urlparse
+
+        now = datetime(2026, 11, 23, 12, 0, tzinfo=timezone.utc)
+        stamp = now.isoformat()
+        pages = []
+        books = {}
+        for page_index, category in enumerate(("politics", "sports", "economics")):
+            page_rows = []
+            for index in range(20):
+                row = market()
+                market_index = page_index * 20 + index
+                row["conditionId"] = f"condition-{market_index}"
+                row["question"] = f"Will example {category} event {index} happen?"
+                row["category"] = category
+                row["clobTokenIds"] = json.dumps([f"yes-{market_index}", f"no-{market_index}"])
+                row["volume24hr"] = str(300_000 - market_index)
+                page_rows.append(row)
+                books[f"yes-{market_index}"] = book(f"yes-{market_index}", 0.50, 0.52, stamp)
+                books[f"no-{market_index}"] = book(f"no-{market_index}", 0.48, 0.50, stamp)
+            pages.append(page_rows)
+
+        # The same market can appear at a page boundary; it must be de-duplicated.
+        duplicate = dict(pages[0][0])
+        pages[1][0] = duplicate
+        requests = []
+
+        def fake_gamma(request, timeout=15):
+            requests.append(request.full_url)
+            offset = int(parse_qs(urlparse(request.full_url).query)["offset"][0])
+            page_index = offset // 20
+            return FakeResponse(pages[page_index])
+
+        with patch.dict("os.environ", {
+            "PAPER_LIVE_MARKETS_LIMIT": "6",
+            "PAPER_GAMMA_PAGE_SIZE": "20",
+            "PAPER_GAMMA_DISCOVERY_PAGES": "3",
+            "PAPER_MARKET_CATEGORY_MAX": "2",
+        }, clear=False):
+            with patch.object(live, "urlopen", side_effect=fake_gamma):
+                with patch.object(live, "fetch_order_books", return_value=books) as fetch:
+                    provider = live.LiveClobMarketSnapshotProvider()
+                    rows = provider.load(now=now)
+
+        self.assertEqual(len(requests), 3)
+        offsets = [
+            int(parse_qs(urlparse(url).query)["offset"][0])
+            for url in requests
+        ]
+        self.assertEqual(offsets, [0, 20, 40])
+        self.assertEqual(provider.last_discovery_pages_attempted, 3)
+        self.assertEqual(provider.last_discovery_pages_succeeded, 3)
+        self.assertEqual(provider.last_discovery_pages_failed, 0)
+        self.assertEqual(provider.last_discovered_market_count, 59)
+        self.assertEqual(provider.last_selected_market_count, 6)
+        self.assertEqual(provider.last_orderbook_token_requests, 12)
+        self.assertEqual(provider.last_usable_market_count, 6)
+        self.assertEqual(
+            {row["market_category"] for row in rows},
+            {"politics", "sports", "economics"},
+        )
+        self.assertEqual(
+            [row["market_category"] for row in rows].count("politics"), 2
+        )
+        self.assertEqual(
+            [row["market_category"] for row in rows].count("sports"), 2
+        )
+        self.assertEqual(
+            [row["market_category"] for row in rows].count("economics"), 2
+        )
+        fetch.assert_called_once()
+        self.assertEqual(len(fetch.call_args.args[0]), 12)
+
+    def test_failed_gamma_page_does_not_discard_successful_pages(self):
+        from urllib.parse import parse_qs, urlparse
+
+        now = datetime(2026, 11, 23, 12, 0, tzinfo=timezone.utc)
+        stamp = now.isoformat()
+        pages = []
+        books = {}
+        for page_index in (0, 2):
+            page_rows = []
+            for index in range(20):
+                market_index = page_index * 20 + index
+                row = market()
+                row["conditionId"] = f"condition-{market_index}"
+                row["clobTokenIds"] = json.dumps([f"yes-{market_index}", f"no-{market_index}"])
+                row["volume24hr"] = str(100_000 - market_index)
+                page_rows.append(row)
+                books[f"yes-{market_index}"] = book(f"yes-{market_index}", 0.50, 0.52, stamp)
+                books[f"no-{market_index}"] = book(f"no-{market_index}", 0.48, 0.50, stamp)
+            pages.append(page_rows)
+
+        def fake_gamma(request, timeout=15):
+            offset = int(parse_qs(urlparse(request.full_url).query)["offset"][0])
+            if offset == 20:
+                raise TimeoutError("simulated page timeout")
+            return FakeResponse(pages[0] if offset == 0 else pages[1])
+
+        with patch.dict("os.environ", {
+            "PAPER_LIVE_MARKETS_LIMIT": "10",
+            "PAPER_GAMMA_PAGE_SIZE": "20",
+            "PAPER_GAMMA_DISCOVERY_PAGES": "3",
+            "PAPER_MARKET_CATEGORY_MAX": "3",
+        }, clear=False):
+            with patch.object(live, "urlopen", side_effect=fake_gamma):
+                with patch.object(live, "fetch_order_books", return_value=books):
+                    provider = live.LiveClobMarketSnapshotProvider()
+                    rows = provider.load(now=now)
+
+        self.assertEqual(provider.last_discovery_pages_attempted, 3)
+        self.assertEqual(provider.last_discovery_pages_succeeded, 2)
+        self.assertEqual(provider.last_discovery_pages_failed, 1)
+        self.assertEqual(provider.last_discovered_market_count, 40)
+        self.assertEqual(len(rows), 10)
+        self.assertEqual(provider.last_usable_market_count, 10)
+
     def test_default_watchlist_and_orderbook_batch_cover_thirty_binary_markets(self):
         now = datetime(2026, 11, 23, 12, 0, tzinfo=timezone.utc)
         stamp = now.isoformat()

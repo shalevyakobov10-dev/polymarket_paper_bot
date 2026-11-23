@@ -63,7 +63,7 @@ Environment variables:
 - `POLL_SECONDS` (default `60`, minimum `15`)
 - `DATA_DIR` (default `data`)
 - `NEWS_POLL_SECONDS` (default `300`, bounded to 60–3600 seconds)
-- `ORDERBOOK_TOKENS_PER_POLL` (default `20`, bounded to 0–100; set to `0` to disable CLOB order-book polling)
+- `ORDERBOOK_TOKENS_PER_POLL` (default `60`, bounded to 0–100; set to `0` to disable CLOB order-book polling; 60 covers both outcome tokens for 30 binary Paper markets)
 - `ORDERBOOK_FETCH_WORKERS` (default `4`, bounded to 1–8 concurrent public CLOB requests; concurrency is capped to avoid unbounded API bursts)
 - `RESEARCH_FEATURES_SNAPSHOT_SECONDS` (default `900`, bounded to 60–3600; at most one persisted feature snapshot per market per interval)
 - `RESEARCH_FEATURES_LOG_MAX_MB` (default `50`, bounded to 10–500 MB per file)

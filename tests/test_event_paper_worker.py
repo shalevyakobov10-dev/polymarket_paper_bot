@@ -63,6 +63,9 @@ class EventPaperWorkerTests(unittest.TestCase):
                 "news_feeds_configured": 28,
                 "news_feeds_succeeded": 25,
                 "news_feeds_failed": 3,
+                "news_poll_status_available": False,
+                "news_network_requests_made": 0,
+                "news_archive_items_total_recent": 490,
                 "news_items_considered": 412,
                 "news_source_coverage": {
                     "unique_article_count": 380,
@@ -136,6 +139,9 @@ class EventPaperWorkerTests(unittest.TestCase):
             self.assertEqual(status["news_feeds_configured_last_cycle"], 28)
             self.assertEqual(status["news_feeds_succeeded_last_cycle"], 25)
             self.assertEqual(status["news_feeds_failed_last_cycle"], 3)
+            self.assertFalse(status["news_poll_status_available_last_cycle"])
+            self.assertEqual(status["news_network_requests_made_last_cycle"], 0)
+            self.assertEqual(status["news_archive_items_total_recent_last_cycle"], 490)
             self.assertEqual(status["news_items_considered_last_cycle"], 412)
             self.assertEqual(status["news_unique_articles_last_cycle"], 380)
             self.assertEqual(status["news_distinct_publishers_last_cycle"], 21)

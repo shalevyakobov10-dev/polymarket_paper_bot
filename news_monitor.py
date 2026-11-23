@@ -299,6 +299,7 @@ def parse_feed(
         records.append({
             "id": item_id,
             "source": source[:100],
+            "source_type": "rss_atom",
             "publisher_id": publisher_identity(source, feed_url, link),
             "feed_url": feed_url[:1000],
             "title": title,

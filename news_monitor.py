@@ -811,6 +811,54 @@ class NewsCollector:
         except Exception as exc:
             return source, [], {"source": source, "error": f"Unexpected {type(exc).__name__}: {str(exc)[:240]}"}
 
+    def read_archive_snapshot(self) -> dict[str, Any]:
+        """Refresh the local RSS archive without making any feed requests.
+
+        The HTTP application is the single RSS network poller. Separate Paper
+        workers read the same append-only/rotated archive and must not refetch
+        each feed with their own network connections.
+        """
+        self.items = []
+        self.seen_ids.clear()
+        self._load_existing()
+        languages_seen = sorted({
+            str(item.get("source_language") or "en").lower()
+            for item in self.items
+        })
+        regions_seen = sorted({
+            str(item.get("coverage_region") or "global").lower()
+            for item in self.items
+        })
+        non_english = sum(
+            1 for item in self.items
+            if item.get("directional_analysis_supported") is False
+        )
+        return {
+            "source": "shared_rss_archive",
+            "poll_status_available": False,
+            "network_requests_made": 0,
+            "feeds_configured": len(self.feeds),
+            "feeds_succeeded": 0,
+            "feeds_failed": 0,
+            "items_added": 0,
+            "items_total_recent": len(self.items),
+            "languages_configured": sorted({
+                str(feed.get("language") or "en").lower()
+                for feed in self.feeds
+            }),
+            "languages_succeeded": [],
+            "regions_configured": sorted({
+                str(feed.get("region") or "global").lower()
+                for feed in self.feeds
+            }),
+            "regions_succeeded": [],
+            "languages_seen": languages_seen,
+            "regions_seen": regions_seen,
+            "directional_analysis_languages": ["en"],
+            "non_english_items_total_recent": non_english,
+            "latest_items": list(reversed(self.items[-MAX_RECENT_ITEMS:])),
+        }
+
     def fetch_once(self) -> dict[str, Any]:
         """Fetch feeds concurrently; isolate errors and persist de-duplicated items."""
         successes = 0

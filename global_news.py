@@ -263,6 +263,44 @@ class GDELTCollector:
         if len(self.seen_ids) > 20000:
             self.seen_ids = {item["id"] for item in self.items if item.get("id")}
 
+    def read_archive_snapshot(self) -> dict[str, Any]:
+        """Reload the shared GDELT archive without issuing another network request.
+
+        The HTTP app owns GDELT polling. Separate Paper workers consume this
+        append-only archive so the same deployment does not multiply anonymous
+        DOC API queries merely because multiple processes need the headlines.
+        """
+        self._load_existing()
+        languages = sorted({
+            str(item.get("source_language") or "und").lower()
+            for item in self.items
+            if isinstance(item, dict)
+        })
+        countries = sorted({
+            str(item.get("source_country") or "").lower()
+            for item in self.items
+            if isinstance(item, dict) and item.get("source_country")
+        })
+        topic_categories = sorted({
+            str(category).lower()
+            for item in self.items
+            if isinstance(item, dict)
+            for category in (item.get("topic_categories") or [])
+            if isinstance(category, str)
+        })
+        return {
+            "items_added": 0,
+            "items_total_recent": len(self.items),
+            "latest_items": list(reversed(self.items[-500:])),
+            "source": "shared_gdelt_archive",
+            "topics_configured": len(self._topic_queries),
+            "topics_seen_in_archive": topic_categories,
+            "languages_seen": languages,
+            "countries_seen": countries,
+            "network_requests_made": 0,
+            "interpretation": "shared_archive_snapshot_not_a_new_gdelt_poll",
+        }
+
     def fetch_once(self) -> dict[str, Any]:
         """Rotate through broad global-news topic lanes and persist unique articles."""
         topics, next_cursor = _topics_for_poll(self._topic_queries, self._topic_cursor)

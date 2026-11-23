@@ -238,6 +238,7 @@ class PerpsAccountSupervisorWorkerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(secrets["deposit_wallet"], "0x" + "2" * 40)
 
     def test_rejects_secret_file_owned_by_another_uid(self):
+        import os
         from unittest.mock import patch
 
         path = self._write_secrets(self._secret_document())

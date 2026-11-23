@@ -558,6 +558,40 @@ class SupervisorTests(unittest.TestCase):
             self.assertEqual(status["perps_account_supervisor_last_exit_code"], 11)
             self.assertIsNone(status["perps_account_supervisor_next_restart_at"])
 
+    def test_http_failure_stops_read_only_perps_account_supervisor_child(self):
+        with tempfile.TemporaryDirectory() as directory:
+            secret_path = self._account_supervisor_secret_file(directory)
+            config = build_supervisor_config({
+                "ENABLE_PERPS_ACCOUNT_SUPERVISOR": "true",
+                "ENABLE_PERPS_MARKET_DATA_WORKER": "true",
+                "DATA_DIR": directory,
+                "PERPS_ACCOUNT_SUPERVISOR_SECRETS_FILE": str(secret_path),
+            }, python_executable="python-test")
+            app = FakeProcess(poll_results=[17])
+            perps_market = FakeProcess()
+            account_worker = FakeProcess()
+            processes = [app, perps_market, account_worker]
+            commands = []
+
+            def fake_popen(command, *, env):
+                commands.append((command, env))
+                return processes.pop(0)
+
+            result = run_supervisor(config, popen_factory=fake_popen)
+
+            self.assertEqual(result, 17)
+            self.assertEqual(len(commands), 3)
+            self.assertEqual(
+                commands[2][0],
+                ["python-test", "perps_account_supervisor_worker.py"],
+            )
+            self.assertTrue(perps_market.terminated)
+            self.assertTrue(account_worker.terminated)
+            status = read_supervisor_status(config.status_path)
+            self.assertEqual(status["service_state"], "app_failed")
+            self.assertEqual(status["perps_account_supervisor_state"], "stopped")
+            self.assertTrue(status["perps_account_supervisor_enabled"])
+
     def test_perps_account_supervisor_heartbeat_watchdog_restarts_hung_worker(self):
         with tempfile.TemporaryDirectory() as directory:
             secret_path = self._account_supervisor_secret_file(directory)

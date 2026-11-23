@@ -5,6 +5,15 @@ account-configuration mutation methods. Never pass that raw object to preflight,
 reconciliation or strategy code. This facade intentionally exposes only account
 read methods and an explicit close operation.
 
+IMPORTANT SECURITY LIMITATION: this is an application-level allowlist, not a
+venue-enforced read-only credential scope or a Python security boundary. The
+underlying delegated Perps credentials contain a private key and can be
+write-capable; code with access to the raw session or credentials could bypass
+this facade. Treat the entire credential bundle as a trading secret. The current
+PID-1 child processes also share a container UID; a strict child environment
+does not isolate the mounted file against a compromised same-UID process. Do
+not treat this as production-isolated account supervision.
+
 Opening a session requires pre-existing delegated Perps credentials. This module
 never opens a session with credentials=None, because the SDK then creates a new
 delegated key and signs an owner authorization.

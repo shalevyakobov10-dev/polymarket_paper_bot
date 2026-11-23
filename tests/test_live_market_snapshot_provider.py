@@ -31,6 +31,10 @@ def market():
         "outcomePrices": '["0.51", "0.49"]',
         "clobTokenIds": '["yes-token", "no-token"]',
         "volume24hr": "12000",
+        "liquidity": "85000",
+        "category": "Politics",
+        "slug": "example-bill-passes",
+        "endDate": "2026-12-31T23:59:00Z",
         "active": True,
         "closed": False,
     }
@@ -51,6 +55,21 @@ def book(token, bid, ask, observed, exchange=None):
 
 
 class LiveMarketSnapshotProviderTests(unittest.TestCase):
+    def test_default_market_scan_is_bounded_to_30_markets_and_80_websocket_tokens(self):
+        with patch.dict("os.environ", {
+            "PAPER_LIVE_MARKETS_LIMIT": "30",
+            "MARKET_WS_MAX_TOKENS": "80",
+        }, clear=False):
+            provider = live.LiveClobMarketSnapshotProvider()
+            self.assertEqual(provider.market_limit, 30)
+            self.assertLessEqual(provider.market_limit * 2, 80)
+
+    def test_market_limit_rejects_unsafe_values(self):
+        for value in (0, -1, 51, True):
+            with self.subTest(value=value):
+                with self.assertRaises(ValueError):
+                    live.LiveClobMarketSnapshotProvider(market_limit=value)
+
     def test_maps_gamma_yes_no_tokens_to_fresh_clob_midpoints(self):
         now = datetime(2026, 11, 7, 10, 0, tzinfo=timezone.utc)
         stamp = now.isoformat()
@@ -72,6 +91,10 @@ class LiveMarketSnapshotProviderTests(unittest.TestCase):
         self.assertAlmostEqual(row["no_price"], 0.49)
         self.assertEqual(row["market_source"], "public_gamma_api")
         self.assertEqual(row["book_source"], "official_polymarket_python_sdk")
+        self.assertEqual(row["market_category"], "politics")
+        self.assertEqual(row["market_slug"], "example-bill-passes")
+        self.assertEqual(row["market_end_date"], "2026-12-31T23:59:00Z")
+        self.assertEqual(row["liquidity"], 85000.0)
         self.assertTrue(row["research_only"])
         self.assertEqual(row["execution"], "none")
         request.assert_called_once()

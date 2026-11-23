@@ -227,6 +227,11 @@ class GDELTCollector:
                 pass
 
     def _load_existing(self) -> None:
+        # This method is called both at construction and by the shared-archive
+        # reader. Rebuild the in-memory view from disk instead of appending the
+        # same persisted rows on every Paper cycle.
+        self.seen_ids.clear()
+        self.items.clear()
         paths = [self.log_path] + [
             self.log_path.with_name(f"{self.log_path.name}.{i}")
             for i in range(1, 4)

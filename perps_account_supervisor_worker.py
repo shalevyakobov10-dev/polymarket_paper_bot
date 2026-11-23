@@ -66,6 +66,8 @@ def load_perps_account_secrets(path: str | Path) -> dict[str, Any]:
             flags |= os.O_NOFOLLOW
         descriptor = os.open(target, flags)
         metadata = os.fstat(descriptor)
+        if metadata.st_uid != os.getuid():
+            raise PerpsAccountSecretsError("perps_account_secrets_owner_invalid")
         if not stat.S_ISREG(metadata.st_mode):
             raise PerpsAccountSecretsError("perps_account_secrets_must_be_regular_file")
         permissions = stat.S_IMODE(metadata.st_mode)

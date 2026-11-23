@@ -237,6 +237,16 @@ class PerpsAccountSupervisorWorkerTests(unittest.IsolatedAsyncioTestCase):
         secrets = load_perps_account_secrets(path)
         self.assertEqual(secrets["deposit_wallet"], "0x" + "2" * 40)
 
+    def test_rejects_secret_file_owned_by_another_uid(self):
+        from unittest.mock import patch
+
+        path = self._write_secrets(self._secret_document())
+        with patch("perps_account_supervisor_worker.os.getuid", return_value=os.getuid() + 1):
+            with self.assertRaisesRegex(
+                PerpsAccountSecretsError, "owner_invalid"
+            ):
+                load_perps_account_secrets(path)
+
     def test_rejects_group_or_world_accessible_secret_file(self):
         for mode in (0o640, 0o644, 0o660):
             with self.subTest(mode=oct(mode)):

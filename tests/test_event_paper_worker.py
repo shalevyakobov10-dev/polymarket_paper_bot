@@ -50,6 +50,18 @@ class EventPaperWorkerTests(unittest.TestCase):
             bot = FakeBot([{
                 "markets_loaded": 3, "opened": [{"market_id": "m1"}],
                 "closed": [], "close_blocked": [],
+                "news_feeds_configured": 28,
+                "news_feeds_succeeded": 25,
+                "news_feeds_failed": 3,
+                "news_items_considered": 412,
+                "news_non_english_items_unscored": 138,
+                "gdelt_topics_configured": 18,
+                "gdelt_topics_succeeded": 4,
+                "gdelt_topics_failed": 0,
+                "gdelt_items_added": 87,
+                "gdelt_error_type": None,
+                "news_languages_seen": ["en", "ar", "es", "hi", "ja"],
+                "news_regions_seen": ["global", "east_asia", "latin_america", "middle_east_north_africa"],
                 "portfolio": {"cash": 98.0, "equity": 100.0, "realized_pnl": 0.0,
                               "open_positions": 1, "closed_positions": 0, "win_rate_pct": None,
                               "active_event_evidence_threshold": 0.75,
@@ -87,6 +99,16 @@ class EventPaperWorkerTests(unittest.TestCase):
             self.assertEqual(status["cycles"], 1)
             self.assertEqual(status["markets_loaded_last_cycle"], 3)
             self.assertEqual(status["opened_last_cycle"], 1)
+            self.assertEqual(status["news_feeds_configured_last_cycle"], 28)
+            self.assertEqual(status["news_feeds_succeeded_last_cycle"], 25)
+            self.assertEqual(status["news_feeds_failed_last_cycle"], 3)
+            self.assertEqual(status["news_items_considered_last_cycle"], 412)
+            self.assertEqual(status["news_non_english_items_unscored_last_cycle"], 138)
+            self.assertEqual(status["gdelt_topics_configured_last_cycle"], 18)
+            self.assertEqual(status["gdelt_topics_succeeded_last_cycle"], 4)
+            self.assertEqual(status["gdelt_items_added_last_cycle"], 87)
+            self.assertEqual(status["news_languages_seen"], ["ar", "en", "es", "hi", "ja"])
+            self.assertIn("middle_east_north_africa", status["news_regions_seen"])
             self.assertEqual(status["portfolio"]["cash"], 98.0)
             self.assertEqual(status["portfolio"]["open_positions"], 1)
             self.assertNotIn("POLYMARKET_PRIVATE_KEY", status["portfolio"])

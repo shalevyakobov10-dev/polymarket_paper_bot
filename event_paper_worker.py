@@ -414,6 +414,8 @@ def read_event_paper_worker_status(
             "gdelt_topics_succeeded_last_cycle": _safe_nonnegative_count(raw.get("gdelt_topics_succeeded_last_cycle", 0)),
             "gdelt_topics_failed_last_cycle": _safe_nonnegative_count(raw.get("gdelt_topics_failed_last_cycle", 0)),
             "gdelt_items_added_last_cycle": _safe_nonnegative_count(raw.get("gdelt_items_added_last_cycle", 0)),
+            "gdelt_topics_seen_in_archive_count": _safe_nonnegative_count(raw.get("gdelt_topics_seen_in_archive_count", 0)),
+            "gdelt_network_requests_made_last_cycle": _safe_nonnegative_count(raw.get("gdelt_network_requests_made_last_cycle", 0)),
             "gdelt_error_type": (
                 str(raw.get("gdelt_error_type"))[:80]
                 if isinstance(raw.get("gdelt_error_type"), str)
@@ -535,6 +537,8 @@ def run_worker(
         "gdelt_topics_succeeded_last_cycle": 0,
         "gdelt_topics_failed_last_cycle": 0,
         "gdelt_items_added_last_cycle": 0,
+        "gdelt_topics_seen_in_archive_count": 0,
+        "gdelt_network_requests_made_last_cycle": 0,
         "gdelt_error_type": None,
         "news_languages_seen": [],
         "news_regions_seen": [],
@@ -583,6 +587,8 @@ def run_worker(
                     "gdelt_topics_succeeded_last_cycle": _safe_nonnegative_count(result.get("gdelt_topics_succeeded", 0)),
                     "gdelt_topics_failed_last_cycle": _safe_nonnegative_count(result.get("gdelt_topics_failed", 0)),
                     "gdelt_items_added_last_cycle": _safe_nonnegative_count(result.get("gdelt_items_added", 0)),
+                    "gdelt_topics_seen_in_archive_count": _safe_nonnegative_count(result.get("gdelt_topics_seen_in_archive_count", 0)),
+                    "gdelt_network_requests_made_last_cycle": _safe_nonnegative_count(result.get("gdelt_network_requests_made", 0)),
                     "gdelt_error_type": (
                         str(result.get("gdelt_error_type"))[:80]
                         if isinstance(result.get("gdelt_error_type"), str)

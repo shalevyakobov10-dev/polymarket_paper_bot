@@ -112,7 +112,24 @@ function metricEntries(id,d){
    ["Order submission allowed",d.order_submission_allowed]
   ]};
  }
- if(id==="event-paper")return {status:d.worker_state,rows:[["Worker state",d.worker_state],["Heartbeat fresh",d.heartbeat_fresh],["Last success",d.last_success_at],["Consecutive failures",d.consecutive_failures],["Open positions",d.paper_portfolio&&d.paper_portfolio.open_positions],["Last error",d.last_error]]};
+ if(id==="event-paper")return {status:d.worker_state,rows:[
+  ["Worker state",d.worker_state],
+  ["Heartbeat fresh",d.heartbeat_fresh],
+  ["Last success",d.last_success_at],
+  ["Open positions",d.portfolio&&d.portfolio.open_positions],
+  ["RSS feeds succeeded / configured",String(d.news_feeds_succeeded_last_cycle??0)+"/"+String(d.news_feeds_configured_last_cycle??0)],
+  ["RSS feeds failed",d.news_feeds_failed_last_cycle],
+  ["GDELT topics succeeded / configured",String(d.gdelt_topics_succeeded_last_cycle??0)+"/"+String(d.gdelt_topics_configured_last_cycle??0)],
+  ["GDELT topics failed",d.gdelt_topics_failed_last_cycle],
+  ["New GDELT articles",d.gdelt_items_added_last_cycle],
+  ["Articles considered",d.news_items_considered_last_cycle],
+  ["Non-English articles kept unscored",d.news_non_english_items_unscored_last_cycle],
+  ["Languages observed",d.news_languages_seen],
+  ["Coverage tags (regions / countries)",d.news_regions_seen],
+  ["GDELT error type",d.gdelt_error_type],
+  ["Consecutive worker failures",d.consecutive_failures],
+  ["Last error",d.last_error_type]
+ ]};
  if(id==="release"){
   const gates=d.release_gates||{};return {status:d.all_release_gates_passed?"healthy":"blocked",rows:[["All source gates passed",d.all_release_gates_passed],["Runtime flags passed",d.runtime_flags_passed],["Eligible for separate review",d.eligible_for_separate_gateway_review],["Order submission allowed",d.order_submission_allowed]],extra:Object.entries(gates).map(([name,value])=>[name,value&&value.passed===true])};
  }

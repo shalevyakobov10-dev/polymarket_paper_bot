@@ -429,6 +429,7 @@ class SupervisorTests(unittest.TestCase):
         self.assertNotIn("PERPS_ACCOUNT_SUPERVISOR_SECRETS_FILE", config.perps_worker_env)
 
     def test_perps_account_supervisor_rejects_secret_owned_by_another_uid(self):
+        import os
         from unittest.mock import patch
 
         with tempfile.TemporaryDirectory() as directory:

@@ -29,6 +29,7 @@ from market_history_store import MarketHistoryStore
 from paper_orderbook_execution import simulate_buy, simulate_sell
 from event_outcome import aggregate_event_outcome_evidence, classify_event_outcome
 from news_monitor import DEFAULT_FEEDS, NewsCollector, match_news_to_markets
+from global_news import GDELTCollector
 from news_sentiment import aggregate_market_news_sentiment, analyze_news_sentiment
 from paper_parameter_tuner import tune_sentiment_threshold
 from risk_manager import evaluate_paper_entry
@@ -142,7 +143,11 @@ class PaperConfig:
             os.getenv("MARKET_HISTORY_DATABASE_PATH", "./data/market_history.sqlite3")
         )
         self.news_log_path = Path(os.getenv("NEWS_LOG_PATH", "./data/offline_news_events.jsonl"))
-        self.poll_seconds = _int_env("PAPER_POLL_SECONDS", 300, 30, 86_400)
+        self.gdelt_log_path = Path(os.getenv(
+            "GDELT_LOG_PATH",
+            str(self.news_log_path.with_name("offline_news_gdelt.jsonl")),
+        ))
+        self.poll_seconds = _int_env("PAPER_POLL_SECONDS", 60, 30, 86_400)
 
 
 class OfflineNewsPaperBot:
@@ -151,11 +156,13 @@ class OfflineNewsPaperBot:
         config: PaperConfig | None = None,
         *,
         news_collector: NewsCollector | None = None,
+        gdelt_collector: GDELTCollector | None = None,
         snapshot_provider: JsonMarketSnapshotProvider | None = None,
     ) -> None:
         self.config = config or PaperConfig()
         self.config.database_path.parent.mkdir(parents=True, exist_ok=True)
         self.config.news_log_path.parent.mkdir(parents=True, exist_ok=True)
+        self.config.gdelt_log_path.parent.mkdir(parents=True, exist_ok=True)
         self.config.market_history_database_path.parent.mkdir(parents=True, exist_ok=True)
         self.market_history_store = MarketHistoryStore(self.config.market_history_database_path)
         self.db = sqlite3.connect(self.config.database_path, timeout=20)
@@ -164,6 +171,13 @@ class OfflineNewsPaperBot:
         self.db.execute("PRAGMA foreign_keys=ON")
         self._create_schema()
         self.news_collector = news_collector or NewsCollector(self.config.news_log_path, DEFAULT_FEEDS)
+        # Keep injected test/replay collectors deterministic. Production default
+        # combines attributed RSS with the rotating multilingual GDELT index.
+        self.gdelt_collector = (
+            gdelt_collector
+            if gdelt_collector is not None
+            else (GDELTCollector(self.config.gdelt_log_path) if news_collector is None else None)
+        )
         if snapshot_provider is not None:
             self.snapshot_provider = snapshot_provider
         elif self.config.market_data_source == "live_clob":
@@ -617,6 +631,14 @@ class OfflineNewsPaperBot:
         ]
         by_market: dict[str, list[dict[str, Any]]] = {}
         for news in news_items:
+            # The event-cue classifier and VADER model are English-only. Preserve
+            # other languages for research/coverage telemetry, but never infer a
+            # YES/NO direction from untranslated text or accidental Latin overlap.
+            language = str(news.get("source_language") or news.get("language") or "").strip().lower()
+            if news.get("directional_analysis_supported") is False:
+                continue
+            if language and language not in {"en", "eng", "english"}:
+                continue
             title = str(news.get("title") or "")
             candidates = match_news_to_markets(news, markets, max_matches=3)
             sentiment = analyze_news_sentiment(
@@ -720,7 +742,54 @@ class OfflineNewsPaperBot:
             self.news_collector.fetch_once()
             if fetch_news else {"feeds_configured": 0, "feeds_succeeded": 0, "feeds_failed": 0}
         )
-        news_items = list(self.news_collector.items[-500:])
+        gdelt_result: dict[str, Any] = {
+            "topics_configured": 0,
+            "topics_succeeded": 0,
+            "topics_failed": 0,
+            "items_added": 0,
+            "items_total_recent": 0,
+            "topics_attempted": [],
+            "topic_errors": [],
+        }
+        gdelt_error_type: str | None = None
+        if fetch_news and self.gdelt_collector is not None:
+            try:
+                gdelt_result = self.gdelt_collector.fetch_once()
+            except Exception as exc:
+                # A GDELT outage must not discard working RSS sources or stop the
+                # Paper cycle. Record only the exception type, never URL/body text.
+                gdelt_error_type = type(exc).__name__[:80]
+
+        combined_items = list(self.news_collector.items[-500:])
+        if self.gdelt_collector is not None:
+            combined_items.extend(self.gdelt_collector.items[-500:])
+        unique_items: dict[str, dict[str, Any]] = {}
+        for item in combined_items:
+            if not isinstance(item, dict):
+                continue
+            identity = str(item.get("id") or item.get("url") or "").strip()
+            if identity:
+                unique_items.setdefault(identity, item)
+        news_items = sorted(
+            unique_items.values(),
+            key=lambda item: _parse_published_epoch(item.get("published_at"))
+            or _parse_published_epoch(item.get("fetched_at"))
+            or 0.0,
+            reverse=True,
+        )[:500]
+        news_languages = sorted({
+            str(item.get("source_language") or "und").lower()
+            for item in news_items
+        })
+        news_regions = sorted({
+            str(item.get("coverage_region") or "unspecified").lower()
+            for item in news_items
+        })
+        news_non_english = sum(
+            1 for item in news_items
+            if item.get("directional_analysis_supported") is False
+            or str(item.get("source_language") or "").lower() not in {"", "en", "eng", "english"}
+        )
         signals = self._build_signals(news_items, snapshots, current)
         by_market = {row["market_id"]: row for row in snapshots}
 
@@ -788,6 +857,17 @@ class OfflineNewsPaperBot:
             "news_feeds_configured": int(news_result.get("feeds_configured") or 0),
             "news_feeds_succeeded": int(news_result.get("feeds_succeeded") or 0),
             "news_feeds_failed": int(news_result.get("feeds_failed") or 0),
+            "news_languages_seen": news_languages,
+            "news_regions_seen": news_regions,
+            "news_non_english_items_unscored": news_non_english,
+            "news_items_considered": len(news_items),
+            "gdelt_enabled": self.gdelt_collector is not None,
+            "gdelt_topics_configured": int(gdelt_result.get("topics_configured") or 0),
+            "gdelt_topics_succeeded": int(gdelt_result.get("topics_succeeded") or 0),
+            "gdelt_topics_failed": int(gdelt_result.get("topics_failed") or 0),
+            "gdelt_items_added": int(gdelt_result.get("items_added") or 0),
+            "gdelt_items_total_recent": int(gdelt_result.get("items_total_recent") or 0),
+            "gdelt_error_type": gdelt_error_type,
             "market_signals": len(signals),
             "qualified_event_signals": sum(1 for signal in signals.values() if signal.get("qualified") is True),
             "event_signal_method": "explicit_event_cue_publisher_consensus_v1",

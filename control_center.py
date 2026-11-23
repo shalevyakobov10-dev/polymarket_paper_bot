@@ -149,6 +149,7 @@ function metricEntries(id,d){
   ["Markets selected for book checks",d.markets_selected_for_orderbooks_last_cycle],
   ["Fresh two-sided market snapshots",d.market_snapshots_usable_last_cycle],
   ["CLOB outcome-token book requests",d.market_orderbook_token_requests_last_cycle],
+  ["Market categories represented",d.market_selected_categories_last_cycle],
   ["RSS feeds succeeded / configured",String(d.news_feeds_succeeded_last_cycle??0)+"/"+String(d.news_feeds_configured_last_cycle??0)],
   ["RSS feeds failed",d.news_feeds_failed_last_cycle],
   ["GDELT data path",d.gdelt_poll_status_available_last_cycle?"Direct poll":"Shared read-only archive"],

@@ -762,6 +762,7 @@ class OfflineNewsPaperBot:
             "topic_errors": [],
             "topics_seen_in_archive": [],
             "network_requests_made": 0,
+            "poll_status_available": False,
         }
         gdelt_error_type: str | None = None
         if fetch_news and self.gdelt_collector is not None:

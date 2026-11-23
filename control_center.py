@@ -40,6 +40,7 @@ footer{margin-top:24px;color:var(--muted);font-size:12px}
 <section class="grid" aria-live="polite">
 <article class="card" id="card-system"><h2>System health</h2><div class="empty">Loading status…</div></article>
 <article class="card" id="card-perps-market"><h2>Perps market data</h2><div class="empty">Loading status…</div></article>
+<article class="card" id="card-news-intelligence"><h2>Global news intelligence</h2><div class="empty">Loading status…</div></article>
 <article class="card" id="card-perps-account-supervisor"><h2>Perps account supervision</h2><div class="empty">Loading status…</div></article>
 <article class="card" id="card-perps-paper"><h2>Perps Paper engine</h2><div class="empty">Loading status…</div></article>
 <article class="card" id="card-event-paper"><h2>Event Paper engine</h2><div class="empty">Loading status…</div></article>
@@ -54,6 +55,7 @@ footer{margin-top:24px;color:var(--muted);font-size:12px}
 const sources=[
  {id:"system",url:"/health",title:"System health"},
  {id:"perps-market",url:"/perps-market",title:"Perps market data"},
+ {id:"news-intelligence",url:"/news",title:"Global news intelligence"},
  {id:"perps-account-supervisor",url:"/perps-account-supervisor",title:"Perps account supervision"},
  {id:"perps-paper",url:"/perps-paper",title:"Perps Paper engine"},
  {id:"event-paper",url:"/event-paper",title:"Event Paper engine"},
@@ -82,6 +84,32 @@ function metricEntries(id,d){
   return {status:d.status||"unknown",rows,extra:Object.entries(components).map(([name,c])=>[name,c&&c.status||"unknown"])};
  }
  if(id==="perps-market")return {status:d.worker_state,rows:[["Enabled",d.enabled],["Markets observed",d.markets_in_last_snapshot],["Fee schedule verified",d.markets_with_verified_fee_schedule],["Fee coverage",d.fee_coverage_status],["Last success",d.last_success_at],["Last error",d.last_error]]};
+ if(id==="news-intelligence"){
+  const g=d.gdelt||{};
+  const rssHealthy=(d.feeds_succeeded||0)>0;
+  const gdeltHealthy=(g.topics_succeeded||0)>0;
+  const status=rssHealthy&&gdeltHealthy?"healthy":(rssHealthy||gdeltHealthy?"degraded":"stale");
+  return {status,rows:[
+   ["RSS last poll",d.last_poll_at],
+   ["RSS last success",d.last_success_at],
+   ["RSS feeds succeeded / configured",String(d.feeds_succeeded??0)+"/"+String(d.feeds_configured??0)],
+   ["RSS feed failures",d.feeds_failed],
+   ["Languages succeeded",d.languages_succeeded],
+   ["Languages configured",d.languages_configured],
+   ["Regions succeeded",d.regions_succeeded],
+   ["Non-English headlines archived",d.non_english_items_added],
+   ["Directional analysis languages",d.directional_analysis_languages],
+   ["GDELT last success",g.last_success_at],
+   ["GDELT topics succeeded / configured",String(g.topics_succeeded??0)+"/"+String(g.topics_configured??0)],
+   ["GDELT topic failures",g.topics_failed],
+   ["GDELT articles added / recent",String(g.items_added_last_poll??0)+"/"+String(g.items_total_recent??0)],
+   ["GDELT languages seen",g.languages_seen],
+   ["GDELT source countries seen",g.countries_seen],
+   ["GDELT topic lanes represented",g.topic_categories_seen],
+   ["Non-English GDELT articles archived",g.non_english_items_total_recent],
+   ["GDELT last error",g.last_error]
+  ]};
+ }
  if(id==="perps-paper"){
   const p=d.portfolio||{};
   const rows=[["Enabled",d.enabled],["Worker state",d.worker_state],["Fee coverage",d.fee_coverage_status],["New Paper entries ready",d.fee_verified_entry_path_available],["Open positions",p.open_positions],["Closed positions",p.closed_positions],["Open notional (USD)",p.open_notional_usd],["Effective leverage",p.effective_leverage],["Peak drawdown (%)",p.peak_drawdown_pct],["UTC-day PnL (%)",p.daily_pnl_pct],["Halt reason",p.halt_reason||d.degraded_reason]];

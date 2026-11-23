@@ -61,6 +61,65 @@ class NewsMonitorTests(unittest.TestCase):
         self.assertEqual(rows[0]["title"], "Atom headline")
         self.assertEqual(rows[0]["url"], "https://example.org/story/2")
 
+    def test_parse_feed_preserves_language_region_and_directional_support_metadata(self):
+        english = news_monitor.parse_feed(
+            RSS,
+            "Example English",
+            "https://example.org/rss",
+            feed_metadata={"language": "en", "region": "global"},
+        )[0]
+        self.assertEqual(english["source_language"], "en")
+        self.assertEqual(english["coverage_region"], "global")
+        self.assertTrue(english["directional_analysis_supported"])
+
+        arabic = news_monitor.parse_feed(
+            RSS,
+            "Example Arabic",
+            "https://example.org/ar/rss",
+            feed_metadata={"language": "ar", "region": "middle_east_north_africa"},
+        )[0]
+        self.assertEqual(arabic["source_language"], "ar")
+        self.assertEqual(arabic["coverage_region"], "middle_east_north_africa")
+        self.assertFalse(arabic["directional_analysis_supported"])
+
+    def test_global_feed_catalog_covers_multiple_languages_and_regions(self):
+        languages = {
+            str(feed.get("language") or "en").lower()
+            for feed in news_monitor.DEFAULT_FEEDS
+        }
+        regions = {
+            str(feed.get("region") or "global").lower()
+            for feed in news_monitor.DEFAULT_FEEDS
+        }
+        self.assertTrue({"en", "ar", "es", "hi", "ja", "zh", "ru", "tr", "uk", "pt", "fr", "de"} <= languages)
+        self.assertTrue({
+            "global", "middle_east_north_africa", "latin_america",
+            "south_asia", "east_asia", "eurasia", "europe",
+        } <= regions)
+
+    def test_collector_reports_successful_language_and_region_coverage_without_new_articles(self):
+        feeds = (
+            {"source": "English Desk", "url": "https://example.org/en", "language": "en", "region": "global"},
+            {"source": "Arabic Desk", "url": "https://example.org/ar", "language": "ar", "region": "middle_east_north_africa"},
+            {"source": "Offline Desk", "url": "https://offline.example/rss", "language": "zh", "region": "east_asia"},
+        )
+        def fake_urlopen(request, timeout=10):
+            if "offline.example" in request.full_url:
+                raise URLError("offline")
+            return FakeResponse(RSS)
+
+        with tempfile.TemporaryDirectory() as directory:
+            collector = news_monitor.NewsCollector(Path(directory) / "news.jsonl", feeds)
+            with patch("news_monitor.urlopen", side_effect=fake_urlopen):
+                first = collector.fetch_once()
+                second = collector.fetch_once()
+            self.assertEqual(first["languages_configured"], ["ar", "en", "zh"])
+            self.assertEqual(first["languages_succeeded"], ["ar", "en"])
+            self.assertEqual(first["regions_succeeded"], ["global", "middle_east_north_africa"])
+            self.assertEqual(first["non_english_items_added"], 1)
+            self.assertEqual(second["items_added"], 0)
+            self.assertEqual(second["languages_succeeded"], ["ar", "en"])
+
     def test_rejects_malformed_xml_and_non_http_links(self):
         with self.assertRaises(ValueError):
             news_monitor.parse_feed(b"<rss>", "bad", "https://example.org/rss")

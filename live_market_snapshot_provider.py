@@ -79,7 +79,13 @@ class LiveClobMarketSnapshotProvider:
         timeout_seconds: float = 15.0,
     ) -> None:
         self.max_age_seconds = float(max_age_seconds)
-        self.market_limit = market_limit or _bounded_int_env("PAPER_LIVE_MARKETS_LIMIT", 20, 1, 50)
+        self.market_limit = (
+            market_limit
+            if market_limit is not None
+            else _bounded_int_env("PAPER_LIVE_MARKETS_LIMIT", 30, 1, 50)
+        )
+        if isinstance(self.market_limit, bool) or not isinstance(self.market_limit, int) or not 1 <= self.market_limit <= 50:
+            raise ValueError("market_limit must be an integer between 1 and 50")
         self.gamma_page_size = _bounded_int_env("PAPER_GAMMA_PAGE_SIZE", 200, 20, 200)
         self.timeout_seconds = max(2.0, min(30.0, float(timeout_seconds)))
         self.last_discovered_market_count = 0
@@ -140,9 +146,13 @@ class LiveClobMarketSnapshotProvider:
             candidates.append({
                 "market_id": market_id,
                 "question": question[:500],
+                "market_category": str(market.get("category") or "uncategorized").strip().lower()[:80],
+                "market_slug": str(market.get("slug") or "")[:160],
+                "market_end_date": str(market.get("endDate") or market.get("endDateIso") or "")[:80],
                 "yes_token_id": yes_token,
                 "no_token_id": no_token,
                 "volume_24h": _number(market.get("volume24hr")),
+                "liquidity": _number(market.get("liquidity")),
                 "gamma_yes_price": _number(prices[yes_index]),
                 "gamma_no_price": _number(prices[no_index]),
             })
@@ -204,6 +214,10 @@ class LiveClobMarketSnapshotProvider:
             snapshots.append({
                 "market_id": market["market_id"],
                 "question": market["question"],
+                "market_category": market["market_category"],
+                "market_slug": market["market_slug"],
+                "market_end_date": market["market_end_date"],
+                "liquidity": market["liquidity"],
                 "yes_token_id": market["yes_token_id"],
                 "no_token_id": market["no_token_id"],
                 "observed_at": min(observed).isoformat(),

@@ -43,7 +43,7 @@ class CompatiblePerpsSession:
     async def fetch_open_orders(self, *, instrument_id=None): pass
     async def fetch_orders(self, *, client_order_id=None): pass
     def list_fills(self, *, instrument_id=None, start=None, end=None, sort=None): pass
-    async def list_funding_payments(self, *, instrument_id=None, start=None, end=None): pass
+    def list_funding_payments(self, *, instrument_id=None, start=None, end=None): pass
     async def close(self): pass
     def place_order(
         self, *, instrument_id, side, quantity, time_in_force, reduce_only=False,
@@ -160,6 +160,24 @@ class PerpsSdkContractTests(unittest.TestCase):
         self.assertIn(
             "method_must_be_async",
             report["async_secure_method_failures"]["open_perps_session"],
+        )
+
+    def test_async_funding_paginator_is_rejected(self):
+        class AsyncFundingPaginatorSession(CompatiblePerpsSession):
+            async def list_funding_payments(self, *, instrument_id=None, start=None, end=None):
+                return ()
+
+        report = evaluate_sdk_contract(
+            installed_version=EXPECTED_VERSION,
+            async_secure_client=CompatibleSecureClient,
+            perps_session=AsyncFundingPaginatorSession,
+            api_key_credentials=CompatibleApiKeyCreds,
+            perps_credentials=CompatiblePerpsCredentials,
+        )
+        self.assertFalse(report["compatible"])
+        self.assertEqual(
+            report["perps_session_method_failures"]["list_funding_payments"],
+            ["method_must_be_sync"],
         )
 
     def test_sync_and_async_fill_paginator_contracts_are_distinguished(self):

@@ -80,6 +80,23 @@ def _published_time(value: Any) -> str:
         return ""
 
 
+_LANGUAGE_CODES = {
+    "arabic": "ar", "chinese": "zh", "english": "en", "french": "fr",
+    "german": "de", "hindi": "hi", "italian": "it", "japanese": "ja",
+    "korean": "ko", "portuguese": "pt", "russian": "ru", "spanish": "es",
+    "turkish": "tr", "ukrainian": "uk", "vietnamese": "vi",
+}
+
+
+def _language_code(value: Any) -> str:
+    raw = str(value or "").strip().casefold()
+    if not raw:
+        return "und"
+    if len(raw) in {2, 3} and raw.isalpha():
+        return raw[:3]
+    return _LANGUAGE_CODES.get(raw, "und")
+
+
 def normalize_gdelt_articles(
     payload: dict[str, Any],
     fetched_at: str | None = None,
@@ -104,6 +121,7 @@ def normalize_gdelt_articles(
         if not title or not canonical_url.startswith("https://") or canonical_url in seen:
             continue
         seen.add(canonical_url)
+        source_language = _language_code(article.get("language"))
         records.append({
             "id": hashlib.sha256(canonical_url.encode("utf-8")).hexdigest(),
             "source": str(article.get("domain") or "GDELT indexed source")[:100],
@@ -113,6 +131,9 @@ def normalize_gdelt_articles(
             "source_type": "gdelt_doc_api",
             "source_country": str(article.get("sourcecountry") or "")[:10],
             "language": str(article.get("language") or "")[:20],
+            "source_language": source_language,
+            "coverage_region": str(article.get("sourcecountry") or "global")[:48].lower(),
+            "directional_analysis_supported": source_language == "en",
             "title": title,
             "summary": "",
             "url": url,

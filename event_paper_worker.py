@@ -8,6 +8,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import signal
 import tempfile
 import threading
@@ -343,6 +344,28 @@ def _safe_portfolio_summary(raw: Any) -> dict[str, Any] | None:
     return result
 
 
+_SAFE_COVERAGE_LABEL = re.compile(r"^[a-z0-9_-]{1,48}$")
+
+
+def _safe_coverage_labels(value: Any) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    labels = set()
+    for item in value[:40]:
+        if not isinstance(item, str):
+            continue
+        normalized = item.strip().lower()
+        if _SAFE_COVERAGE_LABEL.fullmatch(normalized):
+            labels.add(normalized)
+    return sorted(labels)
+
+
+def _safe_nonnegative_count(value: Any, *, maximum: int = 1_000_000) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or not 0 <= value <= maximum:
+        return 0
+    return value
+
+
 def read_event_paper_worker_status(
     path: str | Path,
     *,
@@ -382,6 +405,23 @@ def read_event_paper_worker_status(
             "close_blocked_last_cycle": max(0, int(raw.get("close_blocked_last_cycle", 0))),
             "last_error_type": str(raw.get("last_error_type") or "")[:80] or None,
             "last_cycle_warning": str(raw.get("last_cycle_warning") or "")[:120] or None,
+            "news_feeds_configured_last_cycle": _safe_nonnegative_count(raw.get("news_feeds_configured_last_cycle", 0)),
+            "news_feeds_succeeded_last_cycle": _safe_nonnegative_count(raw.get("news_feeds_succeeded_last_cycle", 0)),
+            "news_feeds_failed_last_cycle": _safe_nonnegative_count(raw.get("news_feeds_failed_last_cycle", 0)),
+            "news_items_considered_last_cycle": _safe_nonnegative_count(raw.get("news_items_considered_last_cycle", 0)),
+            "news_non_english_items_unscored_last_cycle": _safe_nonnegative_count(raw.get("news_non_english_items_unscored_last_cycle", 0)),
+            "gdelt_topics_configured_last_cycle": _safe_nonnegative_count(raw.get("gdelt_topics_configured_last_cycle", 0)),
+            "gdelt_topics_succeeded_last_cycle": _safe_nonnegative_count(raw.get("gdelt_topics_succeeded_last_cycle", 0)),
+            "gdelt_topics_failed_last_cycle": _safe_nonnegative_count(raw.get("gdelt_topics_failed_last_cycle", 0)),
+            "gdelt_items_added_last_cycle": _safe_nonnegative_count(raw.get("gdelt_items_added_last_cycle", 0)),
+            "gdelt_error_type": (
+                str(raw.get("gdelt_error_type"))[:80]
+                if isinstance(raw.get("gdelt_error_type"), str)
+                and re.fullmatch(r"[A-Za-z0-9_]{1,80}", raw["gdelt_error_type"])
+                else None
+            ),
+            "news_languages_seen": _safe_coverage_labels(raw.get("news_languages_seen")),
+            "news_regions_seen": _safe_coverage_labels(raw.get("news_regions_seen")),
             "portfolio": _safe_portfolio_summary(raw.get("portfolio")),
             "last_backup_at": raw.get("last_backup_at"),
             "last_backup_attempt_at": raw.get("last_backup_attempt_at"),
@@ -486,6 +526,18 @@ def run_worker(
         "close_blocked_last_cycle": 0,
         "last_error_type": None,
         "last_cycle_warning": None,
+        "news_feeds_configured_last_cycle": 0,
+        "news_feeds_succeeded_last_cycle": 0,
+        "news_feeds_failed_last_cycle": 0,
+        "news_items_considered_last_cycle": 0,
+        "news_non_english_items_unscored_last_cycle": 0,
+        "gdelt_topics_configured_last_cycle": 0,
+        "gdelt_topics_succeeded_last_cycle": 0,
+        "gdelt_topics_failed_last_cycle": 0,
+        "gdelt_items_added_last_cycle": 0,
+        "gdelt_error_type": None,
+        "news_languages_seen": [],
+        "news_regions_seen": [],
         "portfolio": None,
         "last_backup_at": last_backup_at.isoformat() if last_backup_at else None,
         "last_backup_attempt_at": last_backup_attempt_at.isoformat() if last_backup_attempt_at else None,
@@ -522,6 +574,23 @@ def run_worker(
                     "closed_last_cycle": len(result.get("closed") or []),
                     "close_blocked_last_cycle": len(result.get("close_blocked") or []),
                     "last_error_type": None,
+                    "news_feeds_configured_last_cycle": _safe_nonnegative_count(result.get("news_feeds_configured", 0)),
+                    "news_feeds_succeeded_last_cycle": _safe_nonnegative_count(result.get("news_feeds_succeeded", 0)),
+                    "news_feeds_failed_last_cycle": _safe_nonnegative_count(result.get("news_feeds_failed", 0)),
+                    "news_items_considered_last_cycle": _safe_nonnegative_count(result.get("news_items_considered", 0)),
+                    "news_non_english_items_unscored_last_cycle": _safe_nonnegative_count(result.get("news_non_english_items_unscored", 0)),
+                    "gdelt_topics_configured_last_cycle": _safe_nonnegative_count(result.get("gdelt_topics_configured", 0)),
+                    "gdelt_topics_succeeded_last_cycle": _safe_nonnegative_count(result.get("gdelt_topics_succeeded", 0)),
+                    "gdelt_topics_failed_last_cycle": _safe_nonnegative_count(result.get("gdelt_topics_failed", 0)),
+                    "gdelt_items_added_last_cycle": _safe_nonnegative_count(result.get("gdelt_items_added", 0)),
+                    "gdelt_error_type": (
+                        str(result.get("gdelt_error_type"))[:80]
+                        if isinstance(result.get("gdelt_error_type"), str)
+                        and re.fullmatch(r"[A-Za-z0-9_]{1,80}", result["gdelt_error_type"])
+                        else None
+                    ),
+                    "news_languages_seen": _safe_coverage_labels(result.get("news_languages_seen")),
+                    "news_regions_seen": _safe_coverage_labels(result.get("news_regions_seen")),
                     "portfolio": _safe_portfolio_summary(result.get("portfolio")),
                 })
 

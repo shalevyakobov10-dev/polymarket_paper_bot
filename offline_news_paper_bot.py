@@ -30,6 +30,7 @@ from paper_orderbook_execution import simulate_buy, simulate_sell
 from event_outcome import aggregate_event_outcome_evidence, classify_event_outcome
 from news_monitor import DEFAULT_FEEDS, NewsCollector, match_news_to_markets
 from global_news import GDELTCollector
+from news_fusion import merge_news_sources, summarize_news_source_coverage
 from news_sentiment import aggregate_market_news_sentiment, analyze_news_sentiment
 from paper_parameter_tuner import tune_sentiment_threshold
 from risk_manager import evaluate_paper_entry
@@ -634,10 +635,19 @@ class OfflineNewsPaperBot:
             # The event-cue classifier and VADER model are English-only. Preserve
             # other languages for research/coverage telemetry, but never infer a
             # YES/NO direction from untranslated text or accidental Latin overlap.
-            language = str(news.get("source_language") or news.get("language") or "").strip().lower()
+            languages = news.get("source_languages")
+            if isinstance(languages, (list, tuple, set)):
+                normalized_languages = {
+                    str(value).strip().lower() for value in languages if str(value).strip()
+                }
+            else:
+                single_language = str(
+                    news.get("source_language") or news.get("language") or ""
+                ).strip().lower()
+                normalized_languages = {single_language} if single_language else set()
             if news.get("directional_analysis_supported") is False:
                 continue
-            if language and language not in {"en", "eng", "english"}:
+            if normalized_languages and not normalized_languages.issubset({"en", "eng", "english"}):
                 continue
             title = str(news.get("title") or "")
             candidates = match_news_to_markets(news, markets, max_matches=3)
@@ -760,35 +770,28 @@ class OfflineNewsPaperBot:
                 # Paper cycle. Record only the exception type, never URL/body text.
                 gdelt_error_type = type(exc).__name__[:80]
 
-        combined_items = list(self.news_collector.items[-500:])
-        if self.gdelt_collector is not None:
-            combined_items.extend(self.gdelt_collector.items[-500:])
-        unique_items: dict[str, dict[str, Any]] = {}
-        for item in combined_items:
-            if not isinstance(item, dict):
-                continue
-            identity = str(item.get("id") or item.get("url") or "").strip()
-            if identity:
-                unique_items.setdefault(identity, item)
-        news_items = sorted(
-            unique_items.values(),
+        rss_items = list(self.news_collector.items[-500:])
+        gdelt_items = (
+            list(self.gdelt_collector.items[-500:])
+            if self.gdelt_collector is not None else []
+        )
+        # URL canonicalization merges the same article across RSS/GDELT lanes,
+        # removes tracking-only URL variants and keeps GDELT index time separate
+        # from verified publisher publication time.
+        news_items = merge_news_sources(rss_items, gdelt_items, max_items=500)
+        news_items.sort(
             key=lambda item: _parse_published_epoch(item.get("published_at"))
+            or _parse_published_epoch(item.get("indexed_at"))
             or _parse_published_epoch(item.get("fetched_at"))
             or 0.0,
             reverse=True,
-        )[:500]
-        news_languages = sorted({
-            str(item.get("source_language") or "und").lower()
-            for item in news_items
-        })
-        news_regions = sorted({
-            str(item.get("coverage_region") or "unspecified").lower()
-            for item in news_items
-        })
+        )
+        news_source_coverage = summarize_news_source_coverage(news_items)
+        news_languages = list(news_source_coverage["source_languages_observed"])
+        news_regions = list(news_source_coverage["coverage_regions_observed"])
         news_non_english = sum(
             1 for item in news_items
-            if item.get("directional_analysis_supported") is False
-            or str(item.get("source_language") or "").lower() not in {"", "en", "eng", "english"}
+            if item.get("directional_analysis_supported") is not True
         )
         signals = self._build_signals(news_items, snapshots, current)
         by_market = {row["market_id"]: row for row in snapshots}
@@ -861,6 +864,9 @@ class OfflineNewsPaperBot:
             "news_regions_seen": news_regions,
             "news_non_english_items_unscored": news_non_english,
             "news_items_considered": len(news_items),
+            "news_source_coverage": news_source_coverage,
+            "news_sources_used": news_source_coverage["source_types"],
+            "news_distinct_publishers": news_source_coverage["distinct_publisher_count"],
             "gdelt_enabled": self.gdelt_collector is not None,
             "gdelt_topics_configured": int(gdelt_result.get("topics_configured") or 0),
             "gdelt_topics_succeeded": int(gdelt_result.get("topics_succeeded") or 0),

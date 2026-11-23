@@ -882,6 +882,9 @@ class OfflineNewsPaperBot:
             "markets_selected_for_orderbooks": markets_selected_for_orderbooks,
             "market_orderbook_token_requests": market_orderbook_token_requests,
             "market_snapshots_usable": len(snapshots),
+            "market_selected_categories": list(
+                getattr(self.snapshot_provider, "last_selected_categories", []) or []
+            ),
             "market_sampling_policy": "top_24h_volume_from_bounded_gamma_sample",
             "market_data_source": self.config.market_data_source,
             "market_history": market_history,

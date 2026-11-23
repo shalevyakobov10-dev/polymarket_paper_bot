@@ -50,6 +50,11 @@ class EventPaperWorkerTests(unittest.TestCase):
             bot = FakeBot([{
                 "markets_loaded": 3, "opened": [{"market_id": "m1"}],
                 "closed": [], "close_blocked": [],
+                "market_universe_discovered": 200,
+                "markets_selected_for_orderbooks": 30,
+                "market_orderbook_token_requests": 60,
+                "market_snapshots_usable": 27,
+                "market_selected_categories": ["politics", "economics", "technology"],
                 "news_feeds_configured": 28,
                 "news_feeds_succeeded": 25,
                 "news_feeds_failed": 3,
@@ -101,6 +106,14 @@ class EventPaperWorkerTests(unittest.TestCase):
             self.assertEqual(status["worker_state"], "stopped")
             self.assertEqual(status["cycles"], 1)
             self.assertEqual(status["markets_loaded_last_cycle"], 3)
+            self.assertEqual(status["market_universe_discovered_last_cycle"], 200)
+            self.assertEqual(status["markets_selected_for_orderbooks_last_cycle"], 30)
+            self.assertEqual(status["market_orderbook_token_requests_last_cycle"], 60)
+            self.assertEqual(status["market_snapshots_usable_last_cycle"], 27)
+            self.assertEqual(
+                status["market_selected_categories_last_cycle"],
+                ["economics", "politics", "technology"],
+            )
             self.assertEqual(status["opened_last_cycle"], 1)
             self.assertEqual(status["news_feeds_configured_last_cycle"], 28)
             self.assertEqual(status["news_feeds_succeeded_last_cycle"], 25)

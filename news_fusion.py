@@ -10,7 +10,7 @@ from __future__ import annotations
 import hashlib
 from datetime import datetime, timezone
 from typing import Any
-from urllib.parse import urlsplit, urlunsplit
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 from publisher_identity import publisher_identity
 
@@ -30,11 +30,23 @@ def canonical_article_url(value: Any) -> str:
             host = f"{hostname}:{port}"
         else:
             host = hostname
+        # Drop common analytics-only parameters so a story linked from
+        # different feed sections still has one canonical article identity.
+        query = [
+            (key, val) for key, val in parse_qsl(parsed.query, keep_blank_values=True)
+            if not (
+                key.lower().startswith("utm_")
+                or key.lower() in {
+                    "fbclid", "gclid", "dclid", "mc_cid", "mc_eid",
+                    "ref", "ref_src", "cmpid", "ocid",
+                }
+            )
+        ]
         return urlunsplit((
             parsed.scheme.lower(),
             host,
             parsed.path or "/",
-            parsed.query,
+            urlencode(query, doseq=True),
             "",
         ))
     except (TypeError, ValueError, UnicodeError):
@@ -217,6 +229,17 @@ def merge_news_sources(
             else:
                 item["timestamp_basis"] = "publisher_publication_time"
 
+            normalized_languages = {
+                value.strip().lower()
+                for value in item["source_languages"]
+                if value.strip()
+            }
+            # Directional event rules are English-only. If the article has
+            # mixed/unknown source-language metadata, retain it for research but
+            # do not pass it to the English event classifier.
+            item["directional_analysis_supported"] = bool(normalized_languages) and normalized_languages.issubset({
+                "en", "eng", "english"
+            })
             item["source_type"] = (
                 item["source_types"][0] if len(item["source_types"]) == 1
                 else "multi_source_article"

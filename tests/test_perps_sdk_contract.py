@@ -7,12 +7,12 @@ from perps_sdk_contract import EXPECTED_VERSION, evaluate_sdk_contract
 
 class CompatibleSecureClient:
     @classmethod
-    def _create(
+    async def _create(
         cls, *, private_key, wallet, credentials, validate_credentials=True
     ):
         raise AssertionError("contract inspection must not call SDK methods")
 
-    def open_perps_session(self, *, credentials=None, expires_in=None):
+    async def open_perps_session(self, *, credentials=None, expires_in=None):
         raise AssertionError("contract inspection must not call SDK methods")
 
 
@@ -36,14 +36,14 @@ class CompatiblePerpsCredentials:
 
 
 class CompatiblePerpsSession:
-    def fetch_balances(self): pass
-    def fetch_portfolio(self): pass
-    def fetch_auto_cancel_status(self): pass
-    def fetch_account_config(self, *, instrument_id=None): pass
-    def fetch_open_orders(self, *, instrument_id=None): pass
-    def fetch_orders(self, *, client_order_id=None): pass
+    async def fetch_balances(self): pass
+    async def fetch_portfolio(self): pass
+    async def fetch_auto_cancel_status(self): pass
+    async def fetch_account_config(self, *, instrument_id=None): pass
+    async def fetch_open_orders(self, *, instrument_id=None): pass
+    async def fetch_orders(self, *, client_order_id=None): pass
     def list_fills(self, *, instrument_id=None, start=None, end=None, sort=None): pass
-    def list_funding_payments(self, *, instrument_id=None, start=None, end=None): pass
+    async def list_funding_payments(self, *, instrument_id=None, start=None, end=None): pass
     async def close(self): pass
     def place_order(
         self, *, instrument_id, side, quantity, time_in_force, reduce_only=False,
@@ -61,7 +61,7 @@ class CompatiblePerpsSession:
 
 
 class IncompatiblePerpsSession:
-    def fetch_balances(self): pass
+    async def fetch_balances(self): pass
 
 
 class PerpsSdkContractTests(unittest.TestCase):
@@ -108,7 +108,7 @@ class PerpsSdkContractTests(unittest.TestCase):
 
     def test_missing_private_client_construction_hook_fails_closed(self):
         class SecureClientWithoutExistingCredentialConstruction:
-            def open_perps_session(self, *, credentials=None, expires_in=None):
+            async def open_perps_session(self, *, credentials=None, expires_in=None):
                 pass
 
         report = evaluate_sdk_contract(
@@ -144,9 +144,45 @@ class PerpsSdkContractTests(unittest.TestCase):
             ["expires_at", "private_key"],
         )
 
+    def test_sync_client_session_opener_is_rejected(self):
+        class SynchronousSecureClient(CompatibleSecureClient):
+            def open_perps_session(self, *, credentials=None, expires_in=None):
+                pass
+
+        report = evaluate_sdk_contract(
+            installed_version=EXPECTED_VERSION,
+            async_secure_client=SynchronousSecureClient,
+            perps_session=CompatiblePerpsSession,
+            api_key_credentials=CompatibleApiKeyCreds,
+            perps_credentials=CompatiblePerpsCredentials,
+        )
+        self.assertFalse(report["compatible"])
+        self.assertIn(
+            "method_must_be_async",
+            report["async_secure_method_failures"]["open_perps_session"],
+        )
+
+    def test_sync_and_async_fill_paginator_contracts_are_distinguished(self):
+        class AsyncFillPaginatorSession(CompatiblePerpsSession):
+            async def list_fills(self, *, instrument_id=None, start=None, end=None, sort=None):
+                return ()
+
+        report = evaluate_sdk_contract(
+            installed_version=EXPECTED_VERSION,
+            async_secure_client=CompatibleSecureClient,
+            perps_session=AsyncFillPaginatorSession,
+            api_key_credentials=CompatibleApiKeyCreds,
+            perps_credentials=CompatiblePerpsCredentials,
+        )
+        self.assertFalse(report["compatible"])
+        self.assertEqual(
+            report["perps_session_method_failures"]["list_fills"],
+            ["method_must_be_sync"],
+        )
+
     def test_changed_parameter_surface_fails_closed(self):
         class IncompatibleSecureClient:
-            def open_perps_session(self, *, label=None):
+            async def open_perps_session(self, *, label=None):
                 pass
 
         report = evaluate_sdk_contract(

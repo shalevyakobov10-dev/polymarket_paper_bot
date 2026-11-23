@@ -55,6 +55,11 @@ class EventPaperWorkerTests(unittest.TestCase):
                 "market_orderbook_token_requests": 60,
                 "market_snapshots_usable": 27,
                 "market_selected_categories": ["politics", "economics", "technology"],
+                "market_discovery_pages_attempted": 3,
+                "market_discovery_pages_succeeded": 3,
+                "market_discovery_pages_failed": 0,
+                "market_discovery_scan_complete": True,
+                "market_category_quota": 8,
                 "news_feeds_configured": 28,
                 "news_feeds_succeeded": 25,
                 "news_feeds_failed": 3,
@@ -122,6 +127,11 @@ class EventPaperWorkerTests(unittest.TestCase):
                 status["market_selected_categories_last_cycle"],
                 ["economics", "politics", "technology"],
             )
+            self.assertEqual(status["market_discovery_pages_attempted_last_cycle"], 3)
+            self.assertEqual(status["market_discovery_pages_succeeded_last_cycle"], 3)
+            self.assertEqual(status["market_discovery_pages_failed_last_cycle"], 0)
+            self.assertTrue(status["market_discovery_scan_complete_last_cycle"])
+            self.assertEqual(status["market_category_quota"], 8)
             self.assertEqual(status["opened_last_cycle"], 1)
             self.assertEqual(status["news_feeds_configured_last_cycle"], 28)
             self.assertEqual(status["news_feeds_succeeded_last_cycle"], 25)

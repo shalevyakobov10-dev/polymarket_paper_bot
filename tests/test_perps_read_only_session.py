@@ -104,6 +104,9 @@ class ReadOnlyPerpsSessionTests(unittest.IsolatedAsyncioTestCase):
     async def test_only_allowlisted_read_methods_are_exposed(self):
         raw = FakeRawPerpsSession()
         session = ReadOnlyPerpsSession(raw)
+        self.assertFalse(hasattr(session, "_require_open"))
+        self.assertFalse(hasattr(session, "raw_session"))
+        self.assertFalse(hasattr(session, "session"))
 
         self.assertEqual(
             {name for name in READ_ONLY_PERPS_METHODS if callable(getattr(session, name, None))},

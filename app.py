@@ -146,6 +146,16 @@ _news_state = {
     "items_total_recent": 0,
     "poll_interval_seconds": NEWS_POLL_SECONDS,
     "feed_errors": [],
+    "languages_configured": sorted({
+        str(feed.get("language") or "en").lower() for feed in DEFAULT_FEEDS
+    }),
+    "languages_succeeded": [],
+    "regions_configured": sorted({
+        str(feed.get("region") or "global").lower() for feed in DEFAULT_FEEDS
+    }),
+    "regions_succeeded": [],
+    "directional_analysis_languages": ["en"],
+    "non_english_items_added": 0,
     "matches_added_last_pass": 0,
     "market_matches_total_recent": 0,
     "last_match_check_at": None,
@@ -166,6 +176,10 @@ _gdelt_state = {
     "topics_attempted": [],
     "topics_succeeded": 0,
     "topics_failed": 0,
+    "languages_seen": [],
+    "countries_seen": [],
+    "topic_categories_seen": [],
+    "non_english_items_total_recent": 0,
     "topic_results": {},
     "topic_errors": [],
 }
@@ -1189,6 +1203,12 @@ def health_payload(
         gdelt_component["topics_succeeded"] = int(gdelt_snapshot.get("topics_succeeded") or 0)
         gdelt_component["topics_failed"] = int(gdelt_snapshot.get("topics_failed") or 0)
         gdelt_component["topics_attempted"] = list(gdelt_snapshot.get("topics_attempted") or [])
+        gdelt_component["languages_seen"] = list(gdelt_snapshot.get("languages_seen") or [])
+        gdelt_component["countries_seen"] = list(gdelt_snapshot.get("countries_seen") or [])
+        gdelt_component["topic_categories_seen"] = list(gdelt_snapshot.get("topic_categories_seen") or [])
+        gdelt_component["non_english_items_total_recent"] = int(
+            gdelt_snapshot.get("non_english_items_total_recent") or 0
+        )
         components["gdelt"] = gdelt_component
 
     if learning_snapshot is not None:
@@ -1435,6 +1455,12 @@ def news_worker_loop() -> None:
                     "items_added_last_poll": result["items_added"],
                     "items_total_recent": result["items_total_recent"],
                     "feed_errors": result["feed_errors"][:10],
+                    "languages_configured": list(result.get("languages_configured") or []),
+                    "languages_succeeded": list(result.get("languages_succeeded") or []),
+                    "regions_configured": list(result.get("regions_configured") or []),
+                    "regions_succeeded": list(result.get("regions_succeeded") or []),
+                    "directional_analysis_languages": list(result.get("directional_analysis_languages") or ["en"]),
+                    "non_english_items_added": int(result.get("non_english_items_added") or 0),
                     "last_warning": (
                         str(result["feeds_failed"]) + " news feed(s) failed"
                         if result["feeds_failed"] else None
@@ -1479,6 +1505,10 @@ def news_worker_loop() -> None:
                         "topics_failed": gdelt_result["topics_failed"],
                         "topic_results": dict(gdelt_result["topic_results"]),
                         "topic_errors": list(gdelt_result["topic_errors"])[:10],
+                        "languages_seen": list(gdelt_result.get("languages_seen") or []),
+                        "countries_seen": list(gdelt_result.get("countries_seen") or []),
+                        "topic_categories_seen": list(gdelt_result.get("topic_categories_seen") or []),
+                        "non_english_items_total_recent": int(gdelt_result.get("non_english_items_total_recent") or 0),
                     })
                     combined = gdelt_result["latest_items"] + list(_news_items_cache)
                     unique = {}

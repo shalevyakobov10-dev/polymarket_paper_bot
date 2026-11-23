@@ -4,9 +4,10 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import time
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
@@ -41,6 +42,14 @@ DEFAULT_TOPIC_QUERIES = (
     ("migration_demographics", '(migration OR immigration OR refugee OR population OR census OR "border crossing")'),
     ("infrastructure_utilities", '("power grid" OR "water supply" OR infrastructure OR blackout OR "nuclear plant" OR "data center" OR construction)'),
 )
+
+
+def math_is_finite_nonnegative(value: Any) -> bool:
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError, OverflowError):
+        return False
+    return parsed >= 0 and parsed < float("inf")
 
 
 def _bounded_env_int(name: str, default: int, minimum: int, maximum: int) -> int:
@@ -137,7 +146,13 @@ def normalize_gdelt_articles(
             "title": title,
             "summary": "",
             "url": url,
-            "published_at": _published_time(article.get("seendate")),
+            # DOC 2.0's seendate is when GDELT observed/indexed the article,
+            # not the publisher's verified publication time. Never feed it into
+            # publication-age gates or event consensus as if it were a pubDate.
+            "published_at": "",
+            "indexed_at": _published_time(article.get("seendate")),
+            "publication_time_status": "unknown",
+            "timestamp_basis": "gdelt_index_observation_not_publisher_publication",
             "fetched_at": observed_at,
             "indexing_source": "GDELT DOC 2.0",
             "topic_categories": [str(topic_category)[:80]] if topic_category else [],
@@ -151,8 +166,26 @@ def normalize_gdelt_articles(
 class GDELTCollector:
     """Fetch a bounded, deduplicated one-hour global news window."""
 
-    def __init__(self, log_path: str | Path) -> None:
+    def __init__(
+        self,
+        log_path: str | Path,
+        *,
+        sleep: Callable[[float], Any] = time.sleep,
+        monotonic: Callable[[], float] = time.monotonic,
+    ) -> None:
+        if not callable(sleep) or not callable(monotonic):
+            raise ValueError("GDELT request timing hooks must be callable")
         self.log_path = Path(log_path)
+        self._sleep = sleep
+        self._monotonic = monotonic
+        try:
+            configured_interval = float(os.getenv("GDELT_MIN_REQUEST_INTERVAL_SECONDS", "5"))
+        except (TypeError, ValueError, OverflowError):
+            configured_interval = 5.0
+        if not 5.0 <= configured_interval <= 60.0:
+            configured_interval = 5.0
+        self._minimum_request_interval_seconds = configured_interval
+        self._last_request_monotonic: float | None = None
         self.seen_ids: set[str] = set()
         self.items: list[dict[str, Any]] = []
         self._topic_queries = _configured_topics()
@@ -209,9 +242,21 @@ class GDELTCollector:
                         except (ValueError, TypeError):
                             continue
                         if isinstance(item, dict) and item.get("id"):
-                            item_id = str(item["id"])
+                            normalized = dict(item)
+                            # Migrate older local logs where seendate was incorrectly
+                            # labelled as the publisher's publication time.
+                            if normalized.get("source_type") == "gdelt_doc_api":
+                                legacy_published = normalized.get("published_at")
+                                if legacy_published and not normalized.get("indexed_at"):
+                                    normalized["indexed_at"] = legacy_published
+                                normalized["published_at"] = ""
+                                normalized["publication_time_status"] = "unknown"
+                                normalized["timestamp_basis"] = (
+                                    "gdelt_index_observation_not_publisher_publication"
+                                )
+                            item_id = str(normalized["id"])
                             self.seen_ids.add(item_id)
-                            self.items.append(dict(item))
+                            self.items.append(normalized)
             except OSError:
                 continue
         self.items = self.items[-500:]
@@ -249,6 +294,17 @@ class GDELTCollector:
                 },
             )
             try:
+                # The anonymous DOC API is rate-limited. Keep a strict minimum
+                # five-second gap between every topic request in this process.
+                if self._last_request_monotonic is not None:
+                    elapsed = self._monotonic() - self._last_request_monotonic
+                    remaining = self._minimum_request_interval_seconds - elapsed
+                    if remaining > 0:
+                        self._sleep(remaining)
+                request_started = self._monotonic()
+                if not math_is_finite_nonnegative(request_started):
+                    raise RuntimeError("GDELT monotonic clock returned an invalid value")
+                self._last_request_monotonic = request_started
                 with urlopen(request, timeout=12) as response:
                     if getattr(response, "status", 200) != 200:
                         raise RuntimeError(f"GDELT API returned HTTP {response.status}")

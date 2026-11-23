@@ -745,6 +745,18 @@ class OfflineNewsPaperBot:
             current = current.replace(tzinfo=timezone.utc)
         current = current.astimezone(timezone.utc)
         snapshots = self.snapshot_provider.load(now=current)
+        market_universe_discovered = max(
+            0,
+            int(getattr(self.snapshot_provider, "last_discovered_market_count", len(snapshots)) or 0),
+        )
+        markets_selected_for_orderbooks = max(
+            0,
+            int(getattr(self.snapshot_provider, "last_selected_market_count", len(snapshots)) or 0),
+        )
+        market_orderbook_token_requests = max(
+            0,
+            int(getattr(self.snapshot_provider, "last_orderbook_token_requests", len(snapshots) * 2) or 0),
+        )
         # Persist the observation set before any paper decision is evaluated. A
         # storage error aborts this cycle rather than silently losing its audit trail.
         market_history = self.market_history_store.append_snapshots(snapshots, captured_at=current)
@@ -866,6 +878,11 @@ class OfflineNewsPaperBot:
         return {
             "mode": ENGINE_MODE, "dry_run": DRY_RUN, "live_execution_enabled": LIVE_EXECUTION_ENABLED,
             "markets_loaded": len(snapshots),
+            "market_universe_discovered": market_universe_discovered,
+            "markets_selected_for_orderbooks": markets_selected_for_orderbooks,
+            "market_orderbook_token_requests": market_orderbook_token_requests,
+            "market_snapshots_usable": len(snapshots),
+            "market_sampling_policy": "top_24h_volume_from_bounded_gamma_sample",
             "market_data_source": self.config.market_data_source,
             "market_history": market_history,
             "news_feeds_configured": int(news_result.get("feeds_configured") or 0),

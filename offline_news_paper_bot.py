@@ -760,6 +760,8 @@ class OfflineNewsPaperBot:
             "items_total_recent": 0,
             "topics_attempted": [],
             "topic_errors": [],
+            "topics_seen_in_archive": [],
+            "network_requests_made": 0,
         }
         gdelt_error_type: str | None = None
         if fetch_news and self.gdelt_collector is not None:
@@ -880,6 +882,7 @@ class OfflineNewsPaperBot:
             "gdelt_topics_succeeded": int(gdelt_result.get("topics_succeeded") or 0),
             "gdelt_topics_failed": int(gdelt_result.get("topics_failed") or 0),
             "gdelt_topics_seen_in_archive": list(gdelt_result.get("topics_seen_in_archive") or []),
+            "gdelt_topics_seen_in_archive_count": len(gdelt_result.get("topics_seen_in_archive") or []),
             "gdelt_network_requests_made": int(gdelt_result.get("network_requests_made", 0) or 0),
             "gdelt_items_added": int(gdelt_result.get("items_added") or 0),
             "gdelt_items_total_recent": int(gdelt_result.get("items_total_recent") or 0),

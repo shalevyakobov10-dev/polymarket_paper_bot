@@ -7,6 +7,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from offline_news_paper_bot import OfflineNewsPaperBot, PaperConfig
+from news_fusion import merge_news_sources
 
 
 class FakeNewsCollector:
@@ -503,6 +504,103 @@ class OfflineNewsPaperBotTests(unittest.TestCase):
                     self.assertEqual(signal["article_count"], 2)
                     self.assertFalse(result["live_execution_enabled"])
                     self.assertEqual(result["execution"], "none")
+                finally:
+                    bot.close()
+
+    def test_paper_cycle_deduplicates_rss_gdelt_article_and_preserves_publisher_time(self):
+        now = datetime.now(timezone.utc).replace(microsecond=0)
+        row = {
+            "market_id": "market-fed",
+            "question": "Will the Fed cut interest rates in December?",
+            "yes_token_id": "market-fed:YES",
+            "no_token_id": "market-fed:NO",
+            "observed_at": now.isoformat(),
+            "yes_price": 0.45, "no_price": 0.55,
+            "yes_bid": 0.44, "yes_ask": 0.46,
+            "no_bid": 0.54, "no_ask": 0.56,
+        }
+        rss = FakeNewsCollector([
+            {
+                "id": "rss-bbc",
+                "source": "BBC News - World",
+                "source_type": "rss_atom",
+                "publisher_id": "bbc",
+                "url": "https://www.bbc.com/news/123?utm_source=rss",
+                "source_language": "en",
+                "directional_analysis_supported": True,
+                "coverage_region": "global",
+                "title": "Fed holds interest rates steady",
+                "summary": "Officials left rates unchanged.",
+                "published_at": now.isoformat(),
+                "fetched_at": now.isoformat(),
+            },
+            {
+                "id": "rss-reuters",
+                "source": "Reuters",
+                "source_type": "rss_atom",
+                "publisher_id": "reuters",
+                "url": "https://www.reuters.com/world/456",
+                "source_language": "en",
+                "directional_analysis_supported": True,
+                "coverage_region": "global",
+                "title": "Fed holds interest rates steady",
+                "summary": "The central bank kept rates unchanged.",
+                "published_at": now.isoformat(),
+                "fetched_at": now.isoformat(),
+            },
+        ])
+        gdelt = FakeGDELTCollector([
+            {
+                "id": "gdelt-bbc",
+                "source": "bbc.com",
+                "source_type": "gdelt_doc_api",
+                "publisher_id": "bbc",
+                "url": "https://bbc.com/news/123#top",
+                "source_language": "en",
+                "language": "English",
+                "directional_analysis_supported": True,
+                "coverage_region": "US",
+                "title": "Fed holds interest rates steady",
+                "summary": "",
+                "published_at": "",
+                "indexed_at": now.isoformat(),
+                "fetched_at": now.isoformat(),
+                "topic_categories": ["macroeconomics_finance"],
+            }
+        ])
+        with tempfile.TemporaryDirectory() as folder:
+            with self._make_config(folder):
+                bot = OfflineNewsPaperBot(
+                    PaperConfig(),
+                    news_collector=rss,
+                    gdelt_collector=gdelt,
+                    snapshot_provider=StaticProvider(row),
+                )
+                try:
+                    result = bot.run_once(now=now, fetch_news=True)
+                    self.assertEqual(gdelt.calls, 1)
+                    self.assertEqual(result["news_items_considered"], 2)
+                    self.assertEqual(result["news_source_coverage"]["unique_article_count"], 2)
+                    self.assertEqual(result["news_source_coverage"]["distinct_publisher_count"], 2)
+                    self.assertEqual(
+                        result["news_source_coverage"]["articles_with_publisher_publication_time"],
+                        2,
+                    )
+                    self.assertEqual(result["news_source_coverage"]["articles_with_index_observation_time"], 1)
+                    self.assertIn("gdelt_doc_api", result["news_sources_used"])
+                    self.assertIn("rss_atom", result["news_sources_used"])
+                    self.assertEqual(result["qualified_event_signals"], 1)
+                    self.assertFalse(result["live_execution_enabled"])
+                    self.assertEqual(result["execution"], "none")
+
+                    merged_bbc = next(
+                        item for item in merge_news_sources(rss.items, gdelt.items)
+                        if item["publisher_id"] == "bbc"
+                    )
+                    self.assertEqual(merged_bbc["published_at"], now.isoformat())
+                    self.assertEqual(merged_bbc["indexed_at"], now.isoformat())
+                    self.assertEqual(merged_bbc["source_types"], ["gdelt_doc_api", "rss_atom"])
+                    self.assertTrue(merged_bbc["directional_analysis_supported"])
                 finally:
                     bot.close()
 

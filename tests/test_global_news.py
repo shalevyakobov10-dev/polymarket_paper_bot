@@ -92,6 +92,7 @@ class GDELTCollectorTests(unittest.TestCase):
                 snapshot = collector.read_archive_snapshot()
 
         self.assertEqual(snapshot["network_requests_made"], 0)
+        self.assertFalse(snapshot["poll_status_available"])
         self.assertEqual(snapshot["items_total_recent"], 2)
         second_snapshot = collector.read_archive_snapshot()
         self.assertEqual(second_snapshot["items_total_recent"], 2)
@@ -165,6 +166,8 @@ class GDELTCollectorTests(unittest.TestCase):
 
         self.assertEqual(mocked.call_count, 3)
         self.assertEqual(sleeps, [5.0, 5.0])
+        self.assertEqual(result["network_requests_made"], 3)
+        self.assertTrue(result["poll_status_available"])
         self.assertEqual(result["topics_succeeded"], 3)
         self.assertEqual(result["topics_failed"], 0)
 

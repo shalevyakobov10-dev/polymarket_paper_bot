@@ -492,7 +492,7 @@ class OfflineNewsPaperBotTests(unittest.TestCase):
                     self.assertEqual(result["gdelt_items_added"], 2)
                     self.assertEqual(result["news_items_considered"], 3)
                     self.assertEqual(result["news_languages_seen"], ["ar", "en"])
-                    self.assertEqual(result["news_regions_seen"], ["MENA", "US", "global"])
+                    self.assertEqual(result["news_regions_seen"], ["global", "mena", "us"])
                     self.assertEqual(result["news_non_english_items_unscored"], 1)
 
                     signal = bot._build_signals(

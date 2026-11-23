@@ -87,34 +87,77 @@ class LiveClobMarketSnapshotProvider:
         if isinstance(self.market_limit, bool) or not isinstance(self.market_limit, int) or not 1 <= self.market_limit <= 50:
             raise ValueError("market_limit must be an integer between 1 and 50")
         self.gamma_page_size = _bounded_int_env("PAPER_GAMMA_PAGE_SIZE", 200, 20, 200)
+        self.gamma_discovery_pages = _bounded_int_env("PAPER_GAMMA_DISCOVERY_PAGES", 3, 1, 5)
+        self.max_markets_per_category = _bounded_int_env("PAPER_MARKET_CATEGORY_MAX", 8, 1, 50)
         self.timeout_seconds = max(2.0, min(30.0, float(timeout_seconds)))
         self.last_discovered_market_count = 0
         self.last_selected_market_count = 0
         self.last_orderbook_token_requests = 0
         self.last_usable_market_count = 0
         self.last_selected_categories: list[str] = []
+        self.last_discovery_pages_attempted = 0
+        self.last_discovery_pages_succeeded = 0
+        self.last_discovery_pages_failed = 0
 
     def _discover_markets(self) -> list[dict[str, Any]]:
+        """Read a bounded multi-page Gamma sample; isolate page failures.
+
+        Gamma is sorted by reported 24-hour volume. The bounded pages improve
+        category breadth but are not the full active market universe.
+        """
         limit = self.gamma_page_size
-        query = urlencode({
-            "active": "true",
-            "closed": "false",
-            "limit": limit,
-            "offset": 0,
-            "order": "volume24hr",
-            "ascending": "false",
-        })
-        request = Request(
-            f"{GAMMA_MARKETS_URL}?{query}",
-            headers={"User-Agent": "PolymarketPaperResearchBot/1.0"},
+        pages = self.gamma_discovery_pages
+        combined: dict[str, dict[str, Any]] = {}
+        failures = 0
+        succeeded = 0
+        attempted = 0
+        for page in range(pages):
+            offset = page * limit
+            query = urlencode({
+                "active": "true",
+                "closed": "false",
+                "limit": limit,
+                "offset": offset,
+                "order": "volume24hr",
+                "ascending": "false",
+            })
+            request = Request(
+                f"{GAMMA_MARKETS_URL}?{query}",
+                headers={"User-Agent": "PolymarketPaperResearchBot/1.0"},
+            )
+            attempted += 1
+            try:
+                with urlopen(request, timeout=self.timeout_seconds) as response:
+                    if getattr(response, "status", 200) != 200:
+                        raise RuntimeError("Gamma API returned a non-200 response")
+                    payload = json.loads(response.read().decode("utf-8"))
+                if not isinstance(payload, list):
+                    raise ValueError("Gamma market response must be a list")
+                page_rows = [row for row in payload if isinstance(row, dict)]
+                succeeded += 1
+                for row in page_rows:
+                    identity = str(row.get("conditionId") or row.get("id") or "").strip()
+                    if identity:
+                        combined.setdefault(identity, row)
+                # No further page is available when the final result is short.
+                if len(payload) < limit:
+                    break
+            except Exception:
+                # Keep successful pages, but expose an incomplete-scan count.
+                failures += 1
+
+        self.last_discovery_pages_attempted = attempted
+        self.last_discovery_pages_succeeded = succeeded
+        self.last_discovery_pages_failed = failures
+        if succeeded == 0:
+            raise RuntimeError("Gamma market discovery failed for every configured page")
+
+        rows = list(combined.values())
+        rows.sort(
+            key=lambda row: _number(row.get("volume24hr")) or 0.0,
+            reverse=True,
         )
-        with urlopen(request, timeout=self.timeout_seconds) as response:
-            if getattr(response, "status", 200) != 200:
-                raise RuntimeError("Gamma API returned a non-200 response")
-            payload = json.loads(response.read().decode("utf-8"))
-        if not isinstance(payload, list):
-            raise ValueError("Gamma market response must be a list")
-        return [row for row in payload if isinstance(row, dict)]
+        return rows
 
     def load(self, *, now: datetime | None = None) -> list[dict[str, Any]]:
         current = now or datetime.now(timezone.utc)
@@ -157,9 +200,35 @@ class LiveClobMarketSnapshotProvider:
                 "gamma_yes_price": _number(prices[yes_index]),
                 "gamma_no_price": _number(prices[no_index]),
             })
-            if len(candidates) >= self.market_limit:
+        # Keep a bounded category-diverse watchlist: first take up to the
+        # configured quota from each category in volume order, then fill any
+        # remaining slots with the highest-volume candidates overall.
+        candidates_by_volume = sorted(
+            candidates,
+            key=lambda row: row.get("volume_24h") or 0.0,
+            reverse=True,
+        )
+        selected: list[dict[str, Any]] = []
+        selected_ids: set[str] = set()
+        category_counts: dict[str, int] = {}
+        for row in candidates_by_volume:
+            category = str(row.get("market_category") or "uncategorized")
+            if category_counts.get(category, 0) >= self.max_markets_per_category:
+                continue
+            selected.append(row)
+            selected_ids.add(row["market_id"])
+            category_counts[category] = category_counts.get(category, 0) + 1
+            if len(selected) >= self.market_limit:
                 break
-
+        if len(selected) < self.market_limit:
+            for row in candidates_by_volume:
+                if row["market_id"] in selected_ids:
+                    continue
+                selected.append(row)
+                selected_ids.add(row["market_id"])
+                if len(selected) >= self.market_limit:
+                    break
+        candidates = selected
         self.last_selected_market_count = len(candidates)
         self.last_selected_categories = sorted({
             str(row.get("market_category") or "uncategorized")

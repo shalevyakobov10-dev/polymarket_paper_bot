@@ -27,7 +27,7 @@ def _utc_now() -> str:
 
 
 def _poll_seconds(value: Any = None) -> int:
-    raw = value if value is not None else os.getenv("PAPER_POLL_SECONDS", "300")
+    raw = value if value is not None else os.getenv("PAPER_POLL_SECONDS", "60")
     try:
         parsed = int(raw)
     except (TypeError, ValueError, OverflowError):

@@ -284,6 +284,8 @@ class ParserTests(unittest.TestCase):
             "gdelt_error_type": None,
             "news_languages_seen": ["en", "ar", "es", "hi", "ja"],
             "news_regions_seen": ["global", "east_asia", "latin_america"],
+            "gdelt_topics_seen_in_archive_count": 9,
+            "gdelt_network_requests_made_last_cycle": 0,
         }
         healthy, payload = app.health_payload(core, now, paper_worker_snapshot=paper)
         self.assertTrue(healthy)
@@ -292,6 +294,8 @@ class ParserTests(unittest.TestCase):
         self.assertEqual(payload["components"]["event_paper_worker"]["gdelt_topics_succeeded_last_cycle"], 4)
         self.assertEqual(payload["components"]["event_paper_worker"]["news_languages_seen"], ["en", "ar", "es", "hi", "ja"])
         self.assertEqual(payload["components"]["event_paper_worker"]["news_non_english_items_unscored_last_cycle"], 138)
+        self.assertEqual(payload["components"]["event_paper_worker"]["gdelt_topics_seen_in_archive_count"], 9)
+        self.assertEqual(payload["components"]["event_paper_worker"]["gdelt_network_requests_made_last_cycle"], 0)
         self.assertNotIn("event_paper_worker", payload["degraded_components"])
 
         backup_degraded = {**paper, "backup_error_type": "OSError",
@@ -1215,7 +1219,8 @@ class ParserTests(unittest.TestCase):
             self.assertIn("/perps-account-supervisor", html)
             self.assertIn("Perps account supervision", html)
             self.assertIn("RSS feeds succeeded / configured", html)
-            self.assertIn("GDELT topics succeeded / configured", html)
+            self.assertIn("GDELT archive lanes represented / configured", html)
+            self.assertIn("GDELT duplicate requests in Paper cycle", html)
             self.assertIn("Non-English articles kept unscored", html)
             self.assertIn("Coverage tags (regions / countries)", html)
             self.assertIn("d.read_only_enforcement", html)

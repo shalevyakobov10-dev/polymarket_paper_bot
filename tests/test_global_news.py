@@ -56,6 +56,46 @@ class GDELTCollectorTests(unittest.TestCase):
         self.assertEqual(by_url["https://example.org/unknown"]["source_language"], "und")
         self.assertFalse(by_url["https://example.org/unknown"]["directional_analysis_supported"])
 
+    def test_shared_archive_snapshot_reads_persisted_articles_without_network(self):
+        rows = global_news.normalize_gdelt_articles({
+            "articles": [
+                {
+                    "title": "English article",
+                    "url": "https://example.org/english",
+                    "domain": "example.org",
+                    "language": "English",
+                    "sourcecountry": "US",
+                },
+                {
+                    "title": "Arabic article",
+                    "url": "https://example.org/arabic",
+                    "domain": "example.org",
+                    "language": "Arabic",
+                    "sourcecountry": "EG",
+                },
+            ]
+        }, topic_category="geopolitics_security")
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "gdelt_news.jsonl"
+            path.write_text(
+                "".join(__import__("json").dumps(row) + "\n" for row in rows),
+                encoding="utf-8",
+            )
+            collector = global_news.GDELTCollector(path)
+            with patch("global_news.urlopen", side_effect=AssertionError("archive reader must not poll network")):
+                snapshot = collector.read_archive_snapshot()
+
+        self.assertEqual(snapshot["network_requests_made"], 0)
+        self.assertEqual(snapshot["items_total_recent"], 2)
+        self.assertEqual(snapshot["topics_configured"], len(global_news.DEFAULT_TOPIC_QUERIES))
+        self.assertIn("geopolitics_security", snapshot["topics_seen_in_archive"])
+        self.assertEqual(snapshot["languages_seen"], ["ar", "en"])
+        self.assertEqual(snapshot["countries_seen"], ["eg", "us"])
+        self.assertEqual(
+            {row["timestamp_basis"] for row in snapshot["latest_items"]},
+            {"gdelt_index_observation_not_publisher_publication"},
+        )
+
     def test_normalizes_known_gdelt_publisher_domain(self):
         rows = global_news.normalize_gdelt_articles({
             "articles": [{

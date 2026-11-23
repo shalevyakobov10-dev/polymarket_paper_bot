@@ -40,7 +40,22 @@ DEFAULT_FEEDS = (
     {"source": "NPR - Top Stories", "url": "https://feeds.npr.org/1001/rss.xml"},
     {"source": "Deutsche Welle - Top Stories", "url": "https://rss.dw.com/rdf/rss-en-top"},
     {"source": "Sky News - World", "url": "https://feeds.skynews.com/feeds/rss/world.xml"},
-    {"source": "France 24 - English", "url": "https://www.france24.com/en/rss"},
+    {"source": "France 24 - English", "url": "https://www.france24.com/en/rss", "language": "en", "region": "global"},
+    # Multilingual regional wires. Original titles are preserved; they are not
+    # fed to the English-only directional event classifier without translation.
+    {"source": "BBC Arabic", "url": "https://feeds.bbci.co.uk/arabic/rss.xml", "language": "ar", "region": "middle_east_north_africa"},
+    {"source": "BBC Mundo", "url": "https://feeds.bbci.co.uk/mundo/rss.xml", "language": "es", "region": "latin_america"},
+    {"source": "BBC Hindi", "url": "https://feeds.bbci.co.uk/hindi/rss.xml", "language": "hi", "region": "south_asia"},
+    {"source": "NHK News Web", "url": "https://www.nhk.or.jp/rss/news/cat0.xml", "language": "ja", "region": "east_asia"},
+    {"source": "BBC Chinese", "url": "https://feeds.bbci.co.uk/zhongwen/simp/rss.xml", "language": "zh", "region": "east_asia"},
+    {"source": "BBC Russian", "url": "https://feeds.bbci.co.uk/russian/rss.xml", "language": "ru", "region": "eurasia"},
+    {"source": "BBC Turkish", "url": "https://feeds.bbci.co.uk/turkce/rss.xml", "language": "tr", "region": "middle_east_north_africa"},
+    {"source": "BBC Ukrainian", "url": "https://feeds.bbci.co.uk/ukrainian/rss.xml", "language": "uk", "region": "europe_eurasia"},
+    {"source": "BBC Portuguese", "url": "https://feeds.bbci.co.uk/portuguese/rss.xml", "language": "pt", "region": "latin_america"},
+    {"source": "France 24 - French", "url": "https://www.france24.com/fr/rss", "language": "fr", "region": "europe_africa"},
+    {"source": "Deutsche Welle - German", "url": "https://rss.dw.com/rdf/rss-de-top", "language": "de", "region": "europe"},
+    {"source": "CNA - Asia", "url": "https://www.channelnewsasia.com/api/v1/rss-outbound-feed?_format=xml&category=6511", "language": "en", "region": "south_east_asia"},
+    {"source": "CNA - World", "url": "https://www.channelnewsasia.com/api/v1/rss-outbound-feed?_format=xml&category=6311", "language": "en", "region": "global"},
 )
 
 MAX_FEED_BYTES = 1_000_000
@@ -248,6 +263,8 @@ def parse_feed(
     source: str,
     feed_url: str,
     fetched_at: str | None = None,
+    *,
+    feed_metadata: dict[str, Any] | None = None,
 ) -> list[dict[str, str]]:
     """Parse RSS 2.0 or Atom XML into bounded, attributed headline records."""
     if len(xml_data) > MAX_FEED_BYTES:
@@ -289,6 +306,11 @@ def parse_feed(
             "url": link,
             "published_at": published[:100],
             "fetched_at": observed_at,
+            "source_language": str((feed_metadata or {}).get("language") or "und")[:12].lower(),
+            "coverage_region": str((feed_metadata or {}).get("region") or "unspecified")[:48].lower(),
+            "directional_analysis_supported": (
+                str((feed_metadata or {}).get("language") or "und").lower() in {"en", "eng"}
+            ),
         })
     return records
 
@@ -777,7 +799,12 @@ class NewsCollector:
                 payload = response.read(MAX_FEED_BYTES + 1)
             if len(payload) > MAX_FEED_BYTES:
                 raise ValueError("Feed exceeded the 1 MB response limit")
-            return source, parse_feed(payload, source, url), None
+            return source, parse_feed(
+                payload,
+                source,
+                url,
+                feed_metadata=feed,
+            ), None
         except (HTTPError, URLError, TimeoutError, OSError, ValueError, RuntimeError) as exc:
             return source, [], {"source": source, "error": f"{type(exc).__name__}: {str(exc)[:240]}"}
         except Exception as exc:
@@ -809,6 +836,14 @@ class NewsCollector:
         self.items = self.items[-MAX_RECENT_ITEMS:]
         if len(self.seen_ids) > 20_000:
             self.seen_ids = {str(item["id"]) for item in self.items if item.get("id")}
+        successful_regions = sorted({
+            str(item.get("coverage_region") or "unspecified")
+            for item in added
+        })
+        configured_languages = sorted({
+            str(feed.get("language") or "und").lower()
+            for feed in self.feeds
+        })
         return {
             "feeds_configured": len(self.feeds),
             "feeds_succeeded": successes,
@@ -817,5 +852,12 @@ class NewsCollector:
             "items_added": len(added),
             "new_items": added,
             "items_total_recent": len(self.items),
+            "languages_configured": configured_languages,
+            "regions_with_new_items": successful_regions,
+            "directional_analysis_languages": ["en"],
+            "non_english_items_added": sum(
+                1 for item in added
+                if item.get("directional_analysis_supported") is not True
+            ),
             "latest_items": list(reversed(self.items[-MAX_RECENT_ITEMS:])),
         }

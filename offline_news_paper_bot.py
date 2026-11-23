@@ -143,7 +143,10 @@ class PaperConfig:
         self.market_history_database_path = Path(
             os.getenv("MARKET_HISTORY_DATABASE_PATH", "./data/market_history.sqlite3")
         )
-        self.news_log_path = Path(os.getenv("NEWS_LOG_PATH", "./data/offline_news_events.jsonl"))
+        self.news_log_path = Path(os.getenv(
+            "NEWS_LOG_PATH",
+            str(Path(os.getenv("DATA_DIR", "data")) / "news_events.jsonl"),
+        ))
         self.gdelt_log_path = Path(os.getenv(
             "GDELT_LOG_PATH",
             str(self.news_log_path.with_name("gdelt_news.jsonl")),
@@ -760,10 +763,38 @@ class OfflineNewsPaperBot:
         # Persist the observation set before any paper decision is evaluated. A
         # storage error aborts this cycle rather than silently losing its audit trail.
         market_history = self.market_history_store.append_snapshots(snapshots, captured_at=current)
-        news_result = (
-            self.news_collector.fetch_once()
-            if fetch_news else {"feeds_configured": 0, "feeds_succeeded": 0, "feeds_failed": 0}
-        )
+        news_result: dict[str, Any] = {
+            "source": "shared_rss_archive",
+            "poll_status_available": False,
+            "network_requests_made": 0,
+            "feeds_configured": len(getattr(self.news_collector, "feeds", ()) or ()),
+            "feeds_succeeded": 0,
+            "feeds_failed": 0,
+            "items_added": 0,
+            "items_total_recent": len(getattr(self.news_collector, "items", []) or []),
+        }
+        if fetch_news:
+            archive_reader = getattr(self.news_collector, "read_archive_snapshot", None)
+            fetcher = getattr(self.news_collector, "fetch_once", None)
+            if callable(archive_reader):
+                # Production Paper consumes the API-owned shared RSS archive.
+                # It must never issue a second set of requests for the same feeds.
+                news_result = archive_reader()
+            elif callable(fetcher):
+                # Injected one-shot collectors are retained for deterministic
+                # tests/research; report their poll path explicitly.
+                news_result = fetcher()
+                news_result.setdefault("poll_status_available", True)
+                news_result.setdefault(
+                    "network_requests_made",
+                    int(news_result.get("feeds_configured") or 0),
+                )
+            else:
+                # Minimal injected collectors can still contribute their current
+                # in-memory archive without any implicit network side effects.
+                news_result["items_total_recent"] = len(
+                    getattr(self.news_collector, "items", []) or []
+                )
         gdelt_result: dict[str, Any] = {
             "topics_configured": 0,
             "topics_succeeded": 0,
@@ -909,6 +940,9 @@ class OfflineNewsPaperBot:
             "news_feeds_configured": int(news_result.get("feeds_configured") or 0),
             "news_feeds_succeeded": int(news_result.get("feeds_succeeded") or 0),
             "news_feeds_failed": int(news_result.get("feeds_failed") or 0),
+            "news_poll_status_available": news_result.get("poll_status_available") is True,
+            "news_network_requests_made": int(news_result.get("network_requests_made") or 0),
+            "news_archive_items_total_recent": int(news_result.get("items_total_recent") or len(news_items)),
             "news_languages_seen": news_languages,
             "news_regions_seen": news_regions,
             "news_non_english_items_unscored": news_non_english,

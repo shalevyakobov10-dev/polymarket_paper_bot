@@ -59,6 +59,8 @@ class EventPaperWorkerTests(unittest.TestCase):
                 "gdelt_topics_succeeded": 4,
                 "gdelt_topics_failed": 0,
                 "gdelt_items_added": 87,
+                "gdelt_topics_seen_in_archive_count": 9,
+                "gdelt_network_requests_made": 0,
                 "gdelt_error_type": None,
                 "news_languages_seen": ["en", "ar", "es", "hi", "ja", "<script>"],
                 "news_regions_seen": ["global", "east_asia", "latin_america", "middle_east_north_africa", "MENA<script>"],
@@ -107,6 +109,8 @@ class EventPaperWorkerTests(unittest.TestCase):
             self.assertEqual(status["gdelt_topics_configured_last_cycle"], 18)
             self.assertEqual(status["gdelt_topics_succeeded_last_cycle"], 4)
             self.assertEqual(status["gdelt_items_added_last_cycle"], 87)
+            self.assertEqual(status["gdelt_topics_seen_in_archive_count"], 9)
+            self.assertEqual(status["gdelt_network_requests_made_last_cycle"], 0)
             self.assertEqual(status["news_languages_seen"], ["ar", "en", "es", "hi", "ja"])
             self.assertIn("middle_east_north_africa", status["news_regions_seen"])
             self.assertNotIn("<script>", status["news_languages_seen"])

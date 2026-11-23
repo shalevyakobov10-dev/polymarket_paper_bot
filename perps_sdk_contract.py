@@ -34,10 +34,9 @@ ASYNC_PERPS_SESSION_METHODS = frozenset({
     "fetch_account_config",
     "fetch_open_orders",
     "fetch_orders",
-    "list_funding_payments",
     "close",
 })
-SYNC_PERPS_SESSION_METHODS = frozenset({"list_fills"})
+SYNC_PERPS_SESSION_METHODS = frozenset({"list_fills", "list_funding_payments"})
 
 PERPS_SESSION_METHODS: dict[str, set[str]] = {
     "fetch_balances": set(),

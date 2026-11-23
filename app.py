@@ -1220,6 +1220,21 @@ def health_payload(
         paper_component["worker_state"] = paper_state
         paper_component["last_cycle_warning"] = paper_worker_snapshot.get("last_cycle_warning")
         paper_component["cycles"] = int(paper_worker_snapshot.get("cycles") or 0)
+        for metric in (
+            "news_feeds_configured_last_cycle",
+            "news_feeds_succeeded_last_cycle",
+            "news_feeds_failed_last_cycle",
+            "news_items_considered_last_cycle",
+            "news_non_english_items_unscored_last_cycle",
+            "gdelt_topics_configured_last_cycle",
+            "gdelt_topics_succeeded_last_cycle",
+            "gdelt_topics_failed_last_cycle",
+            "gdelt_items_added_last_cycle",
+        ):
+            paper_component[metric] = int(paper_worker_snapshot.get(metric) or 0)
+        paper_component["gdelt_error_type"] = paper_worker_snapshot.get("gdelt_error_type")
+        paper_component["news_languages_seen"] = list(paper_worker_snapshot.get("news_languages_seen") or [])
+        paper_component["news_regions_seen"] = list(paper_worker_snapshot.get("news_regions_seen") or [])
         paper_component["consecutive_failures"] = int(
             paper_worker_snapshot.get("consecutive_failures") or 0
         )

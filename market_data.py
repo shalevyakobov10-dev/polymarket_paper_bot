@@ -133,7 +133,7 @@ def fetch_order_books(rows: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
             value = default
         return min(maximum, max(minimum, value))
 
-    limit = bounded_env("ORDERBOOK_TOKENS_PER_POLL", 20, 0, 100)
+    limit = bounded_env("ORDERBOOK_TOKENS_PER_POLL", 40, 0, 100)
     if limit == 0:
         return {}
     workers = bounded_env("ORDERBOOK_FETCH_WORKERS", 4, 1, 8)

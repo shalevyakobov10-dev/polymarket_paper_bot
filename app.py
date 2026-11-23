@@ -44,9 +44,9 @@ try:
 except (ValueError, TypeError):
     EVENT_PAPER_POLL_SECONDS = 300
 try:
-    NEWS_POLL_SECONDS = min(3600, max(60, int(os.getenv("NEWS_POLL_SECONDS", "300"))))
+    NEWS_POLL_SECONDS = min(3600, max(60, int(os.getenv("NEWS_POLL_SECONDS", "60"))))
 except (ValueError, TypeError):
-    NEWS_POLL_SECONDS = 300
+    NEWS_POLL_SECONDS = 60
 try:
     RESOLUTION_POLL_SECONDS = min(3600, max(300, int(os.getenv("RESOLUTION_POLL_SECONDS", "900"))))
 except (ValueError, TypeError):

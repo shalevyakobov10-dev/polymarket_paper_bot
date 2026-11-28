@@ -51,8 +51,9 @@ class PortfolioAdmissionTests(unittest.TestCase):
         first = self.reserve("poly-1")
         again = self.reserve("poly-1")
         self.assertTrue(first.approved)
-        self.assertTrue(again.approved)
-        self.assertEqual(again.reason, "idempotent_existing_reservation")
+        self.assertFalse(again.approved)
+        self.assertEqual(again.reason, "idempotent_existing_reservation_no_new_entry")
+        self.assertEqual(again.status, "PENDING")
         self.assertEqual(first.status, "PENDING")
 
     def test_idempotency_key_cannot_change_payload(self):

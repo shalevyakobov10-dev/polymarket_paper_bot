@@ -60,7 +60,7 @@ def execution_readiness_payload() -> dict[str, Any]:
             "detail": (
                 "The Perps IOC/FOK limit gateway is not connected to the Perps "
                 "strategy worker or an operator-facing execution service. "
-                "The gateway has no independent per-order geoblock check and repeats it immediately before durable submission intent."
+                "It checks the official geoblock before account reads and repeats the check immediately before durable submission intent; this is not proof of production-host eligibility."
             ),
         },
         {

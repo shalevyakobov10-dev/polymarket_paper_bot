@@ -44,6 +44,7 @@ footer{margin-top:24px;color:var(--muted);font-size:12px}
 <article class="card" id="card-perps-account-supervisor"><h2>Perps account supervision</h2><div class="empty">Loading status…</div></article>
 <article class="card" id="card-perps-paper"><h2>Perps Paper engine</h2><div class="empty">Loading status…</div></article>
 <article class="card" id="card-event-paper"><h2>Event Paper engine</h2><div class="empty">Loading status…</div></article>
+<article class="card" id="card-unified-paper-risk"><h2>Unified Paper risk</h2><div class="empty">Loading status…</div></article>
 <article class="card" id="card-execution-readiness"><h2>Live execution readiness</h2><div class="empty">Loading status…</div></article>
 <article class="card" id="card-event-release"><h2>Event-market live release gates</h2><div class="empty">Loading status…</div></article>
 <article class="card" id="card-release"><h2>Perps live release gates</h2><div class="empty">Loading status…</div></article>
@@ -61,6 +62,7 @@ const sources=[
  {id:"perps-account-supervisor",url:"/perps-account-supervisor",title:"Perps account supervision"},
  {id:"perps-paper",url:"/perps-paper",title:"Perps Paper engine"},
  {id:"event-paper",url:"/event-paper",title:"Event Paper engine"},
+ {id:"unified-paper-risk",url:"/unified-paper-risk",title:"Unified Paper risk"},
  {id:"execution-readiness",url:"/execution-readiness",title:"Live execution readiness"},
  {id:"event-release",url:"/event-live-gate",title:"Event-market live release gates"},
  {id:"release",url:"/perps-live-gate",title:"Perps live release gates"},
@@ -112,6 +114,32 @@ function metricEntries(id,d){
    ["GDELT topic lanes represented",g.topic_categories_seen],
    ["Non-English GDELT articles archived",g.non_english_items_total_recent],
    ["GDELT last error",g.last_error]
+  ]};
+ }
+ if(id==="unified-paper-risk"){
+  const status=d.available===true&&d.snapshot_complete===true&&d.marks_fresh===true?"healthy":"degraded";
+  return {status,rows:[
+   ["Snapshot available",d.available],
+   ["Complete and fresh",String(!!d.snapshot_complete)+" / "+String(!!d.marks_fresh)],
+   ["Captured at (UTC)",d.captured_at_utc],
+   ["UTC day",d.utc_day],
+   ["Combined equity (USD)",d.combined_equity],
+   ["Polymarket equity (USD)",d.polymarket_equity],
+   ["Perps equity (USD)",d.perps_equity],
+   ["Combined daily PnL (USD)",d.combined_daily_pnl],
+   ["Realized daily PnL — Event / Perps",String(d.polymarket_realized_today??"—")+" / "+String(d.perps_realized_today??"—")],
+   ["Unrealized PnL — Event / Perps",String(d.polymarket_unrealized_pnl??"—")+" / "+String(d.perps_unrealized_pnl??"—")],
+   ["Combined open exposure (USD)",d.combined_open_exposure],
+   ["Open positions",d.combined_open_positions],
+   ["Perps isolated margin used (USD)",d.perps_margin_used],
+   ["Freshest / stalest mark age (s)",String(d.freshest_mark_age_seconds??"—")+" / "+String(d.stalest_mark_age_seconds??"—")],
+   ["Cross-venue mark skew (s)",d.cross_venue_mark_skew_seconds],
+   ["Perps account halted",d.perps_halted],
+   ["Combined starting capital",d.combined_starting_capital],
+   ["Combined peak / drawdown",String(d.combined_peak_equity??"Unavailable")+" / "+String(d.combined_drawdown_pct??"Unavailable")],
+   ["Shared admission gate connected",d.shared_admission_gate_connected],
+   ["Order admission allowed",d.order_admission_allowed],
+   ["Reason / unavailable code",d.reason_code]
   ]};
  }
  if(id==="perps-paper"){

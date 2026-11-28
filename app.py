@@ -1279,14 +1279,34 @@ def health_payload(
             paper_worker_snapshot.get("backup_files_last_run") or 0
         )
         paper_component["backup_error_type"] = paper_worker_snapshot.get("backup_error_type")
+        paper_component["event_order_journal_present"] = (
+            paper_worker_snapshot.get("event_order_journal_present") is True
+        )
+        paper_component["event_order_journal_path_valid"] = (
+            paper_worker_snapshot.get("event_order_journal_path_valid") is True
+        )
+        paper_component["event_order_journal_backed_up"] = (
+            paper_worker_snapshot.get("event_order_journal_backed_up") is True
+        )
         paper_component["backup_consecutive_failures"] = int(
             paper_worker_snapshot.get("backup_consecutive_failures") or 0
         )
         paper_component["backup_retry_delay_seconds"] = float(
             paper_worker_snapshot.get("backup_retry_delay_seconds") or 0.0
         )
+        event_journal_backup_blocked = (
+            paper_component["event_order_journal_present"]
+            and (
+                not paper_component["event_order_journal_path_valid"]
+                or not paper_component["event_order_journal_backed_up"]
+            )
+        )
         if (
-            (paper_state == "degraded" or paper_worker_snapshot.get("backup_error_type"))
+            (
+                paper_state == "degraded"
+                or paper_worker_snapshot.get("backup_error_type")
+                or event_journal_backup_blocked
+            )
             and paper_component["status"] == "healthy"
         ):
             paper_component["status"] = "degraded"

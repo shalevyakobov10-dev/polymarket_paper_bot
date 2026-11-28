@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import multiprocessing
 import tempfile
 import threading
 import unittest
@@ -7,6 +8,23 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from portfolio_admission import PortfolioAdmissionCoordinator, PortfolioAdmissionError
+
+
+def _reserve_from_process(database_path, admission_id, venue, barrier, output):
+    try:
+        coordinator = PortfolioAdmissionCoordinator(database_path)
+        barrier.wait(timeout=10)
+        result = coordinator.reserve(
+            admission_id=admission_id, venue=venue, exposure_usd="60", positions=1,
+            snapshot_exposure_usd="0", snapshot_positions=0,
+            snapshot_at=datetime(2026, 11, 28, 12, tzinfo=timezone.utc),
+            max_snapshot_age_seconds=120, max_total_exposure_usd="100",
+            max_total_positions=3,
+            now=datetime(2026, 11, 28, 12, tzinfo=timezone.utc),
+        )
+        output.put(("ok", result.approved, result.reason))
+    except Exception as exc:
+        output.put(("error", type(exc).__name__, str(exc)))
 
 
 class PortfolioAdmissionTests(unittest.TestCase):
@@ -151,6 +169,30 @@ class PortfolioAdmissionTests(unittest.TestCase):
         self.assertFalse(any(thread.is_alive() for thread in threads))
         self.assertEqual(errors, [])
         self.assertEqual(sum(result.approved for result in results), 1)
+
+    def test_separate_processes_cannot_overallocate_shared_database(self):
+        context = multiprocessing.get_context("spawn")
+        barrier = context.Barrier(2)
+        output = context.Queue()
+        processes = [
+            context.Process(
+                target=_reserve_from_process,
+                args=(str(self.path), "poly-process", "POLYMARKET", barrier, output),
+            ),
+            context.Process(
+                target=_reserve_from_process,
+                args=(str(self.path), "perps-process", "PERPS", barrier, output),
+            ),
+        ]
+        for process in processes:
+            process.start()
+        for process in processes:
+            process.join(timeout=20)
+        self.assertFalse(any(process.is_alive() for process in processes))
+        self.assertEqual([process.exitcode for process in processes], [0, 0])
+        results = [output.get(timeout=2) for _ in processes]
+        self.assertTrue(all(result[0] == "ok" for result in results), results)
+        self.assertEqual(sum(bool(result[1]) for result in results), 1, results)
 
     def test_storage_reopen_preserves_pending_reservation(self):
         self.reserve("poly-1", exposure="60")

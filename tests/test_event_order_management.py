@@ -54,6 +54,7 @@ class FakeSession:
         self.orders = {order.id: order for order in orders}
         self.cancel_calls = []
         self.cancel_all_calls = 0
+        self.cancel_all_raises_after_action = False
         self.cancel_result_override = None
         self.leave_open_on_cancel = False
         self.raise_after_cancel = False
@@ -82,6 +83,8 @@ class FakeSession:
             for order in self.orders.values():
                 if str(order.status).upper() == "LIVE":
                     order.status = "CANCELLED"
+        if self.cancel_all_raises_after_action:
+            raise RuntimeError("simulated cancel-all response loss")
         return SimpleNamespace(
             canceled=tuple(self.orders), not_canceled={}
         )
@@ -204,6 +207,21 @@ class EventOrderOperationsTests(unittest.TestCase):
         self.assertEqual(result["state"], "manual_review")
         self.assertEqual(result["untracked_order_ids"], ["manual-order"])
         self.assertEqual(result["open_order_ids_after_cancel"], [])
+
+    def test_cancel_all_response_loss_is_reconciled_by_reads_without_retry(self):
+        self.session.cancel_all_raises_after_action = True
+        result = self.manager.cancel_all(confirmation=CANCEL_ALL_ACKNOWLEDGEMENT)
+        self.assertEqual(result["state"], "cancelled_all_verified")
+        self.assertEqual(
+            result["reason_code"],
+            "cancel_all_response_lost_but_readback_verified",
+        )
+        self.assertEqual(self.session.cancel_all_calls, 1)
+        self.assertEqual(
+            self.journal.get_intent("client-venue-order-1")["status"],
+            "cancelled",
+        )
+        self.assertFalse(result["automatic_retry_permitted"])
 
     def test_cancel_all_does_not_claim_success_when_orders_remain_open(self):
         self.session.leave_open_on_cancel = True

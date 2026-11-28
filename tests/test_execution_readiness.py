@@ -44,6 +44,19 @@ class ExecutionReadinessTests(unittest.TestCase):
         self.assertFalse(perps["runtime_enabled"])
         self.assertFalse(report["order_submission_allowed"])
 
+    def test_event_order_management_is_present_but_not_operationally_enabled(self):
+        operations = execution_readiness_payload()["event_order_management"]
+        self.assertTrue(operations["adapter_code_present"])
+        self.assertTrue(operations["supports_open_order_reads"])
+        self.assertTrue(operations["supports_cancel_one"])
+        self.assertTrue(operations["supports_cancel_all"])
+        self.assertTrue(operations["readback_verification"])
+        self.assertTrue(operations["shared_submission_cancel_lock"])
+        self.assertTrue(operations["requires_explicit_confirmation"])
+        self.assertFalse(operations["runtime_enabled"])
+        self.assertFalse(operations["integrated_into_operator_service"])
+        self.assertFalse(operations["new_order_submission_allowed"])
+
     def test_shared_paper_admission_is_reported_as_not_integrated(self):
         risk = execution_readiness_payload()["shared_paper_risk"]
         self.assertTrue(risk["coordinator_code_present"])
@@ -85,6 +98,7 @@ class ExecutionReadinessTests(unittest.TestCase):
         expected = {
             "live_execution_disabled_by_default",
             "event_source_release_gates_closed",
+            "event_order_management_not_integrated",
             "event_gateway_not_integrated",
             "perps_gateway_not_integrated",
             "perps_source_release_gates_closed",

@@ -45,6 +45,7 @@ footer{margin-top:24px;color:var(--muted);font-size:12px}
 <article class="card" id="card-perps-paper"><h2>Perps Paper engine</h2><div class="empty">Loading status…</div></article>
 <article class="card" id="card-event-paper"><h2>Event Paper engine</h2><div class="empty">Loading status…</div></article>
 <article class="card" id="card-execution-readiness"><h2>Live execution readiness</h2><div class="empty">Loading status…</div></article>
+<article class="card" id="card-event-release"><h2>Event-market live release gates</h2><div class="empty">Loading status…</div></article>
 <article class="card" id="card-release"><h2>Perps live release gates</h2><div class="empty">Loading status…</div></article>
 <article class="card" id="card-supervisor"><h2>Service supervisor</h2><div class="empty">Loading status…</div></article>
 </section>
@@ -61,6 +62,7 @@ const sources=[
  {id:"perps-paper",url:"/perps-paper",title:"Perps Paper engine"},
  {id:"event-paper",url:"/event-paper",title:"Event Paper engine"},
  {id:"execution-readiness",url:"/execution-readiness",title:"Live execution readiness"},
+ {id:"event-release",url:"/event-live-gate",title:"Event-market live release gates"},
  {id:"release",url:"/perps-live-gate",title:"Perps live release gates"},
  {id:"supervisor",url:"/service-supervisor",title:"Service supervisor"}
 ];
@@ -205,8 +207,11 @@ function metricEntries(id,d){
   const blockers=(d.blockers||[]).map(item=>[item.code,item.detail]);
   return {status:d.status||"blocked",rows,extra:blockers};
  }
- if(id==="release"){
-  const gates=d.release_gates||{};return {status:d.all_release_gates_passed?"healthy":"blocked",rows:[["All source gates passed",d.all_release_gates_passed],["Runtime flags passed",d.runtime_flags_passed],["Eligible for separate review",d.eligible_for_separate_gateway_review],["Order submission allowed",d.order_submission_allowed]],extra:Object.entries(gates).map(([name,value])=>[name,value&&value.passed===true])};
+ if(id==="event-release"||id==="release"){
+  const gates=d.release_gates||{};
+  const rows=[["All source gates passed",d.all_release_gates_passed],["Eligible for separate review",d.eligible_for_separate_gateway_review],["Order submission allowed",d.order_submission_allowed]];
+  if(id==="release")rows.splice(1,0,["Runtime flags passed",d.runtime_flags_passed]);
+  return {status:d.all_release_gates_passed?"healthy":"blocked",rows,extra:Object.entries(gates).map(([name,value])=>[name,value&&value.passed===true])};
  }
  if(id==="supervisor")return {status:d.service_state,rows:[["Supervised",d.supervised],["Status fresh",d.status_fresh],["Service state",d.service_state],["Monitor state",d.monitor_state],["Event Paper worker",d.event_paper_worker_state],["Perps worker",d.perps_market_worker_state],["Perps account worker",d.perps_account_supervisor_state],["Perps account restarts",d.perps_account_supervisor_restart_count],["Restart count",d.restart_count],["Execution",d.execution]]};
  return {status:"unknown",rows:[]};

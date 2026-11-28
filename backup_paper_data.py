@@ -97,6 +97,8 @@ def create_paper_data_backups(
     seen_sources: set[Path] = set()
     for raw in database_paths:
         source = Path(raw).expanduser()
+        if source.is_symlink():
+            raise ValueError("database source must not be a symlink")
         try:
             resolved = source.resolve(strict=True)
         except FileNotFoundError:

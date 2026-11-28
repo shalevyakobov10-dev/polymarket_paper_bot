@@ -38,7 +38,7 @@ class ExecutionReadinessTests(unittest.TestCase):
         self.assertTrue(perps["adapter_code_present"])
         self.assertFalse(perps["integrated_into_strategy_worker"])
         self.assertEqual(perps["supported_time_in_force"], ["IOC", "FOK"])
-        self.assertFalse(perps["per_order_geoblock_check"])
+        self.assertTrue(perps["per_order_geoblock_check"])
         self.assertFalse(perps["source_controlled_release_gates_passed"])
         self.assertFalse(perps["runtime_enabled"])
         self.assertFalse(report["order_submission_allowed"])

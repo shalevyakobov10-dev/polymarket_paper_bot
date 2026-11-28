@@ -101,6 +101,26 @@ class PaperAdmissionTicket:
 
 
 @dataclass(frozen=True)
+class PaperAdmissionCommit:
+    """Result of a serialized Paper ledger write and exact reconciliation."""
+
+    ticket: PaperAdmissionTicket
+    ledger_result: Any
+    ledger_entry_id: str
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "venue": self.ticket.venue,
+            "admission_id": self.ticket.admission_id,
+            "reservation_status": self.ticket.result.status,
+            "ledger_entry_id": self.ledger_entry_id,
+            "order_submission_allowed": False,
+            "live_execution_enabled": False,
+            "execution": "none",
+        }
+
+
+@dataclass(frozen=True)
 class PaperAdmissionRecoveryReport:
     scanned: int
     reconciled: tuple[str, ...]
@@ -298,6 +318,11 @@ class PaperAdmissionRuntime:
         self, *, venue: str, source_identity: str, strategy_version: str,
         exposure_usd: Any, positions: int = 1, now: datetime | None = None,
     ) -> PaperAdmissionTicket:
+        """Low-level reservation only.
+
+        This method does not hold the cross-process lock through the venue
+        ledger write. Entry paths must use reserve_commit_and_reconcile().
+        """
         captured = now or datetime.now(timezone.utc)
         if captured.tzinfo is None or captured.utcoffset() is None:
             raise PaperAdmissionRuntimeError("now_must_be_timezone_aware")
@@ -354,52 +379,117 @@ class PaperAdmissionRuntime:
             snapshot_at_utc=snapshot.captured_at_utc,
         )
 
+    def reserve_commit_and_reconcile(
+        self, *, venue: str, source_identity: str, strategy_version: str,
+        exposure_usd: Any, write_ledger: Callable[[str], Any],
+        now: datetime | None = None,
+    ) -> PaperAdmissionCommit:
+        """Hold one OS lock from snapshot/reserve through ledger commit/reconcile.
+
+        write_ledger(admission_id) must insert the exact ID into the corresponding
+        Paper ledger and commit before returning. The runtime then independently
+        reads that ledger and reconciles exact identity and notional while the
+        lock is still held. No venue network or order call is made here.
+        """
+        if not callable(write_ledger):
+            raise PaperAdmissionRuntimeError("admission_ledger_writer_not_callable")
+        with self._exclusive_admission_lock():
+            ticket = self.reserve(
+                venue=venue,
+                source_identity=source_identity,
+                strategy_version=strategy_version,
+                exposure_usd=exposure_usd,
+                now=now,
+            )
+            if not ticket.result.approved:
+                raise PaperAdmissionRuntimeError(
+                    f"admission_denied:{ticket.result.reason}"
+                )
+            try:
+                ledger_result = write_ledger(ticket.admission_id)
+            except Exception as write_error:
+                try:
+                    self.coordinator.release_admission_if_absent_from_ledger(
+                        ticket.admission_id,
+                        ledger_database_path=ticket.ledger_database_path,
+                        now=now,
+                    )
+                except PortfolioAdmissionError:
+                    raise PaperAdmissionRuntimeError(
+                        "admission_write_failed_reservation_retained_for_recovery"
+                    ) from write_error
+                raise PaperAdmissionRuntimeError(
+                    f"admission_ledger_write_failed:{type(write_error).__name__}"
+                ) from None
+
+            try:
+                entry_id = self.coordinator.reconcile_admission_from_ledger(
+                    ticket.admission_id,
+                    ledger_database_path=ticket.ledger_database_path,
+                    now=now,
+                )
+            except PortfolioAdmissionError as exc:
+                raise PaperAdmissionRuntimeError(
+                    f"admission_commit_unreconciled:{str(exc)[:120]}"
+                ) from None
+            return PaperAdmissionCommit(
+                ticket=ticket,
+                ledger_result=ledger_result,
+                ledger_entry_id=entry_id,
+            )
+
     def reconcile(self, ticket: PaperAdmissionTicket, *, now: datetime | None = None) -> str:
         if not isinstance(ticket, PaperAdmissionTicket) or not ticket.result.approved:
             raise PaperAdmissionRuntimeError("admission_ticket_not_approved")
-        try:
-            return self.coordinator.reconcile_admission_from_ledger(
-                ticket.admission_id,
-                ledger_database_path=ticket.ledger_database_path,
-                now=now,
-            )
-        except PortfolioAdmissionError as exc:
-            raise PaperAdmissionRuntimeError(
-                f"admission_reconciliation_unresolved:{str(exc)[:120]}"
-            ) from None
-
-    def recover_unresolved(self, *, now: datetime | None = None) -> PaperAdmissionRecoveryReport:
-        """Reconcile exact persisted entries; never auto-release a missing one."""
-        rows = self.coordinator.list_unresolved(limit=1000)
-        reconciled: list[str] = []
-        still_pending: list[str] = []
-        blocked: list[str] = []
-        for row in rows:
-            admission_id = row["admission_id"]
-            venue = row["venue"]
-            ledger_path = (
-                self.polymarket_db_path if venue == "POLYMARKET"
-                else self.perps_db_path if venue == "PERPS"
-                else None
-            )
-            if ledger_path is None:
-                blocked.append(admission_id)
-                continue
+        with self._exclusive_admission_lock():
             try:
-                self.coordinator.reconcile_admission_from_ledger(
-                    admission_id,
-                    ledger_database_path=ledger_path,
+                return self.coordinator.reconcile_admission_from_ledger(
+                    ticket.admission_id,
+                    ledger_database_path=ticket.ledger_database_path,
                     now=now,
                 )
-                reconciled.append(admission_id)
             except PortfolioAdmissionError as exc:
-                if "ledger_entry_not_found" in str(exc):
-                    still_pending.append(admission_id)
-                else:
+                raise PaperAdmissionRuntimeError(
+                    f"admission_reconciliation_unresolved:{str(exc)[:120]}"
+                ) from None
+
+    def recover_unresolved(self, *, now: datetime | None = None) -> PaperAdmissionRecoveryReport:
+        """Reconcile exact persisted entries under the cross-process lock.
+
+        Missing entries remain risk-consuming for operator review. This method
+        never auto-releases, places, signs, or cancels an order.
+        """
+        with self._exclusive_admission_lock():
+            rows = self.coordinator.list_unresolved(limit=1000)
+            reconciled: list[str] = []
+            still_pending: list[str] = []
+            blocked: list[str] = []
+            for row in rows:
+                admission_id = row["admission_id"]
+                venue = row["venue"]
+                ledger_path = (
+                    self.polymarket_db_path if venue == "POLYMARKET"
+                    else self.perps_db_path if venue == "PERPS"
+                    else None
+                )
+                if ledger_path is None:
                     blocked.append(admission_id)
-        return PaperAdmissionRecoveryReport(
-            scanned=len(rows),
-            reconciled=tuple(reconciled),
-            still_pending=tuple(still_pending),
-            blocked=tuple(blocked),
-        )
+                    continue
+                try:
+                    self.coordinator.reconcile_admission_from_ledger(
+                        admission_id,
+                        ledger_database_path=ledger_path,
+                        now=now,
+                    )
+                    reconciled.append(admission_id)
+                except PortfolioAdmissionError as exc:
+                    if "ledger_entry_not_found" in str(exc):
+                        still_pending.append(admission_id)
+                    else:
+                        blocked.append(admission_id)
+            return PaperAdmissionRecoveryReport(
+                scanned=len(rows),
+                reconciled=tuple(reconciled),
+                still_pending=tuple(still_pending),
+                blocked=tuple(blocked),
+            )

@@ -35,6 +35,7 @@ from perps_account_supervisor import (
     perps_account_supervisor_freshness,
 )
 from perps_live_release_gate import evaluate_perps_live_release_gate
+from event_live_release_gate import evaluate_event_live_release_gate
 from control_center import CONTROL_CENTER_HTML
 
 GAMMA_URL = "https://gamma-api.polymarket.com/markets"
@@ -1567,7 +1568,7 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         if self.path in ("/control-center", "/control-center/"):
             self._send_html(200, CONTROL_CENTER_HTML)
-        elif self.path in ("/", "/status", "/health", "/paper", "/news", "/matches", "/market-stream", "/resolutions", "/forecast-evaluation", "/research-features", "/independent-model-evaluation", "/model-forecasts", "/learning", "/execution-readiness", "/service-supervisor", "/event-paper", "/perps-market", "/perps-paper", "/perps-account-supervisor", "/perps-live-gate"):
+        elif self.path in ("/", "/status", "/health", "/paper", "/news", "/matches", "/market-stream", "/resolutions", "/forecast-evaluation", "/research-features", "/independent-model-evaluation", "/model-forecasts", "/learning", "/execution-readiness", "/service-supervisor", "/event-paper", "/perps-market", "/perps-paper", "/perps-account-supervisor", "/perps-live-gate", "/event-live-gate"):
             with _lock:
                 snapshot = dict(_state)
             if self.path == "/health":
@@ -1903,6 +1904,14 @@ class Handler(BaseHTTPRequestHandler):
                 self._send(200, payload)
             elif self.path == "/perps-live-gate":
                 payload = evaluate_perps_live_release_gate()
+                payload.update({
+                    "read_only": True,
+                    "private_credentials_loaded": False,
+                    "order_signing_allowed": False,
+                })
+                self._send(200, payload)
+            elif self.path == "/event-live-gate":
+                payload = evaluate_event_live_release_gate()
                 payload.update({
                     "read_only": True,
                     "private_credentials_loaded": False,

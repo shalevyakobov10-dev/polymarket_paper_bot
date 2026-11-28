@@ -295,6 +295,269 @@ class PortfolioAdmissionCoordinator:
         finally:
             ledger.close()
 
+    @staticmethod
+    def _find_ledger_entry_by_admission(
+        *, venue: str, ledger_database_path: str | Path,
+        admission_id: str, expected_exposure: Decimal,
+        coordinator_path: Path,
+    ) -> str:
+        """Find exactly one ledger row carrying this immutable reservation ID."""
+        if not isinstance(admission_id, str) or not admission_id.strip() or len(admission_id) > 160:
+            raise PortfolioAdmissionError("admission_id_invalid")
+        candidate = Path(ledger_database_path).expanduser()
+        if candidate.is_symlink() or not candidate.is_file():
+            raise PortfolioAdmissionError("ledger_database_missing_or_unsafe")
+        try:
+            resolved = candidate.resolve(strict=True)
+            if resolved == coordinator_path.expanduser().resolve():
+                raise PortfolioAdmissionError("ledger_database_must_be_distinct")
+            uri = f"file:{quote(str(resolved), safe='/')}?mode=ro"
+            ledger = sqlite3.connect(uri, uri=True, timeout=2.0)
+            ledger.row_factory = sqlite3.Row
+            ledger.execute("PRAGMA query_only=ON")
+            ledger.execute("PRAGMA busy_timeout=2000")
+        except PortfolioAdmissionError:
+            raise
+        except (OSError, sqlite3.Error, ValueError):
+            raise PortfolioAdmissionError("ledger_database_unavailable") from None
+
+        try:
+            if venue == "POLYMARKET":
+                table = "trades"
+                id_column = "trade_id"
+                required = {"trade_id", "notional", "status", "admission_id"}
+                columns = {
+                    str(row["name"])
+                    for row in ledger.execute(f"PRAGMA table_info({table})").fetchall()
+                }
+                if not required.issubset(columns):
+                    raise PortfolioAdmissionError("polymarket_ledger_admission_schema_incomplete")
+                rows = ledger.execute(
+                    "SELECT trade_id,notional,status FROM trades WHERE admission_id=? LIMIT 2",
+                    (admission_id,),
+                ).fetchall()
+                if len(rows) != 1:
+                    if not rows:
+                        raise PortfolioAdmissionError("ledger_entry_not_found")
+                    raise PortfolioAdmissionError("ledger_admission_id_not_unique")
+                row = rows[0]
+                if str(row["status"]) not in {"OPEN", "CLOSED"}:
+                    raise PortfolioAdmissionError("ledger_entry_status_invalid")
+                actual_exposure = _amount(row["notional"], "ledger_entry_notional")
+            elif venue == "PERPS":
+                table = "perps_paper_positions"
+                id_column = "position_id"
+                required = {"position_id", "quantity", "entry_price", "status", "admission_id"}
+                columns = {
+                    str(row["name"])
+                    for row in ledger.execute(f"PRAGMA table_info({table})").fetchall()
+                }
+                if not required.issubset(columns):
+                    raise PortfolioAdmissionError("perps_ledger_admission_schema_incomplete")
+                rows = ledger.execute(
+                    "SELECT position_id,quantity,entry_price,status "
+                    "FROM perps_paper_positions WHERE admission_id=? LIMIT 2",
+                    (admission_id,),
+                ).fetchall()
+                if len(rows) != 1:
+                    if not rows:
+                        raise PortfolioAdmissionError("ledger_entry_not_found")
+                    raise PortfolioAdmissionError("ledger_admission_id_not_unique")
+                row = rows[0]
+                if str(row["status"]) not in {"OPEN", "CLOSED", "LIQUIDATED"}:
+                    raise PortfolioAdmissionError("ledger_entry_status_invalid")
+                quantity = _amount(row["quantity"], "ledger_entry_quantity")
+                entry_price = _amount(row["entry_price"], "ledger_entry_price")
+                if quantity <= 0 or entry_price <= 0:
+                    raise PortfolioAdmissionError("ledger_entry_size_invalid")
+                actual_exposure = quantity * entry_price
+            else:
+                raise PortfolioAdmissionError("venue_invalid")
+
+            tolerance = max(
+                Decimal("0.00000001"),
+                expected_exposure * Decimal("0.00000001"),
+            )
+            if actual_exposure <= 0 or abs(actual_exposure - expected_exposure) > tolerance:
+                raise PortfolioAdmissionError("ledger_entry_exposure_mismatch")
+            return str(row[id_column])
+        except PortfolioAdmissionError:
+            raise
+        except sqlite3.Error as exc:
+            raise PortfolioAdmissionError(
+                f"ledger_verification_failed:{type(exc).__name__}"
+            ) from None
+        finally:
+            ledger.close()
+
+    def reconcile_admission_from_ledger(
+        self, admission_id: str, *, ledger_database_path: str | Path,
+        now: datetime | None = None,
+    ) -> str:
+        """Recover a reservation by its exact durable admission_id after a crash.
+
+        This handles the case where the venue ledger commit succeeded but the
+        process crashed before mark_committed()/reconcile(). It may reconcile
+        PENDING reservations only when exactly one matching immutable ledger
+        row and the reserved notional are verified through a read-only DB.
+        """
+        db = self._connect()
+        try:
+            reservation = db.execute(
+                "SELECT venue,exposure_usd,status,ledger_entry_id "
+                "FROM portfolio_admissions WHERE admission_id=?",
+                (admission_id,),
+            ).fetchone()
+        except sqlite3.Error as exc:
+            raise PortfolioAdmissionError(
+                f"coordinator_storage_failure:{type(exc).__name__}"
+            ) from None
+        finally:
+            db.close()
+        if reservation is None:
+            raise PortfolioAdmissionError("reservation_not_found")
+        venue, exposure_text, status, stored_id = reservation
+        if status not in {"PENDING", "AWAITING_RECONCILIATION", "RECONCILED"}:
+            raise PortfolioAdmissionError("reservation_not_recoverable")
+        entry_id = self._find_ledger_entry_by_admission(
+            venue=str(venue),
+            ledger_database_path=ledger_database_path,
+            admission_id=admission_id,
+            expected_exposure=_amount(exposure_text, "reserved_exposure"),
+            coordinator_path=self.path,
+        )
+        if status == "RECONCILED" and str(stored_id) != entry_id:
+            raise PortfolioAdmissionError("reconciliation_entry_conflict")
+
+        db = self._connect()
+        stamp = _aware(now or datetime.now(timezone.utc), "now").isoformat()
+        try:
+            db.execute("BEGIN IMMEDIATE")
+            row = db.execute(
+                "SELECT status,ledger_entry_id FROM portfolio_admissions WHERE admission_id=?",
+                (admission_id,),
+            ).fetchone()
+            if row is None:
+                raise PortfolioAdmissionError("reservation_not_found")
+            if row[0] == "RECONCILED":
+                if str(row[1]) != entry_id:
+                    raise PortfolioAdmissionError("reconciliation_entry_conflict")
+                db.commit()
+                return entry_id
+            if row[0] not in {"PENDING", "AWAITING_RECONCILIATION"}:
+                raise PortfolioAdmissionError("reservation_state_conflict_or_missing")
+            db.execute(
+                "UPDATE portfolio_admissions SET status='RECONCILED',ledger_entry_id=?,"
+                "reconciled_at=?,updated_at=? WHERE admission_id=?",
+                (entry_id, stamp, stamp, admission_id),
+            )
+            db.commit()
+            return entry_id
+        except PortfolioAdmissionError:
+            db.rollback()
+            raise
+        except sqlite3.Error as exc:
+            db.rollback()
+            raise PortfolioAdmissionError(
+                f"coordinator_storage_failure:{type(exc).__name__}"
+            ) from None
+        finally:
+            db.close()
+
+    def release_admission_if_absent_from_ledger(
+        self, admission_id: str, *, ledger_database_path: str | Path,
+        now: datetime | None = None,
+    ) -> None:
+        """Release a PENDING reservation only if a trusted ledger has no row.
+
+        This path is intended for a failed/rolled-back write or recovery after
+        the writer has been proven quiescent. It deliberately cannot release
+        AWAITING_RECONCILIATION, whose commit outcome may still be uncertain.
+        """
+        db = self._connect()
+        try:
+            reservation = db.execute(
+                "SELECT venue,status FROM portfolio_admissions WHERE admission_id=?",
+                (admission_id,),
+            ).fetchone()
+        except sqlite3.Error as exc:
+            raise PortfolioAdmissionError(
+                f"coordinator_storage_failure:{type(exc).__name__}"
+            ) from None
+        finally:
+            db.close()
+        if reservation is None:
+            raise PortfolioAdmissionError("reservation_not_found")
+        venue, status = reservation
+        if status != "PENDING":
+            raise PortfolioAdmissionError("awaiting_reconciliation_requires_recovery_lock")
+
+        candidate = Path(ledger_database_path).expanduser()
+        if candidate.is_symlink() or not candidate.is_file():
+            raise PortfolioAdmissionError("ledger_database_missing_or_unsafe")
+        try:
+            resolved = candidate.resolve(strict=True)
+            if resolved == self.path.expanduser().resolve():
+                raise PortfolioAdmissionError("ledger_database_must_be_distinct")
+            uri = f"file:{quote(str(resolved), safe='/')}?mode=ro"
+            ledger = sqlite3.connect(uri, uri=True, timeout=2.0)
+            ledger.execute("PRAGMA query_only=ON")
+            ledger.execute("PRAGMA busy_timeout=2000")
+        except PortfolioAdmissionError:
+            raise
+        except (OSError, sqlite3.Error, ValueError):
+            raise PortfolioAdmissionError("ledger_database_unavailable") from None
+        try:
+            if venue == "POLYMARKET":
+                table, id_column = "trades", "trade_id"
+            elif venue == "PERPS":
+                table, id_column = "perps_paper_positions", "position_id"
+            else:
+                raise PortfolioAdmissionError("venue_invalid")
+            columns = {
+                str(row[1])
+                for row in ledger.execute(f"PRAGMA table_info({table})").fetchall()
+            }
+            if not {id_column, "admission_id"}.issubset(columns):
+                raise PortfolioAdmissionError("ledger_admission_schema_incomplete")
+            rows = ledger.execute(
+                f"SELECT {id_column} FROM {table} WHERE admission_id=? LIMIT 1",
+                (admission_id,),
+            ).fetchone()
+            if rows is not None:
+                raise PortfolioAdmissionError("ledger_entry_present_cannot_release")
+        except PortfolioAdmissionError:
+            raise
+        except sqlite3.Error as exc:
+            raise PortfolioAdmissionError(
+                f"ledger_absence_verification_failed:{type(exc).__name__}"
+            ) from None
+        finally:
+            ledger.close()
+
+        db = self._connect()
+        stamp = _aware(now or datetime.now(timezone.utc), "now").isoformat()
+        try:
+            db.execute("BEGIN IMMEDIATE")
+            cursor = db.execute(
+                "UPDATE portfolio_admissions SET status='RELEASED',updated_at=? "
+                "WHERE admission_id=? AND status='PENDING'",
+                (stamp, admission_id),
+            )
+            if cursor.rowcount != 1:
+                raise PortfolioAdmissionError("reservation_state_conflict_or_missing")
+            db.commit()
+        except PortfolioAdmissionError:
+            db.rollback()
+            raise
+        except sqlite3.Error as exc:
+            db.rollback()
+            raise PortfolioAdmissionError(
+                f"coordinator_storage_failure:{type(exc).__name__}"
+            ) from None
+        finally:
+            db.close()
+
     def reconcile_from_ledger(
         self, admission_id: str, *, ledger_database_path: str | Path,
         ledger_entry_id: str, now: datetime | None = None,

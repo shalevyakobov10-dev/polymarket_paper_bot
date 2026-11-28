@@ -146,7 +146,7 @@ class PaperDataBackupTests(unittest.TestCase):
             self.assertFalse(state["automatic_retry_permitted"])
             self.assertEqual(
                 [event["event_type"] for event in restored.list_events("event-backup-order")],
-                ["INTENT_PREPARED", "SUBMISSION_STARTED", "SUBMISSION_UNKNOWN"],
+                ["intent_created", "submission_started", "submission_response_ambiguous"],
             )
             self.assertEqual(event_item["integrity_check"], "ok")
             self.assertEqual(len(event_item["sha256"]), 64)

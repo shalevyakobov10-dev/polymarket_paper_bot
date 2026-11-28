@@ -21,14 +21,16 @@ class PortfolioAdmissionError(RuntimeError):
     """Raised when an admission cannot be safely evaluated or persisted."""
 
 
-def _amount(value: Any, field: str) -> Decimal:
+def _amount(
+    value: Any, field: str, *, allow_negative: bool = False
+) -> Decimal:
     if isinstance(value, bool) or value is None:
         raise PortfolioAdmissionError(f"{field}_invalid")
     try:
         result = Decimal(str(value))
     except (InvalidOperation, TypeError, ValueError):
         raise PortfolioAdmissionError(f"{field}_invalid") from None
-    if not result.is_finite() or result < 0:
+    if not result.is_finite() or (not allow_negative and result < 0):
         raise PortfolioAdmissionError(f"{field}_invalid")
     return result
 

@@ -69,7 +69,7 @@ A first read-only adapter has been added in `unified_paper_risk.py`, with synthe
 
 - It opens the event-paper account DB, Perps Paper account DB, and Perps market-history DB in SQLite read-only mode.
 - It checks required schema fields, current UTC-day baselines, timestamped Polymarket observations, Perps mark agreement with public market history, maximum mark age, and cross-venue mark skew.
-- It calculates combined equity, daily PnL from each ledger's stored day-start baseline, realized PnL, unrealized PnL, open exposure, Perps margin, open-position count, and combined drawdown.
+- It calculates combined equity, daily PnL from each ledger's stored day-start baseline, realized PnL, unrealized PnL, open exposure, Perps margin, and open-position count. Combined peak equity and combined drawdown remain unavailable until a shared high-water-mark ledger exists.
 - A missing, malformed, stale, future-dated, skewed, or inconsistent data source raises `UnifiedPaperRiskError`; it is never treated as zero.
 - The Perps ledger does not persist immutable initial capital in its current schema. The adapter therefore reports combined starting capital as unavailable instead of substituting peak equity or a daily baseline.
 - A Perps halt is reported as account state; it is not silently cleared.
@@ -89,6 +89,6 @@ The adapter now exposes each engine's own peak equity separately and leaves comb
 - `RECONCILED`: the durable venue entry has been verified; snapshots captured before reconciliation still count the reservation to avoid a stale-read race.
 - `RELEASED`: allowed only after the caller explicitly confirms the entry is absent from its venue ledger.
 
-Reservations are never automatically expired. A crash or uncertain outcome therefore consumes capacity until an operator/reconciler resolves it, rather than silently freeing risk. The initial regression suite covers cross-venue contention, concurrent reservations, idempotency, durable reopen, stale/future snapshots, reconciliation ordering, and guarded release.
+Reservations are never automatically expired. A crash or uncertain outcome therefore consumes capacity until an operator/reconciler resolves it, rather than silently freeing risk. The initial regression suite covers cross-venue contention, concurrent reservations, idempotency, durable reopen, stale/future snapshots, reconciliation ordering, and guarded release. Replaying an existing admission key is now explicitly denied as a new entry, including when the original reservation is already reconciled; idempotency must never authorize a duplicate venue-ledger write.
 
 **Integration status: foundation only.** Neither Paper engine calls this coordinator yet. It does not atomically commit a venue entry, read the two source ledgers itself, establish a shared peak-equity history, or authorize trading. The caller-side sequence and crash-recovery reconciler still need implementation and tests before it can be used as an admission gate. It must remain disabled for order authorization until that work is complete.

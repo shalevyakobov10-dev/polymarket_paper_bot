@@ -280,6 +280,13 @@ class EventOrderOperations:
             raise ValueError("venue_order_asset_mismatch")
         if str(_field(order, "side", "")).upper() != str(intent.get("side", "")).upper():
             raise ValueError("venue_order_side_mismatch")
+        expected_condition = intent.get("market_condition_id")
+        if expected_condition is not None:
+            observed_condition = _field(
+                order, "condition_id", _field(order, "market")
+            )
+            if str(observed_condition or "") != str(expected_condition):
+                raise ValueError("venue_order_condition_mismatch")
         original_size = _decimal(_field(order, "original_size"), "venue_original_size")
         expected_size = _decimal(intent.get("size"), "local_order_size")
         if original_size != expected_size:

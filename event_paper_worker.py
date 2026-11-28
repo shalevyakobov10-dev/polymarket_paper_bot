@@ -360,6 +360,12 @@ def _safe_coverage_labels(value: Any) -> list[str]:
     return sorted(labels)
 
 
+def _safe_nonnegative_int_or_none(value: Any) -> int | None:
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        return None
+    return value
+
+
 def _safe_nonnegative_count(value: Any, *, maximum: int = 1_000_000) -> int:
     if isinstance(value, bool) or not isinstance(value, int) or not 0 <= value <= maximum:
         return 0
@@ -452,6 +458,9 @@ def read_event_paper_worker_status(
             "backup_error_type": str(raw.get("backup_error_type") or "")[:80] or None,
             "event_order_journal_present": raw.get("event_order_journal_present") is True,
             "event_order_journal_path_valid": raw.get("event_order_journal_path_valid") is True,
+            "event_order_journal_backup_mtime_ns": _safe_nonnegative_int_or_none(
+                raw.get("event_order_journal_backup_mtime_ns")
+            ),
             "event_order_journal_backed_up": raw.get("event_order_journal_backed_up") is True,
             "backup_consecutive_failures": max(0, int(raw.get("backup_consecutive_failures", 0))),
             "backup_retry_delay_seconds": max(0.0, float(raw.get("backup_retry_delay_seconds", 0.0))),
@@ -534,6 +543,14 @@ def run_worker(
         event_order_journal_database.is_file()
         and not event_order_journal_database.is_symlink()
     )
+    try:
+        event_order_journal_current_mtime_ns = (
+            event_order_journal_database.stat().st_mtime_ns
+            if event_order_journal_path_valid else None
+        )
+    except OSError:
+        event_order_journal_path_valid = False
+        event_order_journal_current_mtime_ns = None
     started = _utc_now()
     previous: dict[str, Any] = {}
     try:
@@ -546,6 +563,14 @@ def run_worker(
     last_backup_attempt_at = _parse_utc(previous.get("last_backup_attempt_at"))
     backup_failures = max(0, int(previous.get("backup_consecutive_failures", 0) or 0))
     backup_retry_delay = max(0.0, float(previous.get("backup_retry_delay_seconds", 0.0) or 0.0))
+    previous_event_journal_backup_mtime_ns = _safe_nonnegative_int_or_none(
+        previous.get("event_order_journal_backup_mtime_ns")
+    )
+    previous_event_journal_backup_is_current = (
+        event_order_journal_path_valid
+        and previous.get("event_order_journal_backed_up") is True
+        and previous_event_journal_backup_mtime_ns == event_order_journal_current_mtime_ns
+    )
     status: dict[str, Any] = {
         "schema_version": STATUS_SCHEMA_VERSION,
         "worker_state": "starting",
@@ -605,9 +630,13 @@ def run_worker(
         "backup_error_type": previous.get("backup_error_type"),
         "event_order_journal_present": event_order_journal_present,
         "event_order_journal_path_valid": event_order_journal_path_valid,
+        "event_order_journal_backup_mtime_ns": (
+            previous_event_journal_backup_mtime_ns
+            if previous_event_journal_backup_is_current else None
+        ),
         "event_order_journal_backed_up": (
             event_order_journal_present
-            and previous.get("event_order_journal_backed_up") is True
+            and previous_event_journal_backup_is_current
         ),
         "backup_consecutive_failures": backup_failures,
         "backup_retry_delay_seconds": backup_retry_delay,
@@ -700,18 +729,37 @@ def run_worker(
                     event_order_journal_database.is_file()
                     and not event_order_journal_database.is_symlink()
                 )
+                try:
+                    event_order_journal_current_mtime_ns = (
+                        event_order_journal_database.stat().st_mtime_ns
+                        if event_order_journal_path_valid else None
+                    )
+                except OSError:
+                    event_order_journal_path_valid = False
+                    event_order_journal_current_mtime_ns = None
                 status["event_order_journal_present"] = event_order_journal_present
                 status["event_order_journal_path_valid"] = event_order_journal_path_valid
-                if not event_order_journal_present:
+                event_journal_backup_current = (
+                    event_order_journal_present
+                    and event_order_journal_path_valid
+                    and status.get("event_order_journal_backed_up") is True
+                    and status.get("event_order_journal_backup_mtime_ns")
+                    == event_order_journal_current_mtime_ns
+                )
+                if not event_order_journal_present or not event_order_journal_path_valid:
                     status["event_order_journal_backed_up"] = False
-                elif previous.get("event_order_journal_backed_up") is not True:
+                    status["event_order_journal_backup_mtime_ns"] = None
+                elif not event_journal_backup_current:
                     status["event_order_journal_backed_up"] = False
                 backup_due = (
                     last_backup_at is None
                     or (current_backup_check - last_backup_at).total_seconds() >= backup_interval
                     or (
                         event_order_journal_present
-                        and status.get("event_order_journal_backed_up") is not True
+                        and (
+                            not event_order_journal_path_valid
+                            or status.get("event_order_journal_backed_up") is not True
+                        )
                     )
                 )
                 retry_ready = (
@@ -734,9 +782,15 @@ def run_worker(
                             history_database,
                         ]
                         if event_order_journal_present:
+                            if not event_order_journal_path_valid:
+                                raise RuntimeError("Event order journal path is unsafe")
+                            journal_mtime_before_backup = event_order_journal_database.stat().st_mtime_ns
                             backup_paths.append(event_order_journal_database)
+                        else:
+                            journal_mtime_before_backup = None
                         expected_source_names = {Path(path).name for path in backup_paths}
                         status["event_order_journal_backed_up"] = False
+                        status["event_order_journal_backup_mtime_ns"] = None
                         backup_result = backup_function(
                             backup_paths,
                             chosen_directory,
@@ -753,6 +807,12 @@ def run_worker(
                             or len(backup_files) != len(expected_source_names)
                         ):
                             raise RuntimeError("every expected Event Paper database and journal must be included in the verified backup")
+                        if event_order_journal_present:
+                            journal_mtime_after_backup = event_order_journal_database.stat().st_mtime_ns
+                            if journal_mtime_after_backup != journal_mtime_before_backup:
+                                raise RuntimeError("Event order journal changed while backup was running")
+                        else:
+                            journal_mtime_after_backup = None
                         last_backup_at = _parse_utc(str(backup_result.get("created_at") or ""))
                         if last_backup_at is None:
                             raise RuntimeError("backup result did not contain a valid timestamp")
@@ -763,8 +823,10 @@ def run_worker(
                             "backup_manifest_name": str(backup_result.get("manifest_name") or "")[:200],
                             "backup_files_last_run": len(backup_files),
                             "event_order_journal_present": event_order_journal_present,
+                            "event_order_journal_backup_mtime_ns": journal_mtime_after_backup,
                             "event_order_journal_backed_up": (
                                 event_order_journal_present
+                                and event_order_journal_path_valid
                                 and event_order_journal_database.name in backed_up_source_names
                             ),
                             "backup_error_type": None,
@@ -778,6 +840,7 @@ def run_worker(
                         status.update({
                             "worker_state": "degraded",
                             "event_order_journal_present": event_order_journal_present,
+                            "event_order_journal_backup_mtime_ns": None,
                             "event_order_journal_backed_up": False,
                             "backup_error_type": type(backup_exc).__name__[:80],
                             "backup_consecutive_failures": backup_failures,

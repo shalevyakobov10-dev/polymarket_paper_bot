@@ -84,10 +84,11 @@ class PortfolioAdmissionTests(unittest.TestCase):
         self.assertEqual(unresolved[0]["status"], "AWAITING_RECONCILIATION")
 
     def test_list_unresolved_is_read_only_and_excludes_terminal_reservations(self):
-        self.reserve("pending")
-        self.reserve("awaiting")
+        # Keep all three reservations inside the shared $100 test budget.
+        self.reserve("pending", exposure="10")
+        self.reserve("awaiting", exposure="10")
         self.coordinator.mark_committed("awaiting", now=self.now)
-        self.reserve("reconciled")
+        self.reserve("reconciled", exposure="10")
         self.coordinator.mark_committed("reconciled", now=self.now)
         self.coordinator.reconcile(
             "reconciled",

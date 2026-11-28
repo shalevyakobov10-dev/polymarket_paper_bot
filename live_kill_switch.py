@@ -1,8 +1,9 @@
-"""Fail-closed, local event-market live kill-switch status reader.
+"""Fail-closed event live kill switch with separate operator ownership.
 
-The switch is read-only from the execution gateway. A missing, malformed,
-symlinked, oversized, stale, or future-dated status file is treated as engaged.
-This module never creates a disarmed state and never changes an order.
+The gateway process is read-only. Only a separately configured operator UID
+may atomically engage/update the switch file. There is intentionally no disarm
+API or CLI. DISARMED must be installed out-of-band by an independent release
+operator into the protected mount after all release gates have been reviewed.
 """
 from __future__ import annotations
 
@@ -19,6 +20,7 @@ from typing import Any
 _SCHEMA_VERSION = 1
 _MAX_BYTES = 4096
 _REASON_RE = re.compile(r"^[A-Za-z0-9_.:-]{1,64}$")
+_DEFAULT_PATH = Path("/etc/polymarket/event_live_kill_switch.json")
 
 
 def _blocked(reason_code: str) -> dict[str, Any]:
@@ -32,13 +34,54 @@ def _blocked(reason_code: str) -> dict[str, Any]:
     }
 
 
+def _owner_uid(value: Any) -> int | None:
+    if isinstance(value, bool):
+        return None
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    if parsed < 0 or str(parsed) != str(value).strip():
+        return None
+    return parsed
+
+
+def _safe_parent(path: Path, *, expected_owner_uid: int) -> str | None:
+    """Require an operator-owned parent and non-replaceable path ancestors."""
+    try:
+        parent = path.parent
+        if parent.is_symlink() or not parent.is_dir():
+            return "kill_switch_directory_unavailable"
+        metadata = parent.stat(follow_symlinks=False)
+        if not stat.S_ISDIR(metadata.st_mode):
+            return "kill_switch_parent_not_directory"
+        if metadata.st_uid != expected_owner_uid:
+            return "kill_switch_directory_owner_mismatch"
+        if stat.S_IMODE(metadata.st_mode) & 0o022:
+            return "kill_switch_directory_group_or_world_writable"
+
+        for ancestor in parent.parents:
+            if ancestor.is_symlink():
+                return "kill_switch_ancestor_symlink_rejected"
+            ancestor_metadata = ancestor.stat(follow_symlinks=False)
+            ancestor_mode = stat.S_IMODE(ancestor_metadata.st_mode)
+            # Sticky directories (e.g. /tmp) protect operator-owned child
+            # entries; any other group/world-writable ancestor is rejected.
+            if ancestor_mode & 0o022 and not (ancestor_mode & stat.S_ISVTX):
+                return "kill_switch_ancestor_writable"
+    except OSError:
+        return "kill_switch_directory_unavailable"
+    return None
+
+
 def read_live_kill_switch(
     path: str | Path,
     *,
     now: datetime | None = None,
     max_age_seconds: float = 60.0,
+    expected_owner_uid: int | str | None = None,
 ) -> dict[str, Any]:
-    """Read an operator-owned status file; every uncertainty means engaged."""
+    """Read a fresh operator-owned status file; every uncertainty means engaged."""
     if (
         isinstance(max_age_seconds, bool)
         or not isinstance(max_age_seconds, (int, float))
@@ -50,22 +93,43 @@ def read_live_kill_switch(
         return _blocked("kill_switch_clock_invalid")
     current = current.astimezone(timezone.utc)
 
+    configured_owner = (
+        expected_owner_uid
+        if expected_owner_uid is not None
+        else os.getenv("EVENT_LIVE_KILL_SWITCH_OWNER_UID")
+    )
+    owner_uid = _owner_uid(configured_owner)
+    if owner_uid is None:
+        return _blocked("kill_switch_operator_owner_not_configured")
+    try:
+        gateway_uid = os.geteuid()
+    except (AttributeError, OSError):
+        return _blocked("kill_switch_gateway_uid_unavailable")
+    if owner_uid == gateway_uid:
+        return _blocked("kill_switch_owner_must_be_separate_from_gateway")
+
     candidate = Path(path).expanduser()
+    parent_error = _safe_parent(candidate, expected_owner_uid=owner_uid)
+    if parent_error is not None:
+        return _blocked(parent_error)
+
     descriptor: int | None = None
     try:
         if candidate.is_symlink():
             return _blocked("kill_switch_symlink_rejected")
-        flags = os.O_RDONLY
-        if hasattr(os, "O_NOFOLLOW"):
-            flags |= os.O_NOFOLLOW
-        descriptor = os.open(candidate, flags)
+        nofollow = getattr(os, "O_NOFOLLOW", None)
+        if nofollow is None:
+            return _blocked("kill_switch_nofollow_unsupported")
+        descriptor = os.open(candidate, os.O_RDONLY | nofollow)
         metadata = os.fstat(descriptor)
         if not stat.S_ISREG(metadata.st_mode):
             return _blocked("kill_switch_not_regular_file")
+        if metadata.st_uid != owner_uid:
+            return _blocked("kill_switch_file_owner_mismatch")
+        if stat.S_IMODE(metadata.st_mode) != 0o444:
+            return _blocked("kill_switch_file_permissions_invalid")
         if metadata.st_nlink != 1:
             return _blocked("kill_switch_hardlink_rejected")
-        if stat.S_IMODE(metadata.st_mode) & 0o022:
-            return _blocked("kill_switch_file_permissions_unsafe")
         if metadata.st_size <= 0 or metadata.st_size > _MAX_BYTES:
             return _blocked("kill_switch_file_size_invalid")
         with os.fdopen(descriptor, "rb") as handle:
@@ -92,8 +156,7 @@ def read_live_kill_switch(
         "schema_version", "state", "updated_at_utc", "reason_code"
     }:
         return _blocked("kill_switch_schema_invalid")
-    version = payload.get("schema_version")
-    if isinstance(version, bool) or version != _SCHEMA_VERSION:
+    if isinstance(payload.get("schema_version"), bool) or payload.get("schema_version") != _SCHEMA_VERSION:
         return _blocked("kill_switch_schema_version_unsupported")
     state = payload.get("state")
     if state not in {"ENGAGED", "DISARMED"}:
@@ -124,6 +187,7 @@ def read_live_kill_switch(
         "reason_code": reason,
         "updated_at_utc": updated.astimezone(timezone.utc).isoformat(),
         "age_seconds": max(0.0, age),
+        "owner_uid": owner_uid,
         "execution": "none",
     }
 
@@ -143,15 +207,26 @@ def engage_live_kill_switch(
     reason_code: str,
     now: datetime | None = None,
 ) -> dict[str, Any]:
-    """Atomically engage the local switch. There is deliberately no disarm API."""
+    """Atomically engage/update the switch. It never writes DISARMED."""
     if not isinstance(reason_code, str) or not _REASON_RE.fullmatch(reason_code):
         raise ValueError("reason_code must be a short safe identifier")
     current = now or datetime.now(timezone.utc)
     if not isinstance(current, datetime) or current.tzinfo is None or current.utcoffset() is None:
         raise ValueError("now must be timezone-aware")
     current = current.astimezone(timezone.utc)
+
+    owner_uid = _owner_uid(os.getenv("EVENT_LIVE_KILL_SWITCH_OWNER_UID"))
+    if owner_uid is None:
+        raise PermissionError("EVENT_LIVE_KILL_SWITCH_OWNER_UID must identify the operator UID")
+    if os.geteuid() != owner_uid:
+        raise PermissionError("kill switch may only be engaged by its configured operator UID")
+
     target = Path(path).expanduser()
-    target.parent.mkdir(parents=True, exist_ok=True)
+    target.parent.mkdir(parents=True, exist_ok=True, mode=0o755)
+    parent_error = _safe_parent(target, expected_owner_uid=owner_uid)
+    if parent_error is not None:
+        raise PermissionError(parent_error)
+
     payload = json.dumps({
         "schema_version": _SCHEMA_VERSION,
         "state": "ENGAGED",
@@ -166,8 +241,7 @@ def engage_live_kill_switch(
             prefix=f".{target.name}.engage-",
             dir=str(target.parent),
         )
-        if hasattr(os, "fchmod"):
-            os.fchmod(descriptor, 0o600)
+        os.fchmod(descriptor, 0o444)
         with os.fdopen(descriptor, "wb") as handle:
             descriptor = None
             handle.write(payload)
@@ -175,12 +249,11 @@ def engage_live_kill_switch(
             os.fsync(handle.fileno())
         os.replace(temporary_path, target)
         temporary_path = None
-        if hasattr(os, "O_DIRECTORY"):
-            directory_fd = os.open(target.parent, os.O_RDONLY | os.O_DIRECTORY)
-            try:
-                os.fsync(directory_fd)
-            finally:
-                os.close(directory_fd)
+        directory_fd = os.open(target.parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+        try:
+            os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
     finally:
         if descriptor is not None:
             try:
@@ -193,17 +266,33 @@ def engage_live_kill_switch(
             except OSError:
                 pass
 
-    report = read_live_kill_switch(target, now=current)
-    if report.get("verified") is not True or report.get("engaged") is not True:
+    metadata = target.stat(follow_symlinks=False)
+    if (
+        metadata.st_uid != owner_uid
+        or stat.S_IMODE(metadata.st_mode) != 0o444
+        or metadata.st_nlink != 1
+    ):
+        raise RuntimeError("kill_switch_engage_write_permissions_unverified")
+    written = json.loads(target.read_text(encoding="utf-8"))
+    if written != json.loads(payload.decode("utf-8")):
         raise RuntimeError("kill_switch_engage_write_could_not_be_verified")
-    return report
+    return {
+        "schema_version": _SCHEMA_VERSION,
+        "verified": True,
+        "state": "engaged",
+        "engaged": True,
+        "reason_code": reason_code,
+        "updated_at_utc": current.isoformat(),
+        "age_seconds": 0.0,
+        "owner_uid": owner_uid,
+        "execution": "none",
+    }
 
 
 def check_live_kill_switch() -> dict[str, Any]:
-    """Read the configured status file. No default disarmed state exists."""
-    default_path = Path(os.getenv("DATA_DIR", "data")) / "event_live_kill_switch.json"
+    """Read the operator-mounted switch; never fall back to app-writable DATA_DIR."""
     configured = os.getenv("EVENT_LIVE_KILL_SWITCH_PATH")
-    return read_live_kill_switch(configured or default_path)
+    return read_live_kill_switch(configured or _DEFAULT_PATH)
 
 
 def main() -> int:
@@ -212,19 +301,14 @@ def main() -> int:
     )
     subparsers = parser.add_subparsers(dest="command", required=True)
     engage = subparsers.add_parser(
-        "engage", help="atomically engage the live switch (there is no disarm command)"
+        "engage", help="engage the live switch (there is no disarm command)"
     )
-    engage.add_argument(
-        "--reason",
-        required=True,
-        help="short reason code, e.g. operator_request or incident_detected",
-    )
+    engage.add_argument("--reason", required=True)
     args = parser.parse_args()
     if args.command == "engage":
-        default_path = Path(os.getenv("DATA_DIR", "data")) / "event_live_kill_switch.json"
         configured = os.getenv("EVENT_LIVE_KILL_SWITCH_PATH")
         report = engage_live_kill_switch(
-            configured or default_path,
+            configured or _DEFAULT_PATH,
             reason_code=args.reason,
         )
         print(json.dumps(report, sort_keys=True))

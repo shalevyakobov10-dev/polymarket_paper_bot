@@ -155,7 +155,7 @@ class LiveKillSwitchTests(unittest.TestCase):
         report = self.read()
         self.assertFalse(report["verified"])
         self.assertTrue(report["engaged"])
-        self.assertEqual(report["reason_code"], "kill_switch_file_permissions_unsafe")
+        self.assertEqual(report["reason_code"], "kill_switch_file_permissions_invalid")
 
     def test_hard_link_status_file_fails_closed(self):
         self.write_status()

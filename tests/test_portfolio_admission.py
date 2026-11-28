@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import multiprocessing
+import sqlite3
 import tempfile
 import threading
 import unittest
@@ -47,6 +48,46 @@ class PortfolioAdmissionTests(unittest.TestCase):
             max_total_positions=max_positions, now=now or self.now,
         )
 
+    def make_ledger(self, path, *, venue, ledger_entry_id=None, exposure=None):
+        connection = sqlite3.connect(path)
+        try:
+            if venue == "POLYMARKET":
+                connection.execute(
+                    "CREATE TABLE trades (trade_id INTEGER PRIMARY KEY, notional REAL NOT NULL, status TEXT NOT NULL)"
+                )
+                if ledger_entry_id is not None:
+                    connection.execute(
+                        "INSERT INTO trades(trade_id,notional,status) VALUES(?,?,?)",
+                        (int(ledger_entry_id), float(exposure), "OPEN"),
+                    )
+            else:
+                connection.execute(
+                    "CREATE TABLE perps_paper_positions (position_id INTEGER PRIMARY KEY, quantity TEXT NOT NULL, entry_price TEXT NOT NULL, status TEXT NOT NULL)"
+                )
+                if ledger_entry_id is not None:
+                    connection.execute(
+                        "INSERT INTO perps_paper_positions(position_id,quantity,entry_price,status) VALUES(?,?,?,?)",
+                        (int(ledger_entry_id), "0.5", str(float(exposure) * 2), "OPEN"),
+                    )
+            connection.commit()
+        finally:
+            connection.close()
+        return Path(path)
+
+    def reconcile_from_ledger(
+        self, admission_id, *, ledger_entry_id, exposure="40",
+        venue="POLYMARKET", now=None,
+    ):
+        ledger_path = self.path.parent / f"{admission_id}-venue.sqlite3"
+        self.make_ledger(
+            ledger_path, venue=venue,
+            ledger_entry_id=ledger_entry_id, exposure=exposure,
+        )
+        return self.coordinator.reconcile_from_ledger(
+            admission_id, ledger_database_path=ledger_path,
+            ledger_entry_id=ledger_entry_id, now=now or self.now,
+        )
+
     def test_reservation_is_durable_and_idempotent(self):
         first = self.reserve("poly-1")
         again = self.reserve("poly-1")
@@ -59,29 +100,56 @@ class PortfolioAdmissionTests(unittest.TestCase):
     def test_reconciled_replay_cannot_authorize_duplicate_venue_entry(self):
         self.reserve("poly-replayed", exposure="40")
         self.coordinator.mark_committed("poly-replayed", now=self.now)
-        self.coordinator.reconcile(
-            "poly-replayed", ledger_entry_id="trade-verified", verified_present_from_ledger=True, now=self.now,
+        self.reconcile_from_ledger(
+            "poly-replayed", ledger_entry_id="7", now=self.now,
         )
         replay = self.reserve("poly-replayed", exposure="40")
         self.assertFalse(replay.approved)
         self.assertEqual(replay.status, "RECONCILED")
         self.assertEqual(replay.reason, "idempotent_existing_reservation_no_new_entry")
 
-    def test_reconcile_requires_explicit_verified_ledger_presence(self):
-        self.reserve("poly-unverified")
+    def test_reconciliation_requires_exact_entry_to_exist_in_read_only_ledger(self):
+        self.reserve("poly-unverified", exposure="40")
         self.coordinator.mark_committed("poly-unverified", now=self.now)
-        with self.assertRaisesRegex(
-            PortfolioAdmissionError, "verified_ledger_presence"
-        ):
-            self.coordinator.reconcile(
+        ledger_path = self.path.parent / "missing-trade.sqlite3"
+        self.make_ledger(ledger_path, venue="POLYMARKET")
+        with self.assertRaisesRegex(PortfolioAdmissionError, "ledger_entry_not_found"):
+            self.coordinator.reconcile_from_ledger(
                 "poly-unverified",
-                ledger_entry_id="trade-not-yet-verified",
-                verified_present_from_ledger=False,
+                ledger_database_path=ledger_path,
+                ledger_entry_id="999",
                 now=self.now,
             )
         unresolved = self.coordinator.list_unresolved()
         self.assertEqual(len(unresolved), 1)
         self.assertEqual(unresolved[0]["status"], "AWAITING_RECONCILIATION")
+
+    def test_reconciliation_rejects_entry_with_mismatched_notional(self):
+        self.reserve("poly-mismatch", exposure="40")
+        self.coordinator.mark_committed("poly-mismatch", now=self.now)
+        ledger_path = self.path.parent / "mismatched-trade.sqlite3"
+        self.make_ledger(
+            ledger_path, venue="POLYMARKET", ledger_entry_id="8", exposure="39"
+        )
+        with self.assertRaisesRegex(PortfolioAdmissionError, "exposure_mismatch"):
+            self.coordinator.reconcile_from_ledger(
+                "poly-mismatch",
+                ledger_database_path=ledger_path,
+                ledger_entry_id="8",
+                now=self.now,
+            )
+        self.assertEqual(
+            self.coordinator.list_unresolved()[0]["status"],
+            "AWAITING_RECONCILIATION",
+        )
+
+    def test_perps_reconciliation_checks_quantity_times_entry_price(self):
+        self.reserve("perps-verify", venue="PERPS", exposure="40")
+        self.coordinator.mark_committed("perps-verify", now=self.now)
+        self.reconcile_from_ledger(
+            "perps-verify", venue="PERPS", ledger_entry_id="9", exposure="40"
+        )
+        self.assertEqual(self.coordinator.list_unresolved(), [])
 
     def test_list_unresolved_is_read_only_and_excludes_terminal_reservations(self):
         # Keep all three reservations inside the shared $100 test budget.
@@ -90,10 +158,10 @@ class PortfolioAdmissionTests(unittest.TestCase):
         self.coordinator.mark_committed("awaiting", now=self.now)
         self.reserve("reconciled", exposure="10")
         self.coordinator.mark_committed("reconciled", now=self.now)
-        self.coordinator.reconcile(
+        self.reconcile_from_ledger(
             "reconciled",
-            ledger_entry_id="trade-verified",
-            verified_present_from_ledger=True,
+            ledger_entry_id="7",
+            exposure="10",
             now=self.now,
         )
         self.assertEqual(
@@ -129,7 +197,7 @@ class PortfolioAdmissionTests(unittest.TestCase):
     def test_reconciled_reservation_is_counted_for_older_snapshot(self):
         self.reserve("poly-1", exposure="60")
         self.coordinator.mark_committed("poly-1", now=self.now)
-        self.coordinator.reconcile("poly-1", ledger_entry_id="trade-77", verified_present_from_ledger=True, now=self.now + timedelta(seconds=1))
+        self.reconcile_from_ledger("poly-1", ledger_entry_id="77", exposure="60", now=self.now + timedelta(seconds=1))
         old_snapshot = self.reserve("perps-old", venue="PERPS", exposure="41",
                                     snapshot_at=self.now, now=self.now + timedelta(seconds=2))
         self.assertFalse(old_snapshot.approved)
@@ -138,7 +206,7 @@ class PortfolioAdmissionTests(unittest.TestCase):
         self.reserve("poly-1", exposure="60")
         self.coordinator.mark_committed("poly-1", now=self.now)
         reconciled_at = self.now + timedelta(seconds=1)
-        self.coordinator.reconcile("poly-1", ledger_entry_id="trade-77", verified_present_from_ledger=True, now=reconciled_at)
+        self.reconcile_from_ledger("poly-1", ledger_entry_id="77", exposure="60", now=reconciled_at)
         newer_snapshot = self.reserve("perps-new", venue="PERPS", exposure="41",
                                        snapshot="60", snapshot_at=reconciled_at,
                                        now=reconciled_at + timedelta(seconds=1))
@@ -181,10 +249,10 @@ class PortfolioAdmissionTests(unittest.TestCase):
     def test_reconcile_is_idempotent_but_entry_identity_is_immutable(self):
         self.reserve("poly-1")
         self.coordinator.mark_committed("poly-1", now=self.now)
-        self.coordinator.reconcile("poly-1", ledger_entry_id="trade-77", verified_present_from_ledger=True, now=self.now)
-        self.coordinator.reconcile("poly-1", ledger_entry_id="trade-77", verified_present_from_ledger=True, now=self.now)
+        self.reconcile_from_ledger("poly-1", ledger_entry_id="77", now=self.now)
+        self.reconcile_from_ledger("poly-1", ledger_entry_id="77", now=self.now)
         with self.assertRaisesRegex(PortfolioAdmissionError, "entry_conflict"):
-            self.coordinator.reconcile("poly-1", ledger_entry_id="trade-78", verified_present_from_ledger=True, now=self.now)
+            self.reconcile_from_ledger("poly-1", ledger_entry_id="78", now=self.now)
 
     def test_stale_and_future_snapshots_fail_closed(self):
         with self.assertRaisesRegex(PortfolioAdmissionError, "stale_or_future"):

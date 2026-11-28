@@ -172,7 +172,11 @@ def execution_readiness_payload() -> dict[str, Any]:
         },
         "event_live_kill_switch": {
             "status_file_env": "EVENT_LIVE_KILL_SWITCH_PATH",
-            "default_path": "DATA_DIR/event_live_kill_switch.json",
+            "default_path": "/etc/polymarket/event_live_kill_switch.json",
+            "owner_uid_env": "EVENT_LIVE_KILL_SWITCH_OWNER_UID",
+            "owner_must_differ_from_gateway_uid": True,
+            "required_file_mode": "0444",
+            "operator_owned_parent_required": True,
             "freshness_seconds": 60,
             "missing_or_invalid_means_engaged": True,
             "read_only_gateway_check": True,

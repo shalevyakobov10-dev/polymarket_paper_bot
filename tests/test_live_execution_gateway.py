@@ -194,6 +194,22 @@ class LiveExecutionGatewayTests(unittest.TestCase):
                 signer.key.hex(), different_wallet
             )
 
+    def test_shared_order_operation_lock_blocks_new_buy_submission(self):
+        from event_order_management import EventOrderOperationLock
+
+        lock = EventOrderOperationLock(self.db_path)
+        self.assertTrue(lock.acquire())
+        try:
+            result = self._run_gateway()
+            self.assertEqual(
+                result["reason"],
+                "event_order_operation_lock_busy_or_stale",
+            )
+            self.assertEqual(self.client.created, [])
+            self.assertEqual(self.client.posts, [])
+        finally:
+            lock.release()
+
     def test_source_controlled_event_release_gate_cannot_be_overridden_by_risk_context(self):
         with patch(
             "live_execution_gateway.evaluate_event_live_release_gate",

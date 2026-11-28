@@ -121,4 +121,8 @@ A source-level review of the current entry paths found an important transaction-
 - The existing Polymarket outer transaction and Perps transaction must not be held open while waiting on network data, news, or the other venue. Candidate construction and market-data validation happen first; the durable write phase must remain short.
 - A Paper admission coordinator must reject any attempt to point either worker at Live account state. No Live code path is part of this integration.
 
+### Event-market risk-reducing order management (2026-11-28)
+
+`event_order_management.py` adds a cancel-only authenticated-session adapter. It supports a bounded complete open-order snapshot, individual cancellation for orders mapped to the local journal, and account-wide cancellation with a separate confirmation. The adapter validates order identity/terms against the journal, serializes cancel operations with the event BUY gateway on the same durable lock path, verifies the order is absent from a fresh open-order snapshot, and records monotonic cumulative fill state only after a terminal remote status is proven. An ambiguous response is resolved by reads only; no cancellation is automatically retried. The adapter is disabled by default and is not connected to an HTTP or operator-facing service. It does not provide SELL/close, GTC/GTD submission, or batch placement.
+
 **Status:** review and implementation sequence documented; engine code is not yet wired to the coordinator. These are explicit release blockers, not completed features.

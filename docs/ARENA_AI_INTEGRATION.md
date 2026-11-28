@@ -75,3 +75,7 @@ A first read-only adapter has been added in `unified_paper_risk.py`, with synthe
 - A Perps halt is reported as account state; it is not silently cleared.
 
 **Important limitation:** this is a read-only snapshot adapter, not yet a shared admission gate. Neither engine is wired to reserve capacity through a cross-process lock, and this code must not be used to authorize entries until serialized admission, atomicity, and concurrency tests are implemented. It does not change either ledger and has no order-execution capability.
+
+### Risk-metric integrity follow-up
+
+The adapter now exposes each engine's own peak equity separately and leaves combined peak equity / combined drawdown unavailable. The two engines have independent high-water-mark histories; summing their peaks could fabricate a combined peak that never existed at one point in time. A true combined drawdown requires a shared portfolio-level high-water-mark ledger updated atomically with both engines. Until then, do not use a synthetic combined drawdown for risk authorization.

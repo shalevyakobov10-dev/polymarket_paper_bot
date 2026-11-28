@@ -43,6 +43,11 @@ def _decimal(value: Any, field: str) -> Decimal:
     return result
 
 
+def _decimal_text(value: Decimal) -> str:
+    """Return a canonical decimal string without insignificant trailing zeros."""
+    return format(value.normalize(), "f") if value else "0"
+
+
 def _required_text(value: Any, field: str) -> str:
     if not isinstance(value, str) or not value.strip():
         raise ValueError(f"{field} must be a non-empty string")
@@ -360,7 +365,7 @@ def reconcile_submission(
 
     state["status"] = target_status
     state["exchange_order_id"] = found_id
-    state["filled_size"] = str(reported_fill)
+    state["filled_size"] = _decimal_text(reported_fill)
     state["reconciliation_attempts"] += 1
     state["last_reason_code"] = _reason_code(reason_code, default="reconciled_from_venue")
     return state
@@ -468,7 +473,7 @@ def record_order_observation(
         raise RuntimeError("terminal order cannot accept conflicting status observations")
 
     state["status"] = target_status
-    state["filled_size"] = str(reported_fill)
+    state["filled_size"] = _decimal_text(reported_fill)
     state["last_reason_code"] = _reason_code(
         reason_code, default="venue_order_status_observed"
     )

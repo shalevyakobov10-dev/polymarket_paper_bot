@@ -62,3 +62,16 @@ A snapshot with missing, stale, incomplete, or unsynchronized data must deny new
 ## Safety and release gates
 
 This integration remains Paper-only. No signing, live order placement, secret loading, live account activation, or production deployment is authorized by this plan. A successful CI run proves only the tested code paths; it does not prove profitability, venue-wide coverage, or live readiness.
+
+## Adapter implementation status (2026-11-28)
+
+A first read-only adapter has been added in `unified_paper_risk.py`, with synthetic regression coverage in `tests/test_unified_paper_risk.py`.
+
+- It opens the event-paper account DB, Perps Paper account DB, and Perps market-history DB in SQLite read-only mode.
+- It checks required schema fields, current UTC-day baselines, timestamped Polymarket observations, Perps mark agreement with public market history, maximum mark age, and cross-venue mark skew.
+- It calculates combined equity, daily PnL from each ledger's stored day-start baseline, realized PnL, unrealized PnL, open exposure, Perps margin, open-position count, and combined drawdown.
+- A missing, malformed, stale, future-dated, skewed, or inconsistent data source raises `UnifiedPaperRiskError`; it is never treated as zero.
+- The Perps ledger does not persist immutable initial capital in its current schema. The adapter therefore reports combined starting capital as unavailable instead of substituting peak equity or a daily baseline.
+- A Perps halt is reported as account state; it is not silently cleared.
+
+**Important limitation:** this is a read-only snapshot adapter, not yet a shared admission gate. Neither engine is wired to reserve capacity through a cross-process lock, and this code must not be used to authorize entries until serialized admission, atomicity, and concurrency tests are implemented. It does not change either ledger and has no order-execution capability.

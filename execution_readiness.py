@@ -38,6 +38,15 @@ def execution_readiness_payload() -> dict[str, Any]:
             ),
         },
         {
+            "code": "event_order_management_not_integrated",
+            "detail": (
+                "A cancel-only adapter supports fresh open-order reads, "
+                "single-order cancellation, cancel-all, read-back verification, "
+                "and a shared lock with BUY submission. It is disabled by "
+                "default and is not wired to an authenticated operator service."
+            ),
+        },
+        {
             "code": "event_gateway_not_integrated",
             "detail": (
                 "The event-market gateway is not connected to the Paper signal "
@@ -149,6 +158,18 @@ def execution_readiness_payload() -> dict[str, Any]:
                 "runtime_enabled": False,
                 "order_submission_allowed": False,
             },
+        },
+        "event_order_management": {
+            "adapter_code_present": True,
+            "supports_open_order_reads": True,
+            "supports_cancel_one": True,
+            "supports_cancel_all": True,
+            "readback_verification": True,
+            "shared_submission_cancel_lock": True,
+            "requires_explicit_confirmation": True,
+            "runtime_enabled": False,
+            "integrated_into_operator_service": False,
+            "new_order_submission_allowed": False,
         },
         "shared_paper_risk": {
             "coordinator_code_present": True,

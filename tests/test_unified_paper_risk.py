@@ -145,6 +145,18 @@ class UnifiedPaperRiskSnapshotTests(unittest.TestCase):
         with self.assertRaisesRegex(UnifiedPaperRiskError, "skew"):
             self.snapshot()
 
+    def test_perps_halt_state_is_exposed_without_mutating_or_clearing_it(self):
+        db = sqlite3.connect(self.perps)
+        db.execute("UPDATE perps_paper_account SET halted=1")
+        db.commit()
+        db.close()
+        result = self.snapshot()
+        self.assertTrue(result.perps_halted)
+        self.assertTrue(result.snapshot_complete)
+        db = sqlite3.connect(self.perps)
+        self.assertEqual(db.execute("SELECT halted FROM perps_paper_account").fetchone()[0], 1)
+        db.close()
+
     def test_noncurrent_utc_baseline_fails_closed(self):
         db = sqlite3.connect(self.perps)
         db.execute("UPDATE perps_paper_account SET utc_day='2026-11-27'")

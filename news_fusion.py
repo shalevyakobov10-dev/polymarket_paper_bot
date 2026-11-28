@@ -245,7 +245,7 @@ def merge_news_sources(
                     additions = []
                 else:
                     additions = [values]
-                if output_field == "coverage_regions":
+                if output_field in {"source_languages", "coverage_regions"}:
                     additions = [
                         str(value).strip().casefold()
                         for value in additions
@@ -336,4 +336,9 @@ def summarize_news_source_coverage(items: list[dict[str, Any]]) -> dict[str, Any
     }
 
 
-__all__ = ["canonical_article_url", "merge_news_sources", "summarize_news_source_coverage"]
+__all__ = [
+    "canonical_article_identity_url",
+    "canonical_article_url",
+    "merge_news_sources",
+    "summarize_news_source_coverage",
+]

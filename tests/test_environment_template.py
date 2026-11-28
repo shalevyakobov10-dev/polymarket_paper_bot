@@ -55,6 +55,12 @@ class EnvironmentTemplateTests(unittest.TestCase):
         self.assertNotIn("/app/data", values["EVENT_LIVE_KILL_SWITCH_PATH"])
         self.assertNotIn("./data", values["EVENT_LIVE_KILL_SWITCH_PATH"])
 
+    def test_event_order_journal_path_is_explicit_and_distinct_from_perps_journal(self):
+        values = parse_environment_template()
+        self.assertEqual(values.get("ORDER_JOURNAL_DB"), "./data/order_journal.sqlite3")
+        self.assertEqual(values.get("PERPS_ORDER_JOURNAL_DB"), "./data/perps_order_journal.sqlite3")
+        self.assertNotEqual(values["ORDER_JOURNAL_DB"], values["PERPS_ORDER_JOURNAL_DB"])
+
     def test_perps_backup_settings_have_one_canonical_destination(self):
         values = parse_environment_template()
         self.assertEqual(values.get("PERPS_BACKUP_DIRECTORY"), "./data/perps_backups")

@@ -1196,6 +1196,28 @@ class ParserTests(unittest.TestCase):
         self.assertFalse(payload["live_execution_enabled"])
         forecast.assert_called_once()
 
+    def test_event_live_gate_endpoint_is_fail_closed_and_read_only(self):
+        server = app.ThreadingHTTPServer(("127.0.0.1", 0), app.Handler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        try:
+            thread.start()
+            address = f"http://127.0.0.1:{server.server_port}/event-live-gate"
+            with http_urlopen(address, timeout=3) as response:
+                payload = json.loads(response.read().decode("utf-8"))
+            self.assertEqual(response.status, 200)
+            self.assertEqual(payload["mode"], "EVENT_MARKET_LIVE_RELEASE_GATE_ONLY")
+            self.assertFalse(payload["all_release_gates_passed"])
+            self.assertFalse(payload["eligible_for_separate_gateway_review"])
+            self.assertFalse(payload["order_submission_allowed"])
+            self.assertFalse(payload["order_signing_allowed"])
+            self.assertTrue(payload["read_only"])
+            self.assertFalse(payload["private_credentials_loaded"])
+        finally:
+            server.shutdown()
+            server.server_close()
+            if thread.is_alive():
+                thread.join(timeout=2)
+
     def test_control_center_serves_read_only_dashboard_with_security_headers(self):
         server = app.ThreadingHTTPServer(("127.0.0.1", 0), app.Handler)
         thread = threading.Thread(target=server.serve_forever, daemon=True)
@@ -1221,6 +1243,8 @@ class ParserTests(unittest.TestCase):
             self.assertIn("Directional analysis languages", html)
             self.assertIn("/perps-paper", html)
             self.assertIn("/perps-live-gate", html)
+            self.assertIn("/event-live-gate", html)
+            self.assertIn("Event-market live release gates", html)
             self.assertIn("/perps-account-supervisor", html)
             self.assertIn("Perps account supervision", html)
             self.assertIn("RSS data path", html)

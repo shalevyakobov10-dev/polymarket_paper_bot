@@ -116,7 +116,8 @@ class PaperDataBackupTests(unittest.TestCase):
             event_path = root / "order_journal.sqlite3"
             self._database(paper, "paper")
             self._database(history, "market")
-            from order_journal import OrderJournal, create_order_intent
+            from order_journal import OrderJournal
+            from order_lifecycle import create_order_intent
             journal = OrderJournal(event_path)
             journal.create_intent(create_order_intent(
                 client_order_id="event-backup-order",
@@ -162,7 +163,8 @@ class PaperDataBackupTests(unittest.TestCase):
                 self.skipTest("symlinks are unavailable on this filesystem")
             with self.assertRaisesRegex(ValueError, "must not be a symlink"):
                 create_paper_data_backups([alias], root / "backups")
-            self.assertFalse((root / "backups").exists())
+            self.assertTrue((root / "backups").is_dir())
+            self.assertEqual(list((root / "backups").iterdir()), [])
 
     def test_corrupt_database_is_not_published_as_backup(self):
         with tempfile.TemporaryDirectory() as directory:

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import multiprocessing
 import os
 import sqlite3
 import tempfile
@@ -14,6 +15,23 @@ from paper_admission_runtime import (
     build_admission_id,
 )
 from unified_paper_risk import UnifiedPaperRiskSnapshot
+
+
+def _attempt_admission_lock_from_process(root: str, queue) -> None:
+    root_path = Path(root)
+    runtime = PaperAdmissionRuntime(
+        polymarket_db_path=root_path / "poly.sqlite3",
+        perps_db_path=root_path / "perps.sqlite3",
+        perps_history_db_path=root_path / "history.sqlite3",
+        coordinator_db_path=root_path / "admission.sqlite3",
+        admission_lock_path=root_path / "admission.lock",
+        admission_lock_timeout_seconds=0.3,
+    )
+    try:
+        with runtime._exclusive_admission_lock():
+            queue.put("acquired")
+    except PaperAdmissionRuntimeError as exc:
+        queue.put(str(exc))
 
 
 class PaperAdmissionRuntimeTests(unittest.TestCase):
@@ -300,7 +318,47 @@ class PaperAdmissionRuntimeTests(unittest.TestCase):
                 with runtime._exclusive_admission_lock():
                     self.fail("nested lock unexpectedly acquired")
 
+    def test_admission_lock_serializes_a_separate_process(self):
+        runtime = self.runtime()
+        context = multiprocessing.get_context("spawn")
+        output = context.Queue()
+        with runtime._exclusive_admission_lock():
+            process = context.Process(
+                target=_attempt_admission_lock_from_process,
+                args=(str(Path(self.temp.name)), output),
+            )
+            process.start()
+            process.join(timeout=10)
+            self.assertFalse(process.is_alive())
+            self.assertEqual(process.exitcode, 0)
+            result = output.get(timeout=2)
+        self.assertEqual(result, "admission_lock_timeout")
+
     def test_symlinked_admission_lock_is_rejected(self):
+        runtime = self.runtime()
+        alias = Path(self.temp.name) / "admission-lock-alias"
+        alias.symlink_to(runtime.admission_lock_path)
+        runtime.admission_lock_path = alias
+        with self.assertRaisesRegex(PaperAdmissionRuntimeError, "admission_lock_path_unsafe"):
+            with runtime._exclusive_admission_lock():
+                self.fail("symlinked lock must never be opened")
+
+    def test_env_configuration_requires_distinct_database_paths_and_positive_limits(self):
+        with patch.dict(os.environ, {
+            "PAPER_COMBINED_DAILY_LOSS_LIMIT_USD": "0",
+        }):
+            with self.assertRaisesRegex(
+                PaperAdmissionRuntimeError, "PAPER_COMBINED_DAILY_LOSS_LIMIT_USD"
+            ):
+                PaperAdmissionRuntime.from_env(
+                    polymarket_db_path=self.poly,
+                    perps_db_path=self.perps,
+                    perps_history_db_path=self.history,
+                )
+
+
+if __name__ == "__main__":
+    unittest.main()
         runtime = self.runtime()
         alias = Path(self.temp.name) / "admission-lock-alias"
         alias.symlink_to(runtime.admission_lock_path)

@@ -36,6 +36,7 @@ from perps_account_supervisor import (
 )
 from perps_live_release_gate import evaluate_perps_live_release_gate
 from event_live_release_gate import evaluate_event_live_release_gate
+from live_kill_switch import check_live_kill_switch
 from control_center import CONTROL_CENTER_HTML
 
 GAMMA_URL = "https://gamma-api.polymarket.com/markets"
@@ -1753,7 +1754,23 @@ class Handler(BaseHTTPRequestHandler):
                         "execution": "none",
                     })
             elif self.path == "/execution-readiness":
-                self._send(200, execution_readiness_payload())
+                payload = execution_readiness_payload()
+                switch = check_live_kill_switch()
+                switch_status = payload.get("event_live_kill_switch")
+                if not isinstance(switch_status, dict):
+                    switch_status = {}
+                    payload["event_live_kill_switch"] = switch_status
+                # Expose only sanitized status. The HTTP endpoint can never
+                # create, modify, or disarm the local switch.
+                switch_status.update({
+                    "verified": switch.get("verified") is True,
+                    "state": switch.get("state"),
+                    "engaged": switch.get("engaged") is not False,
+                    "reason_code": switch.get("reason_code"),
+                    "age_seconds": switch.get("age_seconds"),
+                    "order_submission_allowed": False,
+                })
+                self._send(200, payload)
             elif self.path == "/event-paper":
                 supervisor_snapshot = read_supervisor_status(SUPERVISOR_STATUS_FILE)
                 if supervisor_snapshot.get("event_paper_worker_enabled") is True:

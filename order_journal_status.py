@@ -6,6 +6,7 @@ is reported as unavailable rather than as an empty or healthy order book.
 """
 from __future__ import annotations
 
+import json
 import sqlite3
 from pathlib import Path
 from typing import Any
@@ -16,10 +17,20 @@ from order_lifecycle import submission_policy
 
 _MAX_INTENTS = 2000
 _MAX_DISPLAY = 100
+_MAX_INTENT_JSON_BYTES = 64_000
 
 
 class OrderJournalStatusError(RuntimeError):
     """The local order journal could not be read and validated completely."""
+
+
+def _unique_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    result: dict[str, Any] = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError("duplicate JSON field")
+        result[key] = value
+    return result
 
 
 def _safe_identifier(value: Any, *, maximum: int = 200) -> str:
@@ -74,8 +85,13 @@ def read_local_order_journal_status(
         for row in rows:
             stored_client_id = _safe_identifier(row["client_order_id"], maximum=128)
             try:
-                import json
-                state = json.loads(row["state_json"])
+                raw_state = row["state_json"]
+                if not isinstance(raw_state, str) or len(raw_state.encode("utf-8")) > _MAX_INTENT_JSON_BYTES:
+                    raise ValueError("intent state exceeds the local status reader limit")
+                state = json.loads(
+                    raw_state,
+                    object_pairs_hook=_unique_object,
+                )
                 if not isinstance(state, dict):
                     raise ValueError("intent state is not an object")
                 policy = submission_policy(state)

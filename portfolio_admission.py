@@ -188,7 +188,12 @@ class PortfolioAdmissionCoordinator:
     def mark_committed(self, admission_id: str, *, now: datetime | None = None) -> None:
         self._transition(admission_id, "PENDING", "AWAITING_RECONCILIATION", now=now)
 
-    def reconcile(self, admission_id: str, *, ledger_entry_id: str, now: datetime | None = None) -> None:
+    def reconcile(
+        self, admission_id: str, *, ledger_entry_id: str,
+        verified_present_from_ledger: bool, now: datetime | None = None,
+    ) -> None:
+        if verified_present_from_ledger is not True:
+            raise PortfolioAdmissionError("reconciliation_requires_verified_ledger_presence")
         if not isinstance(ledger_entry_id, str) or not ledger_entry_id.strip() or len(ledger_entry_id) > 200:
             raise PortfolioAdmissionError("ledger_entry_id_invalid")
         db = self._connect()
@@ -213,6 +218,40 @@ class PortfolioAdmissionCoordinator:
             raise
         except sqlite3.Error as exc:
             db.rollback()
+            raise PortfolioAdmissionError(f"coordinator_storage_failure:{type(exc).__name__}") from None
+        finally:
+            db.close()
+
+    def list_unresolved(self, *, limit: int = 100) -> list[dict[str, Any]]:
+        """List reservations that still require ledger reconciliation.
+
+        This is a read-only recovery aid. It never releases, expires, or
+        authorizes an admission; callers must inspect the corresponding venue
+        ledger and use the explicit verified reconcile/release transitions.
+        """
+        if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 1000:
+            raise PortfolioAdmissionError("unresolved_limit_invalid")
+        db = self._connect()
+        try:
+            rows = db.execute(
+                "SELECT admission_id,venue,exposure_usd,positions,status,created_at,updated_at "
+                "FROM portfolio_admissions WHERE status IN ('PENDING','AWAITING_RECONCILIATION') "
+                "ORDER BY created_at,admission_id LIMIT ?",
+                (limit,),
+            ).fetchall()
+            return [
+                {
+                    "admission_id": str(row[0]),
+                    "venue": str(row[1]),
+                    "exposure_usd": str(row[2]),
+                    "positions": int(row[3]),
+                    "status": str(row[4]),
+                    "created_at": str(row[5]),
+                    "updated_at": str(row[6]),
+                }
+                for row in rows
+            ]
+        except sqlite3.Error as exc:
             raise PortfolioAdmissionError(f"coordinator_storage_failure:{type(exc).__name__}") from None
         finally:
             db.close()

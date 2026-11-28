@@ -3,6 +3,7 @@ from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 
 from perps_market_data import (
+    PerpsAPIError,
     PerpsNoUsableMarkets,
     PerpsPublicMarketDataProvider,
     _normalize_book,
@@ -384,7 +385,27 @@ class PerpsMarketDataTests(unittest.TestCase):
         self.assertEqual(rows[1]["funding_rate"], "-0.00005")
         call = [row for row in provider.calls if row[0] == "/v1/info/funding"][0]
         self.assertEqual(call[1]["instrument_id"], 7)
-        self.assertEqual(call[1]["start_timestamp"], 1795334400)
+        self.assertEqual(call[1]["start_timestamp"], 1795334400000)
+        self.assertEqual(call[1]["end_timestamp"], 1795338000000)
+
+    def test_provider_rejects_truncated_public_funding_history(self):
+        class TruncatedProvider(FakePerpsProvider):
+            def _get_json(self, path, params=None):
+                if path == "/v1/info/funding":
+                    self.calls.append((path, params))
+                    return {
+                        "data": [{"funding_rate": "0.0001", "timestamp": 1795334400000}],
+                        "more": True,
+                    }
+                return super()._get_json(path, params)
+
+        provider = TruncatedProvider([instrument()], [ticker()], {7: book()})
+        with self.assertRaisesRegex(PerpsAPIError, "truncated"):
+            provider.load_funding_history(
+                7,
+                start_timestamp_ms=1795334400000,
+                end_timestamp_ms=1795338000000,
+            )
 
     def test_ticker_requires_nonempty_symbol(self):
         invalid = ticker()

@@ -97,6 +97,16 @@ class PerpsMarketHistoryStore:
             );
             CREATE INDEX IF NOT EXISTS idx_perps_funding_time
                 ON perps_funding_history(instrument_id, funding_timestamp_ms);
+            CREATE TABLE IF NOT EXISTS perps_funding_conflicts (
+                instrument_id INTEGER NOT NULL,
+                funding_timestamp_ms INTEGER NOT NULL,
+                observed_rates_json TEXT NOT NULL,
+                first_detected_at TEXT NOT NULL,
+                last_detected_at TEXT NOT NULL,
+                PRIMARY KEY(instrument_id, funding_timestamp_ms)
+            );
+            CREATE INDEX IF NOT EXISTS idx_perps_funding_conflicts_time
+                ON perps_funding_conflicts(last_detected_at);
             """
         )
         self.db.commit()
@@ -352,7 +362,12 @@ class PerpsMarketHistoryStore:
         *,
         received_at: str | datetime | None = None,
     ) -> dict[str, int]:
-        """Persist validated public funding settlements idempotently."""
+        """Persist funding settlements and quarantine conflicting revisions.
+
+        Repeated identical observations are idempotent. A different rate for an
+        already-published instrument/timestamp pair is retained as a conflict;
+        the first value is not silently treated as authoritative.
+        """
         if isinstance(instrument_id, bool) or not isinstance(instrument_id, int) or instrument_id < 0:
             raise ValueError("instrument_id must be a nonnegative integer")
         if not isinstance(entries, list):
@@ -377,16 +392,128 @@ class PerpsMarketHistoryStore:
             seen.add(timestamp_ms)
             rate = _finite_decimal(entry.get("funding_rate"), "funding_rate")
             rows.append((instrument_id, timestamp_ms, str(rate), captured))
-        before = self.db.total_changes
+
+        inserted = 0
+        duplicates = 0
+        conflicts = 0
         with self.db:
-            self.db.executemany(
-                """INSERT OR IGNORE INTO perps_funding_history
-                   (instrument_id, funding_timestamp_ms, funding_rate, received_at)
-                   VALUES (?,?,?,?)""",
-                rows,
-            )
-        inserted = self.db.total_changes - before
-        return {"received": len(rows), "inserted": inserted, "duplicates": len(rows) - inserted}
+            for row_instrument_id, timestamp_ms, rate_text, received_text in rows:
+                existing = self.db.execute(
+                    """SELECT funding_rate FROM perps_funding_history
+                       WHERE instrument_id=? AND funding_timestamp_ms=?""",
+                    (row_instrument_id, timestamp_ms),
+                ).fetchone()
+                if existing is None:
+                    self.db.execute(
+                        """INSERT INTO perps_funding_history
+                           (instrument_id, funding_timestamp_ms, funding_rate, received_at)
+                           VALUES (?,?,?,?)""",
+                        (row_instrument_id, timestamp_ms, rate_text, received_text),
+                    )
+                    inserted += 1
+                    continue
+
+                original_rate = _finite_decimal(existing["funding_rate"], "stored funding_rate")
+                observed_rate = _finite_decimal(rate_text, "observed funding_rate")
+                if original_rate == observed_rate:
+                    duplicates += 1
+                    continue
+
+                conflict = self.db.execute(
+                    """SELECT observed_rates_json FROM perps_funding_conflicts
+                       WHERE instrument_id=? AND funding_timestamp_ms=?""",
+                    (row_instrument_id, timestamp_ms),
+                ).fetchone()
+                if conflict is None:
+                    observed_rates = [str(original_rate), str(observed_rate)]
+                    self.db.execute(
+                        """INSERT INTO perps_funding_conflicts
+                           (instrument_id, funding_timestamp_ms, observed_rates_json,
+                            first_detected_at, last_detected_at)
+                           VALUES (?,?,?,?,?)""",
+                        (
+                            row_instrument_id, timestamp_ms,
+                            json.dumps(observed_rates, separators=(",", ":"), allow_nan=False),
+                            received_text, received_text,
+                        ),
+                    )
+                else:
+                    try:
+                        observed_rates = json.loads(conflict["observed_rates_json"])
+                    except (TypeError, ValueError, json.JSONDecodeError):
+                        raise ValueError("stored funding conflict record is corrupt") from None
+                    if not isinstance(observed_rates, list) or any(
+                        not isinstance(value, str) for value in observed_rates
+                    ):
+                        raise ValueError("stored funding conflict record is corrupt")
+                    if not any(
+                        _finite_decimal(value, "stored conflicting funding_rate") == observed_rate
+                        for value in observed_rates
+                    ):
+                        observed_rates.append(str(observed_rate))
+                    self.db.execute(
+                        """UPDATE perps_funding_conflicts
+                           SET observed_rates_json=?, last_detected_at=?
+                           WHERE instrument_id=? AND funding_timestamp_ms=?""",
+                        (
+                            json.dumps(observed_rates, separators=(",", ":"), allow_nan=False),
+                            received_text, row_instrument_id, timestamp_ms,
+                        ),
+                    )
+                conflicts += 1
+
+        return {
+            "received": len(rows),
+            "inserted": inserted,
+            "duplicates": duplicates,
+            "conflicts": conflicts,
+        }
+
+    def funding_conflict_at(
+        self,
+        instrument_id: int,
+        timestamp_ms: int,
+        *,
+        tolerance_ms: int = 1000,
+        as_of_received_at: str | datetime | None = None,
+    ) -> dict[str, Any] | None:
+        """Return a conflicting public revision once its first receipt is known."""
+        if isinstance(instrument_id, bool) or not isinstance(instrument_id, int) or instrument_id < 0:
+            raise ValueError("instrument_id must be a nonnegative integer")
+        if isinstance(timestamp_ms, bool) or not isinstance(timestamp_ms, int) or timestamp_ms <= 0:
+            raise ValueError("timestamp_ms must be a positive integer")
+        if isinstance(tolerance_ms, bool) or not isinstance(tolerance_ms, int) or not 0 <= tolerance_ms <= 5000:
+            raise ValueError("tolerance_ms must be between 0 and 5000")
+        as_of = _aware_iso(as_of_received_at, "as_of_received_at") if as_of_received_at is not None else None
+        query = """
+            SELECT funding_timestamp_ms, observed_rates_json, first_detected_at
+            FROM perps_funding_conflicts
+            WHERE instrument_id=? AND funding_timestamp_ms BETWEEN ? AND ?
+        """
+        params: tuple[Any, ...] = (
+            instrument_id, timestamp_ms - tolerance_ms, timestamp_ms + tolerance_ms
+        )
+        if as_of is not None:
+            query += " AND first_detected_at <= ?"
+            params += (as_of,)
+        row = self.db.execute(query + " ORDER BY ABS(funding_timestamp_ms - ?) LIMIT 1",
+                              (*params, timestamp_ms)).fetchone()
+        if row is None:
+            return None
+        try:
+            observed_rates = json.loads(row["observed_rates_json"])
+        except (TypeError, ValueError, json.JSONDecodeError):
+            raise ValueError("stored funding conflict record is corrupt") from None
+        if not isinstance(observed_rates, list) or any(
+            not isinstance(value, str) for value in observed_rates
+        ):
+            raise ValueError("stored funding conflict record is corrupt")
+        return {
+            "instrument_id": instrument_id,
+            "timestamp_ms": int(row["funding_timestamp_ms"]),
+            "observed_rates": observed_rates,
+            "first_detected_at": row["first_detected_at"],
+        }
 
     def funding_rate_at(
         self,
@@ -404,6 +531,14 @@ class PerpsMarketHistoryStore:
         if isinstance(tolerance_ms, bool) or not isinstance(tolerance_ms, int) or not 0 <= tolerance_ms <= 5000:
             raise ValueError("tolerance_ms must be between 0 and 5000")
         as_of = _aware_iso(as_of_received_at, "as_of_received_at") if as_of_received_at is not None else None
+        conflict = self.funding_conflict_at(
+            instrument_id,
+            timestamp_ms,
+            tolerance_ms=tolerance_ms,
+            as_of_received_at=as_of,
+        )
+        if conflict is not None:
+            return None
         if as_of is None:
             rows = self.db.execute(
                 """SELECT funding_timestamp_ms, funding_rate FROM perps_funding_history
@@ -450,12 +585,18 @@ class PerpsMarketHistoryStore:
                 "DELETE FROM perps_funding_history WHERE received_at < ?",
                 (normalized,),
             )
+            conflict_cursor = self.db.execute(
+                "DELETE FROM perps_funding_conflicts WHERE last_detected_at < ?",
+                (normalized,),
+            )
         snapshot_deleted = max(0, int(snapshot_cursor.rowcount))
         funding_deleted = max(0, int(funding_cursor.rowcount))
+        conflicts_deleted = max(0, int(conflict_cursor.rowcount))
         return {
-            "deleted": snapshot_deleted + funding_deleted,
+            "deleted": snapshot_deleted + funding_deleted + conflicts_deleted,
             "snapshot_rows_deleted": snapshot_deleted,
             "funding_rows_deleted": funding_deleted,
+            "funding_conflicts_deleted": conflicts_deleted,
             "remaining": self.count(),
         }
 

@@ -188,6 +188,25 @@ Automated tests should be run before deployment. The repository is not considere
 
 Railway IaC is defined in `.railway/railway.ts`; the current config pins one worker service and a 1GB volume in `europe-west4`. See [the Hebrew Railway deployment guide](DEPLOY_RAILWAY_HE.md) for the authenticated `railway config plan` / `railway config apply` process and cost check. The config is type-checked in CI, but it has **not** been applied to a Railway account and there is no running cloud service yet. See [the latest backtest research summary](research/2026-10-24-backtest-summary-he.md) before changing any thresholds.
 
+### Perps backup verification and staged restore
+
+The Perps worker writes verified SQLite backup sets and a SHA-256 manifest under `PERPS_BACKUP_DIRECTORY` (default: `data/perps_backups`). Verify every file in a manifest before using it:
+
+```bash
+python backup_paper_data.py --verify-manifest data/perps_backups/paper-backup-manifest-<timestamp>.json
+```
+
+To restore one database to a new staging path without overwriting an existing file:
+
+```bash
+python backup_paper_data.py \
+  --verify-manifest data/perps_backups/paper-backup-manifest-<timestamp>.json \
+  --restore-source perps_paper.sqlite3 \
+  --restore-to data/restore-staging/perps_paper.sqlite3
+```
+
+Use `perps_market_history.sqlite3` or `perps_order_journal.sqlite3` as the source name for those databases. The command validates manifest entries, SHA-256, SQLite integrity and foreign keys; incomplete or tampered backup sets are rejected. It only writes a new file and never replaces an active database. Stop all writers, verify the restored copy and plan an explicit cutover before changing any live database path. Same-volume backups are not off-site protection.
+
 ## Continuous integration
 
 GitHub Actions is configured in `.github/workflows/tests.yml` to compile the application and run the unit tests on pushes and pull requests.

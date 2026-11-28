@@ -538,8 +538,9 @@ class PerpsPublicMarketDataProvider:
             raise ValueError("funding history start must not exceed end")
         payload = self._get_json("/v1/info/funding", {
             "instrument_id": instrument_id,
-            "start_timestamp": start_ms // 1000,
-            "end_timestamp": end_ms // 1000,
+            # Official Perps SDK sends epoch milliseconds for this window.
+            "start_timestamp": start_ms,
+            "end_timestamp": end_ms,
         })
         if not isinstance(payload, dict) or not isinstance(payload.get("data"), list):
             raise PerpsAPIError("Perps funding history response is missing data")

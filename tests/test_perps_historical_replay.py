@@ -174,6 +174,49 @@ class PerpsHistoricalReplayTests(unittest.TestCase):
                     "0.0002",
                 )
 
+    def test_point_in_time_replay_exposes_funding_conflict_only_after_receipt(self):
+        with tempfile.TemporaryDirectory() as directory:
+            history_path = Path(directory) / "perps-history.sqlite3"
+            with PerpsMarketHistoryStore(history_path) as store:
+                settlement_ms = int((BASE + timedelta(hours=1)).timestamp() * 1000)
+                store.record_funding_history(
+                    7,
+                    [{
+                        "instrument_id": 7,
+                        "timestamp_ms": settlement_ms,
+                        "funding_rate": "0.0002",
+                    }],
+                    received_at=BASE + timedelta(hours=1, seconds=10),
+                )
+                store.record_funding_history(
+                    7,
+                    [{
+                        "instrument_id": 7,
+                        "timestamp_ms": settlement_ms,
+                        "funding_rate": "0.0003",
+                    }],
+                    received_at=BASE + timedelta(hours=1, seconds=30),
+                )
+
+                before_correction = PointInTimePerpsHistory(
+                    store, BASE + timedelta(hours=1, seconds=20)
+                )
+                after_correction = PointInTimePerpsHistory(
+                    store, BASE + timedelta(hours=1, seconds=30)
+                )
+
+                self.assertIsNone(
+                    before_correction.funding_conflict_at(7, settlement_ms)
+                )
+                self.assertEqual(
+                    before_correction.funding_rate_at(7, settlement_ms)["funding_rate"],
+                    "0.0002",
+                )
+                conflict = after_correction.funding_conflict_at(7, settlement_ms)
+                self.assertIsNotNone(conflict)
+                self.assertEqual(conflict["observed_rates"], ["0.0002", "0.0003"])
+                self.assertIsNone(after_correction.funding_rate_at(7, settlement_ms))
+
     def test_future_funding_event_is_hidden_even_when_received_early(self):
         with tempfile.TemporaryDirectory() as directory:
             history_path = Path(directory) / "perps-history.sqlite3"

@@ -258,13 +258,128 @@ class PerpsMarketHistoryStoreTests(unittest.TestCase):
                 ]
                 first = store.record_funding_history(11, rows)
                 repeated = store.record_funding_history(11, rows)
-                self.assertEqual(first, {"received": 2, "inserted": 2, "duplicates": 0})
-                self.assertEqual(repeated, {"received": 2, "inserted": 0, "duplicates": 2})
+                self.assertEqual(first, {
+                    "received": 2, "inserted": 2, "duplicates": 0, "conflicts": 0
+                })
+                self.assertEqual(repeated, {
+                    "received": 2, "inserted": 0, "duplicates": 2, "conflicts": 0
+                })
                 self.assertEqual(
                     store.funding_rate_at(11, 1795334400000)["funding_rate"],
                     "0.000125",
                 )
                 self.assertIsNone(store.funding_rate_at(11, 1795335000000, tolerance_ms=1000))
+
+    def test_conflicting_funding_revision_is_quarantined_from_engine_reads(self):
+        with tempfile.TemporaryDirectory() as directory:
+            with PerpsMarketHistoryStore(Path(directory) / "perps.sqlite3") as store:
+                timestamp_ms = 1795334400000
+                initial = store.record_funding_history(
+                    11,
+                    [{
+                        "instrument_id": 11,
+                        "timestamp_ms": timestamp_ms,
+                        "funding_rate": "0.000125",
+                    }],
+                    received_at="2026-11-22T08:00:00+00:00",
+                )
+                self.assertEqual(initial["inserted"], 1)
+                self.assertEqual(
+                    store.funding_rate_at(11, timestamp_ms)["funding_rate"],
+                    "0.000125",
+                )
+
+                revised = store.record_funding_history(
+                    11,
+                    [{
+                        "instrument_id": 11,
+                        "timestamp_ms": timestamp_ms,
+                        "funding_rate": "0.0002",
+                    }],
+                    received_at="2026-11-22T08:00:30+00:00",
+                )
+                self.assertEqual(revised, {
+                    "received": 1, "inserted": 0, "duplicates": 0, "conflicts": 1
+                })
+                # Never continue with the old value once the same settlement
+                # timestamp has conflicting public observations.
+                self.assertIsNone(store.funding_rate_at(11, timestamp_ms))
+                conflict_status = store.funding_conflict_at(11, timestamp_ms)
+                self.assertEqual(
+                    conflict_status["observed_rates"],
+                    ["0.000125", "0.0002"],
+                )
+                conflict = store.db.execute(
+                    "SELECT observed_rates_json FROM perps_funding_conflicts "
+                    "WHERE instrument_id=? AND funding_timestamp_ms=?",
+                    (11, timestamp_ms),
+                ).fetchone()
+                self.assertEqual(
+                    __import__("json").loads(conflict["observed_rates_json"]),
+                    ["0.000125", "0.0002"],
+                )
+
+                repeated = store.record_funding_history(
+                    11,
+                    [{
+                        "instrument_id": 11,
+                        "timestamp_ms": timestamp_ms,
+                        "funding_rate": "0.0002",
+                    }],
+                    received_at="2026-11-22T08:01:00+00:00",
+                )
+                self.assertEqual(repeated["conflicts"], 1)
+                self.assertIsNone(store.funding_rate_at(11, timestamp_ms))
+
+    def test_funding_conflict_becomes_visible_only_after_first_detection(self):
+        with tempfile.TemporaryDirectory() as directory:
+            with PerpsMarketHistoryStore(Path(directory) / "perps.sqlite3") as store:
+                timestamp_ms = 1795334400000
+                store.record_funding_history(
+                    11,
+                    [{
+                        "instrument_id": 11,
+                        "timestamp_ms": timestamp_ms,
+                        "funding_rate": "0.000125",
+                    }],
+                    received_at="2026-11-22T08:00:10+00:00",
+                )
+                store.record_funding_history(
+                    11,
+                    [{
+                        "instrument_id": 11,
+                        "timestamp_ms": timestamp_ms,
+                        "funding_rate": "0.0002",
+                    }],
+                    received_at="2026-11-22T08:00:30+00:00",
+                )
+
+                # A strategy at 08:00:20 had not yet observed the correction.
+                point_in_time_old = store.funding_rate_at(
+                    11,
+                    timestamp_ms,
+                    as_of_received_at="2026-11-22T08:00:20+00:00",
+                )
+                self.assertEqual(point_in_time_old["funding_rate"], "0.000125")
+                self.assertIsNone(store.funding_conflict_at(
+                    11,
+                    timestamp_ms,
+                    as_of_received_at="2026-11-22T08:00:20+00:00",
+                ))
+                # The same settlement is quarantined for decisions after 08:00:30.
+                self.assertIsNone(store.funding_rate_at(
+                    11,
+                    timestamp_ms,
+                    as_of_received_at="2026-11-22T08:00:30+00:00",
+                ))
+                self.assertEqual(
+                    store.funding_conflict_at(
+                        11,
+                        timestamp_ms,
+                        as_of_received_at="2026-11-22T08:00:30+00:00",
+                    )["observed_rates"],
+                    ["0.000125", "0.0002"],
+                )
 
     def test_rejects_mismatched_or_duplicate_funding_settlement_rows(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -302,6 +417,7 @@ class PerpsMarketHistoryStoreTests(unittest.TestCase):
                     "deleted": 2,
                     "snapshot_rows_deleted": 1,
                     "funding_rows_deleted": 1,
+                    "funding_conflicts_deleted": 0,
                     "remaining": 1,
                 })
                 self.assertIsNone(store.funding_rate_at(

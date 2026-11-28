@@ -4,6 +4,7 @@ from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
 
+from perps_market_history_store import PerpsMarketHistoryStore
 from perps_paper_engine import PerpsPaperEngine
 
 
@@ -519,6 +520,64 @@ class PerpsPaperEngineTests(unittest.TestCase):
                     "SELECT details_json FROM perps_paper_events WHERE event_type='FUNDING_RECONCILIATION_REQUIRED'"
                 ).fetchone()
                 self.assertIn("no estimate applied", event["details_json"])
+
+    def test_conflicting_published_funding_rates_halt_position_reconciliation(self):
+        with tempfile.TemporaryDirectory() as directory:
+            with PerpsMarketHistoryStore(Path(directory) / "market-history.sqlite3") as history_store:
+                with self.make_engine(directory) as engine:
+                    process_snapshot_at_capture(engine, make_snapshot(), FakeHistory())
+                    history_store.record_funding_history(
+                        7,
+                        [{
+                            "instrument_id": 7,
+                            "timestamp_ms": FUNDING_MS,
+                            "funding_rate": "0.00025",
+                        }],
+                    )
+                    history_store.record_funding_history(
+                        7,
+                        [{
+                            "instrument_id": 7,
+                            "timestamp_ms": FUNDING_MS,
+                            "funding_rate": "0.0005",
+                        }],
+                    )
+
+                    class ConflictedHistory(FakeHistory):
+                        def funding_rate_at(self, instrument_id, timestamp_ms, *, tolerance_ms=1000):
+                            return history_store.funding_rate_at(
+                                instrument_id, timestamp_ms, tolerance_ms=tolerance_ms
+                            )
+
+                        def funding_conflict_at(self, instrument_id, timestamp_ms, *, tolerance_ms=1000):
+                            return history_store.funding_conflict_at(
+                                instrument_id, timestamp_ms, tolerance_ms=tolerance_ms
+                            )
+
+                    snapshot = make_snapshot(
+                        sequence=4,
+                        timestamp_ms=FUNDING_MS + 1_000,
+                        next_funding_ms=FUNDING_MS + 3_600_000,
+                    )
+                    result = process_snapshot_at_capture(
+                        engine, snapshot, ConflictedHistory()
+                    )
+                    self.assertTrue(result["halted"])
+                    self.assertEqual(
+                        result["halt_reason"],
+                        "published_funding_settlement_conflict",
+                    )
+                    position = engine.db.execute(
+                        "SELECT funding_paid FROM perps_paper_positions"
+                    ).fetchone()
+                    self.assertEqual(Decimal(position["funding_paid"]), Decimal("0"))
+                    event = engine.db.execute(
+                        "SELECT details_json FROM perps_paper_events "
+                        "WHERE event_type='FUNDING_RECONCILIATION_REQUIRED'"
+                    ).fetchone()
+                    self.assertIn("conflicting published rates", event["details_json"])
+                    self.assertIn("no ticker-rate estimate applied", event["details_json"])
+                    self.assertIn('"observed_funding_rates":["0.00025","0.0005"]', event["details_json"])
 
     def test_missing_exact_funding_settlement_halts_without_guessing_rate(self):
         with tempfile.TemporaryDirectory() as directory:

@@ -59,6 +59,28 @@ class PointInTimePerpsHistory:
                 eligible.append(row)
         return eligible
 
+    def funding_conflict_at(
+        self,
+        instrument_id: int,
+        timestamp_ms: int,
+        *,
+        tolerance_ms: int = 1000,
+    ) -> dict[str, Any] | None:
+        conflict_reader = getattr(self._store, "funding_conflict_at", None)
+        if not callable(conflict_reader):
+            return None
+        conflict = conflict_reader(
+            instrument_id,
+            timestamp_ms,
+            tolerance_ms=tolerance_ms,
+            as_of_received_at=self._as_of,
+        )
+        if not isinstance(conflict, dict):
+            return None
+        if int(conflict.get("timestamp_ms", 0)) > int(self._as_of.timestamp() * 1000):
+            return None
+        return conflict
+
     def funding_rate_at(
         self,
         instrument_id: int,

@@ -218,6 +218,41 @@ class SupervisorTests(unittest.TestCase):
         self.assertNotIn("LIVE_TRADING_ENABLED", config.perps_worker_env)
         self.assertNotIn("LIVE_TRADING_ARMED", config.perps_worker_env)
 
+    def test_railway_iac_perps_heartbeat_budget_matches_supervisor_minimum(self):
+        iac_path = Path(__file__).resolve().parents[1] / ".railway" / "railway.ts"
+        iac = iac_path.read_text(encoding="utf-8")
+
+        def configured_integer(name):
+            rows = [
+                line.strip() for line in iac.splitlines()
+                if line.strip().startswith(f"{name}:")
+            ]
+            self.assertEqual(len(rows), 1, f"expected one Railway setting for {name}")
+            parts = rows[0].split('"')
+            self.assertEqual(len(parts), 3, f"expected a quoted integer for {name}")
+            return int(parts[1])
+
+        poll_seconds = configured_integer("PERPS_POLL_INTERVAL_SECONDS")
+        market_limit = configured_integer("PERPS_MARKET_LIMIT")
+        heartbeat_timeout = configured_integer("PERPS_WORKER_HEARTBEAT_TIMEOUT_SECONDS")
+        required_timeout = max(
+            180,
+            poll_seconds * 3 + (market_limit + 10) * 8 + 80,
+        )
+        self.assertGreaterEqual(heartbeat_timeout, required_timeout)
+
+        config = build_supervisor_config({
+            "ENABLE_PERPS_MARKET_DATA_WORKER": "true",
+            "ENABLE_PERPS_PAPER_ENGINE": "true",
+            "PERPS_POLL_INTERVAL_SECONDS": str(poll_seconds),
+            "PERPS_MARKET_LIMIT": str(market_limit),
+            "PERPS_WORKER_HEARTBEAT_TIMEOUT_SECONDS": str(heartbeat_timeout),
+        })
+        self.assertEqual(
+            config.perps_worker_heartbeat_timeout_seconds,
+            float(heartbeat_timeout),
+        )
+
     def test_perps_heartbeat_timeout_cannot_be_shorter_than_market_poll_budget(self):
         with self.assertRaisesRegex(ValueError, "between 359 and 7200"):
             build_supervisor_config({

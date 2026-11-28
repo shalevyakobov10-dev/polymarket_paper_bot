@@ -214,7 +214,30 @@ class PortfolioAdmissionCoordinator:
     def release(self, admission_id: str, *, confirmed_absent_from_ledger: bool, now: datetime | None = None) -> None:
         if confirmed_absent_from_ledger is not True:
             raise PortfolioAdmissionError("release_requires_verified_ledger_absence")
-        self._transition(admission_id, "PENDING", "RELEASED", now=now)
+        # A caller may verify absence after a crash or failed venue-ledger
+        # commit, when the reservation has already reached
+        # AWAITING_RECONCILIATION. Both pre-commit and uncertain reservations
+        # may be released, but only on this explicit verified-absence path.
+        db = self._connect()
+        stamp = _aware(now or datetime.now(timezone.utc), "now").isoformat()
+        try:
+            db.execute("BEGIN IMMEDIATE")
+            cursor = db.execute(
+                "UPDATE portfolio_admissions SET status='RELEASED',updated_at=? "
+                "WHERE admission_id=? AND status IN ('PENDING','AWAITING_RECONCILIATION')",
+                (stamp, admission_id),
+            )
+            if cursor.rowcount != 1:
+                raise PortfolioAdmissionError("reservation_state_conflict_or_missing")
+            db.commit()
+        except PortfolioAdmissionError:
+            db.rollback()
+            raise
+        except sqlite3.Error as exc:
+            db.rollback()
+            raise PortfolioAdmissionError(f"coordinator_storage_failure:{type(exc).__name__}") from None
+        finally:
+            db.close()
 
     def _transition(self, admission_id: str, expected: str, target: str, *, now: datetime | None) -> None:
         db = self._connect()

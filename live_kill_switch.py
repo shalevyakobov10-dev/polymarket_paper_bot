@@ -6,10 +6,12 @@ This module never creates a disarmed state and never changes an order.
 """
 from __future__ import annotations
 
+import argparse
 import json
 import os
 import re
 import stat
+import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -135,8 +137,100 @@ def _unique_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
     return result
 
 
+def engage_live_kill_switch(
+    path: str | Path,
+    *,
+    reason_code: str,
+    now: datetime | None = None,
+) -> dict[str, Any]:
+    """Atomically engage the local switch. There is deliberately no disarm API."""
+    if not isinstance(reason_code, str) or not _REASON_RE.fullmatch(reason_code):
+        raise ValueError("reason_code must be a short safe identifier")
+    current = now or datetime.now(timezone.utc)
+    if not isinstance(current, datetime) or current.tzinfo is None or current.utcoffset() is None:
+        raise ValueError("now must be timezone-aware")
+    current = current.astimezone(timezone.utc)
+    target = Path(path).expanduser()
+    target.parent.mkdir(parents=True, exist_ok=True)
+    payload = json.dumps({
+        "schema_version": _SCHEMA_VERSION,
+        "state": "ENGAGED",
+        "updated_at_utc": current.isoformat(),
+        "reason_code": reason_code,
+    }, sort_keys=True, separators=(",", ":")).encode("utf-8")
+
+    descriptor: int | None = None
+    temporary_path: str | None = None
+    try:
+        descriptor, temporary_path = tempfile.mkstemp(
+            prefix=f".{target.name}.engage-",
+            dir=str(target.parent),
+        )
+        if hasattr(os, "fchmod"):
+            os.fchmod(descriptor, 0o600)
+        with os.fdopen(descriptor, "wb") as handle:
+            descriptor = None
+            handle.write(payload)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary_path, target)
+        temporary_path = None
+        if hasattr(os, "O_DIRECTORY"):
+            directory_fd = os.open(target.parent, os.O_RDONLY | os.O_DIRECTORY)
+            try:
+                os.fsync(directory_fd)
+            finally:
+                os.close(directory_fd)
+    finally:
+        if descriptor is not None:
+            try:
+                os.close(descriptor)
+            except OSError:
+                pass
+        if temporary_path is not None:
+            try:
+                os.unlink(temporary_path)
+            except OSError:
+                pass
+
+    report = read_live_kill_switch(target, now=current)
+    if report.get("verified") is not True or report.get("engaged") is not True:
+        raise RuntimeError("kill_switch_engage_write_could_not_be_verified")
+    return report
+
+
 def check_live_kill_switch() -> dict[str, Any]:
     """Read the configured status file. No default disarmed state exists."""
     default_path = Path(os.getenv("DATA_DIR", "data")) / "event_live_kill_switch.json"
     configured = os.getenv("EVENT_LIVE_KILL_SWITCH_PATH")
     return read_live_kill_switch(configured or default_path)
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(
+        description="Operate the local event-market live kill switch."
+    )
+    subparsers = parser.add_subparsers(dest="command", required=True)
+    engage = subparsers.add_parser(
+        "engage", help="atomically engage the live switch (there is no disarm command)"
+    )
+    engage.add_argument(
+        "--reason",
+        required=True,
+        help="short reason code, e.g. operator_request or incident_detected",
+    )
+    args = parser.parse_args()
+    if args.command == "engage":
+        default_path = Path(os.getenv("DATA_DIR", "data")) / "event_live_kill_switch.json"
+        configured = os.getenv("EVENT_LIVE_KILL_SWITCH_PATH")
+        report = engage_live_kill_switch(
+            configured or default_path,
+            reason_code=args.reason,
+        )
+        print(json.dumps(report, sort_keys=True))
+        return 0 if report.get("verified") is True and report.get("engaged") is True else 1
+    return 2
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

@@ -45,6 +45,7 @@ class UnifiedPaperRiskSnapshot:
     freshest_mark_age_seconds: str
     stalest_mark_age_seconds: str
     cross_venue_mark_skew_seconds: str
+    perps_halted: bool
     marks_fresh: bool
     snapshot_complete: bool
     execution: str = "none"
@@ -365,6 +366,7 @@ def build_unified_paper_risk_snapshot(
         freshest_mark_age_seconds=_text(Decimal(str(freshest))),
         stalest_mark_age_seconds=_text(Decimal(str(stalest))),
         cross_venue_mark_skew_seconds=_text(Decimal(str(skew))),
+        perps_halted=perps["halted"],
         marks_fresh=True,
         snapshot_complete=True,
     )

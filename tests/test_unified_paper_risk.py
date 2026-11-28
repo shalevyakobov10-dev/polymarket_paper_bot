@@ -143,7 +143,7 @@ class UnifiedPaperRiskSnapshotTests(unittest.TestCase):
         db.commit()
         db.close()
         with self.assertRaisesRegex(UnifiedPaperRiskError, "skew"):
-            self.snapshot()
+            self.snapshot(max_mark_age_seconds=300)
 
     def test_perps_halt_state_is_exposed_without_mutating_or_clearing_it(self):
         db = sqlite3.connect(self.perps)

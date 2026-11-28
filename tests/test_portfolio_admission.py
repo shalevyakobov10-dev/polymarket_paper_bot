@@ -51,28 +51,28 @@ class PortfolioAdmissionTests(unittest.TestCase):
             max_total_positions=max_positions, now=now or self.now,
         )
 
-    def make_ledger(self, path, *, venue, ledger_entry_id=None, exposure=None):
+    def make_ledger(self, path, *, venue, ledger_entry_id=None, exposure=None, admission_id=None):
         connection = sqlite3.connect(path)
         try:
             if venue == "POLYMARKET":
                 connection.execute("DROP TABLE IF EXISTS trades")
                 connection.execute(
-                    "CREATE TABLE trades (trade_id INTEGER PRIMARY KEY, notional REAL NOT NULL, status TEXT NOT NULL)"
+                    "CREATE TABLE trades (trade_id INTEGER PRIMARY KEY, notional REAL NOT NULL, status TEXT NOT NULL, admission_id TEXT UNIQUE)"
                 )
                 if ledger_entry_id is not None:
                     connection.execute(
-                        "INSERT INTO trades(trade_id,notional,status) VALUES(?,?,?)",
-                        (int(ledger_entry_id), float(exposure), "OPEN"),
+                        "INSERT INTO trades(trade_id,notional,status,admission_id) VALUES(?,?,?,?)",
+                        (int(ledger_entry_id), float(exposure), "OPEN", admission_id),
                     )
             else:
                 connection.execute("DROP TABLE IF EXISTS perps_paper_positions")
                 connection.execute(
-                    "CREATE TABLE perps_paper_positions (position_id INTEGER PRIMARY KEY, quantity TEXT NOT NULL, entry_price TEXT NOT NULL, status TEXT NOT NULL)"
+                    "CREATE TABLE perps_paper_positions (position_id INTEGER PRIMARY KEY, quantity TEXT NOT NULL, entry_price TEXT NOT NULL, status TEXT NOT NULL, admission_id TEXT UNIQUE)"
                 )
                 if ledger_entry_id is not None:
                     connection.execute(
-                        "INSERT INTO perps_paper_positions(position_id,quantity,entry_price,status) VALUES(?,?,?,?)",
-                        (int(ledger_entry_id), "0.5", str(float(exposure) * 2), "OPEN"),
+                        "INSERT INTO perps_paper_positions(position_id,quantity,entry_price,status,admission_id) VALUES(?,?,?,?,?)",
+                        (int(ledger_entry_id), "0.5", str(float(exposure) * 2), "OPEN", admission_id),
                     )
             connection.commit()
         finally:
@@ -87,6 +87,7 @@ class PortfolioAdmissionTests(unittest.TestCase):
         self.make_ledger(
             ledger_path, venue=venue,
             ledger_entry_id=ledger_entry_id, exposure=exposure,
+            admission_id=admission_id,
         )
         return self.coordinator.reconcile_from_ledger(
             admission_id, ledger_database_path=ledger_path,
@@ -102,11 +103,107 @@ class PortfolioAdmissionTests(unittest.TestCase):
             ledger_path, venue=venue,
             ledger_entry_id=ledger_entry_id if entry_present else None,
             exposure=exposure if entry_present else None,
+            admission_id=admission_id if entry_present else None,
         )
         return self.coordinator.release_from_ledger(
             admission_id, ledger_database_path=ledger_path,
             ledger_entry_id=ledger_entry_id, now=now or self.now,
         )
+
+    def test_recovery_finds_exact_event_trade_after_crash_before_reconcile(self):
+        admission_id = "event-crash-recovery"
+        self.reserve(admission_id, exposure="40")
+        ledger_path = self.path.parent / "event-crash-recovery.sqlite3"
+        self.make_ledger(
+            ledger_path,
+            venue="POLYMARKET",
+            ledger_entry_id="101",
+            exposure="40",
+            admission_id=admission_id,
+        )
+        entry_id = self.coordinator.reconcile_admission_from_ledger(
+            admission_id, ledger_database_path=ledger_path, now=self.now
+        )
+        self.assertEqual(entry_id, "101")
+        rows = self.coordinator.list_unresolved()
+        self.assertEqual(rows, [])
+
+    def test_recovery_finds_exact_perps_position_after_crash_before_reconcile(self):
+        admission_id = "perps-crash-recovery"
+        self.reserve(admission_id, venue="PERPS", exposure="40")
+        ledger_path = self.path.parent / "perps-crash-recovery.sqlite3"
+        self.make_ledger(
+            ledger_path,
+            venue="PERPS",
+            ledger_entry_id="102",
+            exposure="40",
+            admission_id=admission_id,
+        )
+        entry_id = self.coordinator.reconcile_admission_from_ledger(
+            admission_id, ledger_database_path=ledger_path, now=self.now
+        )
+        self.assertEqual(entry_id, "102")
+        self.assertEqual(self.coordinator.list_unresolved(), [])
+
+    def test_recovery_missing_or_mismatched_admission_row_stays_reserved(self):
+        admission_id = "missing-crash-entry"
+        self.reserve(admission_id, exposure="40")
+        ledger_path = self.path.parent / "missing-crash-entry.sqlite3"
+        self.make_ledger(ledger_path, venue="POLYMARKET")
+        with self.assertRaisesRegex(PortfolioAdmissionError, "ledger_entry_not_found"):
+            self.coordinator.reconcile_admission_from_ledger(
+                admission_id, ledger_database_path=ledger_path, now=self.now
+            )
+        self.assertEqual(
+            self.coordinator.list_unresolved()[0]["admission_id"],
+            admission_id,
+        )
+
+        mismatch_id = "mismatch-crash-entry"
+        self.reserve(mismatch_id, exposure="40")
+        mismatch_path = self.path.parent / "mismatch-crash-entry.sqlite3"
+        self.make_ledger(
+            mismatch_path,
+            venue="POLYMARKET",
+            ledger_entry_id="103",
+            exposure="39",
+            admission_id=mismatch_id,
+        )
+        with self.assertRaisesRegex(PortfolioAdmissionError, "exposure_mismatch"):
+            self.coordinator.reconcile_admission_from_ledger(
+                mismatch_id, ledger_database_path=mismatch_path, now=self.now
+            )
+        self.assertEqual(
+            {r["admission_id"] for r in self.coordinator.list_unresolved()},
+            {admission_id, mismatch_id},
+        )
+
+    def test_pending_reservation_releases_only_after_proven_admission_absence(self):
+        admission_id = "rolled-back-entry"
+        self.reserve(admission_id, exposure="40")
+        ledger_path = self.path.parent / "rolled-back-entry.sqlite3"
+        self.make_ledger(ledger_path, venue="POLYMARKET")
+        self.coordinator.release_admission_if_absent_from_ledger(
+            admission_id, ledger_database_path=ledger_path, now=self.now
+        )
+        self.assertEqual(self.coordinator.list_unresolved(), [])
+
+    def test_pending_reservation_cannot_release_when_admission_row_exists(self):
+        admission_id = "committed-entry"
+        self.reserve(admission_id, exposure="40")
+        ledger_path = self.path.parent / "committed-entry.sqlite3"
+        self.make_ledger(
+            ledger_path,
+            venue="POLYMARKET",
+            ledger_entry_id="104",
+            exposure="40",
+            admission_id=admission_id,
+        )
+        with self.assertRaisesRegex(PortfolioAdmissionError, "ledger_entry_present"):
+            self.coordinator.release_admission_if_absent_from_ledger(
+                admission_id, ledger_database_path=ledger_path, now=self.now
+            )
+        self.assertEqual(self.coordinator.list_unresolved()[0]["admission_id"], admission_id)
 
     def test_reservation_is_durable_and_idempotent(self):
         first = self.reserve("poly-1")

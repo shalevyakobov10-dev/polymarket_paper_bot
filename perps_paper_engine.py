@@ -238,6 +238,14 @@ class PerpsPaperEngine:
             self.db.execute(
                 "ALTER TABLE perps_paper_positions ADD COLUMN pending_exit_liquidated INTEGER NOT NULL DEFAULT 0"
             )
+        if "admission_id" not in position_columns:
+            self.db.execute(
+                "ALTER TABLE perps_paper_positions ADD COLUMN admission_id TEXT"
+            )
+        self.db.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_perps_paper_admission_id "
+            "ON perps_paper_positions(admission_id) WHERE admission_id IS NOT NULL"
+        )
         self.db.execute(
             """
             INSERT OR IGNORE INTO perps_paper_account

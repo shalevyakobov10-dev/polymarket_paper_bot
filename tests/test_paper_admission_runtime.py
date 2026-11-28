@@ -215,6 +215,100 @@ class PaperAdmissionRuntimeTests(unittest.TestCase):
         self.assertEqual(report.still_pending, (absent.admission_id,))
         self.assertEqual(runtime.coordinator.list_unresolved()[0]["admission_id"], absent.admission_id)
 
+    def test_reserve_commit_and_reconcile_holds_shared_lock_through_exact_ledger_readback(self):
+        runtime = self.runtime()
+        connection = sqlite3.connect(self.poly)
+        connection.execute(
+            "CREATE TABLE trades (trade_id INTEGER PRIMARY KEY, notional TEXT, status TEXT, admission_id TEXT UNIQUE)"
+        )
+        connection.commit()
+        connection.close()
+
+        def write_ledger(admission_id):
+            connection = sqlite3.connect(self.poly)
+            try:
+                cursor = connection.execute(
+                    "INSERT INTO trades(notional,status,admission_id) VALUES('10.50','OPEN',?)",
+                    (admission_id,),
+                )
+                connection.commit()
+                return cursor.lastrowid
+            finally:
+                connection.close()
+
+        with patch(
+            "paper_admission_runtime.build_unified_paper_risk_snapshot",
+            return_value=self.snapshot,
+        ):
+            result = runtime.reserve_commit_and_reconcile(
+                venue="POLYMARKET",
+                source_identity="market-lock-test|snapshot-1",
+                strategy_version="event-v1",
+                exposure_usd="10.50",
+                write_ledger=write_ledger,
+                now=self.now,
+            )
+        self.assertEqual(result.ledger_entry_id, "1")
+        self.assertEqual(result.ledger_result, 1)
+        self.assertEqual(result.ticket.result.status, "PENDING")
+        self.assertEqual(runtime.coordinator.list_unresolved(), [])
+        self.assertFalse(result.as_dict()["order_submission_allowed"])
+        self.assertFalse(result.as_dict()["live_execution_enabled"])
+
+    def test_failed_ledger_callback_releases_only_after_verified_absence(self):
+        runtime = self.runtime()
+        connection = sqlite3.connect(self.poly)
+        connection.execute(
+            "CREATE TABLE trades (trade_id INTEGER PRIMARY KEY, notional TEXT, status TEXT, admission_id TEXT UNIQUE)"
+        )
+        connection.commit()
+        connection.close()
+
+        def failing_writer(_admission_id):
+            raise RuntimeError("simulated transaction rollback")
+
+        with patch(
+            "paper_admission_runtime.build_unified_paper_risk_snapshot",
+            return_value=self.snapshot,
+        ):
+            with self.assertRaisesRegex(
+                PaperAdmissionRuntimeError, "admission_ledger_write_failed"
+            ):
+                runtime.reserve_commit_and_reconcile(
+                    venue="POLYMARKET",
+                    source_identity="market-lock-test|rolled-back",
+                    strategy_version="event-v1",
+                    exposure_usd="10.50",
+                    write_ledger=failing_writer,
+                    now=self.now,
+                )
+        connection = sqlite3.connect(self.coordinator)
+        try:
+            state = connection.execute(
+                "SELECT status FROM portfolio_admissions"
+            ).fetchone()[0]
+        finally:
+            connection.close()
+        self.assertEqual(state, "RELEASED")
+        self.assertEqual(runtime.coordinator.list_unresolved(), [])
+
+    def test_admission_lock_timeout_fails_closed(self):
+        runtime = self.runtime()
+        runtime.admission_lock_timeout_seconds = 0.1
+        with runtime._exclusive_admission_lock():
+            with self.assertRaisesRegex(PaperAdmissionRuntimeError, "admission_lock_timeout"):
+                with runtime._exclusive_admission_lock():
+                    self.fail("nested lock unexpectedly acquired")
+
+    def test_symlinked_admission_lock_is_rejected(self):
+        runtime = self.runtime()
+        alias = Path(self.temp.name) / "admission-lock-alias"
+        alias.symlink_to(runtime.admission_lock_path)
+        runtime.admission_lock_path = alias
+        with self.assertRaisesRegex(PaperAdmissionRuntimeError, "admission_lock_path_unsafe"):
+            with runtime._exclusive_admission_lock():
+                self.fail("symlinked lock must never be opened")
+
     def test_env_configuration_requires_distinct_database_paths_and_positive_limits(self):
         with patch.dict(os.environ, {
             "PAPER_COMBINED_DAILY_LOSS_LIMIT_USD": "0",

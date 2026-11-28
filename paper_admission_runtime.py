@@ -264,7 +264,11 @@ class PaperAdmissionRuntime:
         path = self.admission_lock_path
         try:
             path.parent.mkdir(parents=True, exist_ok=True)
-            if path.is_symlink() or path.parent.is_symlink():
+            if (
+                path.is_symlink()
+                or path.parent.is_symlink()
+                or path.parent.resolve(strict=True) != path.parent
+            ):
                 raise PaperAdmissionRuntimeError("admission_lock_path_unsafe")
             flags = os.O_CREAT | os.O_RDWR
             if hasattr(os, "O_NOFOLLOW"):

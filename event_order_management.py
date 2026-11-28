@@ -354,6 +354,7 @@ class EventOrderOperations:
         lock = EventOrderOperationLock(self.journal.database_path)
         if not lock.acquire():
             return self._blocked("event_order_operation_lock_busy_or_stale")
+        cancel_request_attempted = False
         try:
             try:
                 client_order_id, intent = self._local_intent(order_id)
@@ -387,6 +388,7 @@ class EventOrderOperations:
                 # A cancellation request is made at most once. Any exception or
                 # uncertain response is reconciled by reads, never by retry.
                 try:
+                    cancel_request_attempted = True
                     cancel_response = self.session.cancel_order(order_id=order_id)
                 except Exception:
                     # The request may have reached the venue. Reconcile by reads
@@ -418,7 +420,8 @@ class EventOrderOperations:
                                     "cancel_acknowledged": False,
                                     "filled_size": str(fill_after_error),
                                     "automatic_retry_permitted": False,
-                                    "execution": "none",
+                                    "order_submission_allowed": False,
+                                    "execution": "cancel_only",
                                 }
                     except Exception:
                         pass
@@ -481,7 +484,8 @@ class EventOrderOperations:
                     "reason_code": type(exc).__name__[:80],
                     "exchange_order_id": order_id,
                     "automatic_retry_permitted": False,
-                    "execution": "none",
+                    "order_submission_allowed": False,
+                    "execution": "cancel_only" if cancel_request_attempted else "none",
                 }
         finally:
             lock.release()
@@ -502,6 +506,7 @@ class EventOrderOperations:
         lock = EventOrderOperationLock(self.journal.database_path)
         if not lock.acquire():
             return self._blocked("event_order_operation_lock_busy_or_stale")
+        cancel_all_attempted = False
         try:
             try:
                 before_orders, _ = self._open_orders()
@@ -515,6 +520,7 @@ class EventOrderOperations:
                         "execution": "none",
                     }
                 # Do not repeat this request after an unknown outcome.
+                cancel_all_attempted = True
                 response = self.session.cancel_all()
                 cancelled_ids = tuple(_field(response, "canceled", ()) or ())
                 not_cancelled = _field(response, "not_canceled", {}) or {}
@@ -532,7 +538,8 @@ class EventOrderOperations:
                         },
                         "open_order_ids_after_cancel": after_ids,
                         "automatic_retry_permitted": False,
-                        "execution": "none",
+                        "order_submission_allowed": False,
+                        "execution": "cancel_only",
                     }
                 untracked: list[str] = []
                 unresolved: list[str] = []
@@ -580,7 +587,8 @@ class EventOrderOperations:
                     "reconciled_order_ids": reconciled,
                     "open_order_ids_after_cancel": [],
                     "automatic_retry_permitted": False,
-                    "execution": "none",
+                    "order_submission_allowed": False,
+                    "execution": "cancel_only",
                 }
             except Exception:
                 # If the cancel-all response is lost, do not repeat it. Re-read
@@ -643,7 +651,7 @@ class EventOrderOperations:
                         "reconciled_order_ids": reconciled_after_error,
                         "automatic_retry_permitted": False,
                         "order_submission_allowed": False,
-                        "execution": "cancel_only",
+                        "execution": "cancel_only" if cancel_all_attempted else "none",
                     }
                 except Exception:
                     return {
@@ -652,7 +660,7 @@ class EventOrderOperations:
                         "reason_code": "cancel_all_response_lost_and_readback_failed",
                         "automatic_retry_permitted": False,
                         "order_submission_allowed": False,
-                        "execution": "cancel_only",
+                        "execution": "cancel_only" if cancel_all_attempted else "none",
                     }
         finally:
             lock.release()

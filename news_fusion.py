@@ -22,6 +22,11 @@ def canonical_article_url(value: Any) -> str:
         if parsed.scheme.lower() not in {"https", "http"} or not parsed.hostname:
             return ""
         hostname = parsed.hostname.lower().rstrip(".")
+        # Feed providers often alternate between www and apex hosts for the
+        # same publisher URL. Normalize this presentation-only prefix so
+        # cross-source deduplication uses one canonical article identity.
+        if hostname.startswith("www."):
+            hostname = hostname[4:]
         port = parsed.port
         if port and not (
             (parsed.scheme.lower() == "https" and port == 443)
@@ -215,6 +220,12 @@ def merge_news_sources(
                     additions = []
                 else:
                     additions = [values]
+                if output_field == "coverage_regions":
+                    additions = [
+                        str(value).strip().casefold()
+                        for value in additions
+                        if str(value or "").strip()
+                    ]
                 item[output_field] = _sorted_unique(
                     item[output_field] + additions,
                     max_items=20,

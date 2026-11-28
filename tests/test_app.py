@@ -1228,7 +1228,7 @@ class ParserTests(unittest.TestCase):
             self.assertIn("RSS requests made by Paper worker", html)
             self.assertIn("RSS articles available in shared archive", html)
             self.assertIn("GDELT archive lanes represented / configured", html)
-            self.assertIn("GDELT duplicate requests in Paper cycle", html)
+            self.assertIn("GDELT API requests made by Paper worker", html)
             self.assertIn("Non-English articles kept unscored", html)
             self.assertIn("Coverage tags (regions / countries)", html)
             self.assertIn("Gamma candidates discovered", html)

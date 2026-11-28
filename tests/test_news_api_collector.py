@@ -103,7 +103,7 @@ class NewsAPICollectorTests(unittest.TestCase):
             )
             sleeps = []
             collector._sleep = sleeps.append
-            collector._monotonic = iter((100.0, 102.0)).__next__
+            collector._monotonic = iter((100.0, 102.0, 102.0)).__next__
             with patch("news_api_collector.urlopen", side_effect=fake_urlopen):
                 result = collector.fetch_once(now=NOW)
 
@@ -203,14 +203,15 @@ class NewsAPICollectorTests(unittest.TestCase):
     def test_http_errors_are_sanitized_and_do_not_persist_credentials(self):
         from urllib.error import HTTPError
 
-        with patch("news_api_collector.urlopen", side_effect=HTTPError(
-            "https://newsapi.org/v2/everything?q=test", 401, "unauthorized", {}, None
-        )):
-            collector = news_api_collector.NewsAPICollector(
-                self.path, enabled=True, api_key=API_KEY,
-                languages=("en",), now_provider=lambda: NOW,
-            )
-            result = collector.fetch_once(now=NOW)
+        with patch.dict("os.environ", {"NEWSAPI_REQUESTS_PER_POLL": "1"}, clear=True):
+            with patch("news_api_collector.urlopen", side_effect=HTTPError(
+                "https://newsapi.org/v2/everything?q=test", 401, "unauthorized", {}, None
+            )):
+                collector = news_api_collector.NewsAPICollector(
+                    self.path, enabled=True, api_key=API_KEY,
+                    languages=("en",), now_provider=lambda: NOW,
+                )
+                result = collector.fetch_once(now=NOW)
 
         self.assertEqual(result["queries_failed"], 1)
         self.assertEqual(result["query_errors"][0]["code"], "http_401")

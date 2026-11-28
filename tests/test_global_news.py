@@ -90,13 +90,13 @@ class GDELTCollectorTests(unittest.TestCase):
             collector = global_news.GDELTCollector(path)
             with patch("global_news.urlopen", side_effect=AssertionError("archive reader must not poll network")):
                 snapshot = collector.read_archive_snapshot()
+                second_snapshot = collector.read_archive_snapshot()
+                self.assertEqual(second_snapshot["items_total_recent"], 2)
+                self.assertEqual(len(collector.items), 2)
 
         self.assertEqual(snapshot["network_requests_made"], 0)
         self.assertFalse(snapshot["poll_status_available"])
         self.assertEqual(snapshot["items_total_recent"], 2)
-        second_snapshot = collector.read_archive_snapshot()
-        self.assertEqual(second_snapshot["items_total_recent"], 2)
-        self.assertEqual(len(collector.items), 2)
         self.assertEqual(snapshot["topics_configured"], len(global_news.DEFAULT_TOPIC_QUERIES))
         self.assertIn("geopolitics_security", snapshot["topics_seen_in_archive"])
         self.assertEqual(snapshot["languages_seen"], ["ar", "en"])

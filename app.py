@@ -38,6 +38,7 @@ from perps_live_release_gate import evaluate_perps_live_release_gate
 from event_live_release_gate import evaluate_event_live_release_gate
 from live_kill_switch import check_live_kill_switch
 from unified_paper_risk import build_unified_paper_risk_snapshot
+from order_journal_status import OrderJournalStatusError, read_local_order_journal_status
 from control_center import CONTROL_CENTER_HTML
 
 GAMMA_URL = "https://gamma-api.polymarket.com/markets"
@@ -1570,7 +1571,7 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         if self.path in ("/control-center", "/control-center/"):
             self._send_html(200, CONTROL_CENTER_HTML)
-        elif self.path in ("/", "/status", "/health", "/paper", "/news", "/matches", "/market-stream", "/resolutions", "/forecast-evaluation", "/research-features", "/independent-model-evaluation", "/model-forecasts", "/learning", "/execution-readiness", "/service-supervisor", "/event-paper", "/perps-market", "/perps-paper", "/perps-account-supervisor", "/perps-live-gate", "/event-live-gate", "/unified-paper-risk"):
+        elif self.path in ("/", "/status", "/health", "/paper", "/news", "/matches", "/market-stream", "/resolutions", "/forecast-evaluation", "/research-features", "/independent-model-evaluation", "/model-forecasts", "/learning", "/execution-readiness", "/service-supervisor", "/event-paper", "/perps-market", "/perps-paper", "/perps-account-supervisor", "/perps-live-gate", "/event-live-gate", "/unified-paper-risk", "/event-order-status"):
             with _lock:
                 snapshot = dict(_state)
             if self.path == "/health":
@@ -1752,6 +1753,34 @@ class Handler(BaseHTTPRequestHandler):
                         "error": f"{type(exc).__name__}: {str(exc)[:300]}",
                         "research_only": True,
                         "forecast": None,
+                        "execution": "none",
+                    })
+            elif self.path == "/event-order-status":
+                data_dir = Path(os.getenv("DATA_DIR", "data")).expanduser()
+                journal_database = Path(os.getenv(
+                    "ORDER_JOURNAL_DB",
+                    str(data_dir / "order_journal.sqlite3"),
+                )).expanduser()
+                try:
+                    payload = read_local_order_journal_status(journal_database)
+                    self._send(200, payload)
+                except Exception as exc:
+                    self._send(503, {
+                        "status": "unavailable",
+                        "available": False,
+                        "snapshot_complete": False,
+                        "source": "local_order_journal_only",
+                        "reason_code": (
+                            type(exc).__name__[:80]
+                            if isinstance(exc, OrderJournalStatusError)
+                            else "order_journal_status_failed"
+                        ),
+                        "venue_open_orders_checked": False,
+                        "venue_status_verified": False,
+                        "order_submission_allowed": False,
+                        "order_cancellation_allowed": False,
+                        "automatic_retry_permitted": False,
+                        "live_execution_enabled": False,
                         "execution": "none",
                     })
             elif self.path == "/unified-paper-risk":

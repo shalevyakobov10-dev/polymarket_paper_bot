@@ -124,6 +124,7 @@ class ExecutionReadinessTests(unittest.TestCase):
             "strategy_edge_not_established",
             "account_credential_isolation_not_verified",
             "production_operations_not_verified",
+            "event_live_kill_switch_not_verified",
         }
         self.assertEqual(codes, expected)
 

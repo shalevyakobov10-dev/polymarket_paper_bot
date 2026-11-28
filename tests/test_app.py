@@ -503,6 +503,87 @@ class ParserTests(unittest.TestCase):
                 server.server_close()
                 thread.join(timeout=2)
 
+    def test_event_order_status_endpoint_shows_local_journal_only(self):
+        from order_journal import OrderJournal
+        from order_lifecycle import create_order_intent
+
+        with tempfile.TemporaryDirectory() as directory:
+            journal_path = Path(directory) / "orders.sqlite3"
+            journal = OrderJournal(journal_path)
+            journal.create_intent(create_order_intent(
+                client_order_id="ambiguous-status-1",
+                token_id="public-token",
+                side="BUY",
+                limit_price="0.4",
+                size="5",
+            ))
+            journal.begin_submission("ambiguous-status-1")
+            journal.record_submission_response(
+                "ambiguous-status-1",
+                outcome="ambiguous",
+                reason_code="transport_timeout",
+            )
+            server = app.ThreadingHTTPServer(("127.0.0.1", 0), app.Handler)
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            try:
+                thread.start()
+                with patch.dict(os.environ, {
+                    "ORDER_JOURNAL_DB": str(journal_path),
+                    "DATA_DIR": directory,
+                }):
+                    with http_urlopen(
+                        f"http://127.0.0.1:{server.server_port}/event-order-status",
+                        timeout=3,
+                    ) as response:
+                        payload = json.loads(response.read().decode("utf-8"))
+                self.assertEqual(payload["status"], "degraded")
+                self.assertEqual(payload["unresolved_order_count"], 1)
+                self.assertEqual(
+                    payload["unresolved_orders"][0]["client_order_id"],
+                    "ambiguous-status-1",
+                )
+                self.assertFalse(payload["venue_open_orders_checked"])
+                self.assertFalse(payload["venue_status_verified"])
+                self.assertFalse(payload["order_submission_allowed"])
+                self.assertFalse(payload["order_cancellation_allowed"])
+                self.assertFalse(payload["automatic_retry_permitted"])
+                self.assertNotIn("public-token", repr(payload))
+            finally:
+                server.shutdown()
+                server.server_close()
+                thread.join(timeout=2)
+
+    def test_event_order_status_endpoint_reports_missing_journal_as_unavailable(self):
+        server = app.ThreadingHTTPServer(("127.0.0.1", 0), app.Handler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        with tempfile.TemporaryDirectory() as directory:
+            try:
+                thread.start()
+                with patch.dict(os.environ, {
+                    "ORDER_JOURNAL_DB": str(Path(directory) / "missing.sqlite3"),
+                    "DATA_DIR": directory,
+                }):
+                    try:
+                        http_urlopen(
+                            f"http://127.0.0.1:{server.server_port}/event-order-status",
+                            timeout=3,
+                        )
+                    except Exception as exc:
+                        from urllib.error import HTTPError
+                        self.assertIsInstance(exc, HTTPError)
+                        self.assertEqual(exc.code, 503)
+                        payload = json.loads(exc.read().decode("utf-8"))
+                    else:
+                        self.fail("missing order journal must not look like an empty venue")
+                self.assertFalse(payload["available"])
+                self.assertFalse(payload["snapshot_complete"])
+                self.assertFalse(payload["venue_status_verified"])
+                self.assertFalse(payload["order_submission_allowed"])
+            finally:
+                server.shutdown()
+                server.server_close()
+                thread.join(timeout=2)
+
     def test_unified_paper_risk_endpoint_reports_read_only_snapshot_and_never_authorizes_entries(self):
         from types import SimpleNamespace
 

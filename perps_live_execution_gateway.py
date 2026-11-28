@@ -22,6 +22,7 @@ from typing import Any, Callable
 from perps_order_journal import PerpsOrderJournal
 from perps_sdk_reconciler import PerpsSdkReconciler
 from perps_live_release_gate import evaluate_perps_live_release_gate
+from polymarket_geo import check_polymarket_geoblock
 
 
 LIVE_ACKNOWLEDGEMENT = "I_ACKNOWLEDGE_PERPS_LIVE_TRADING_RISK"
@@ -50,6 +51,42 @@ def _decimal(value: Any, name: str, *, positive: bool = False) -> Decimal:
     if not result.is_finite() or (positive and result <= 0) or (not positive and result < 0):
         raise ValueError(f"{name} is outside valid bounds")
     return result
+
+
+def _geoblock_error(
+    checker: Callable[[], dict[str, Any]],
+    *,
+    now: datetime,
+) -> str | None:
+    """Require a fresh, explicit, non-blocked Polymarket IP eligibility result."""
+    try:
+        result = checker()
+    except Exception:
+        return "polymarket_geoblock_check_failed"
+    if not isinstance(result, dict) or result.get("verified") is not True:
+        return "polymarket_geoblock_response_unverified"
+    if result.get("blocked") is not False:
+        return "polymarket_geoblock_rejected_or_unverified"
+    country = result.get("country")
+    region = result.get("region")
+    if (
+        not isinstance(country, str) or len(country) != 2 or not country.isalpha()
+        or not isinstance(region, str) or not region.strip() or len(region) > 16
+    ):
+        return "polymarket_geoblock_location_invalid"
+    checked = result.get("checked_at_utc")
+    try:
+        timestamp = checked if isinstance(checked, datetime) else datetime.fromisoformat(
+            str(checked).replace("Z", "+00:00")
+        )
+    except (TypeError, ValueError, OverflowError):
+        return "polymarket_geoblock_timestamp_invalid"
+    if timestamp.tzinfo is None or timestamp.utcoffset() is None:
+        return "polymarket_geoblock_timestamp_invalid"
+    age = (now - timestamp.astimezone(timezone.utc)).total_seconds()
+    if age < -2 or age > 30:
+        return "polymarket_geoblock_stale_or_future_dated"
+    return None
 
 
 def _risk_approval_order_binding_error(
@@ -180,6 +217,7 @@ class PerpsLiveExecutionGateway:
         submission_timeout_seconds: float = 10.0,
         risk_decision_max_age_seconds: int = 5,
         now_provider: Callable[[], datetime] | None = None,
+        geoblock_checker: Callable[[], dict[str, Any]] = check_polymarket_geoblock,
     ) -> None:
         if not callable(getattr(session, "place_order", None)):
             raise ValueError("session must expose place_order")
@@ -238,6 +276,9 @@ class PerpsLiveExecutionGateway:
         if now_provider is not None and not callable(now_provider):
             raise ValueError("now_provider must be callable")
         self.now_provider = now_provider or (lambda: datetime.now(timezone.utc))
+        if not callable(geoblock_checker):
+            raise ValueError("geoblock_checker must be callable")
+        self.geoblock_checker = geoblock_checker
 
     def _blocked(self, reason: str, *, client_order_id: str | None = None) -> dict[str, Any]:
         return {
@@ -275,6 +316,9 @@ class PerpsLiveExecutionGateway:
             return self._blocked("source_controlled_perps_release_gate_closed")
         if self.kill_switch_path.exists():
             return self._blocked("local_perps_kill_switch_present")
+        geoblock_error = _geoblock_error(self.geoblock_checker, now=current)
+        if geoblock_error is not None:
+            return self._blocked(geoblock_error)
         if isinstance(instrument_id, bool) or not isinstance(instrument_id, int) or instrument_id <= 0:
             return self._blocked("instrument_id_invalid")
 
@@ -441,6 +485,14 @@ class PerpsLiveExecutionGateway:
                 return self._blocked("risk_clock_unavailable", client_order_id=identifier)
             if final_risk_age < -2 or final_risk_age > self.risk_decision_max_age_seconds:
                 return self._blocked("risk_decision_stale_before_submission", client_order_id=identifier)
+
+            # Recheck location after all account/fee/instrument network reads,
+            # immediately before the durable submission journal transition.
+            geoblock_error = _geoblock_error(
+                self.geoblock_checker, now=final_risk_check_at.astimezone(timezone.utc)
+            )
+            if geoblock_error is not None:
+                return self._blocked(geoblock_error, client_order_id=identifier)
 
             try:
                 prepared = self.journal.create_intent(

@@ -79,3 +79,16 @@ A first read-only adapter has been added in `unified_paper_risk.py`, with synthe
 ### Risk-metric integrity follow-up
 
 The adapter now exposes each engine's own peak equity separately and leaves combined peak equity / combined drawdown unavailable. The two engines have independent high-water-mark histories; summing their peaks could fabricate a combined peak that never existed at one point in time. A true combined drawdown requires a shared portfolio-level high-water-mark ledger updated atomically with both engines. Until then, do not use a synthetic combined drawdown for risk authorization.
+
+### Durable admission coordinator foundation (2026-11-28)
+
+`portfolio_admission.py` introduces a Paper-only SQLite reservation coordinator. It uses `BEGIN IMMEDIATE` to serialize competing reservations across processes that share the coordinator database, and persists each admission through these states:
+
+- `PENDING`: capacity reserved before the venue ledger commit.
+- `AWAITING_RECONCILIATION`: venue commit reported, but capacity remains reserved until a fresh ledger read confirms the entry.
+- `RECONCILED`: the durable venue entry has been verified; snapshots captured before reconciliation still count the reservation to avoid a stale-read race.
+- `RELEASED`: allowed only after the caller explicitly confirms the entry is absent from its venue ledger.
+
+Reservations are never automatically expired. A crash or uncertain outcome therefore consumes capacity until an operator/reconciler resolves it, rather than silently freeing risk. The initial regression suite covers cross-venue contention, concurrent reservations, idempotency, durable reopen, stale/future snapshots, reconciliation ordering, and guarded release.
+
+**Integration status: foundation only.** Neither Paper engine calls this coordinator yet. It does not atomically commit a venue entry, read the two source ledgers itself, establish a shared peak-equity history, or authorize trading. The caller-side sequence and crash-recovery reconciler still need implementation and tests before it can be used as an admission gate. It must remain disabled for order authorization until that work is complete.

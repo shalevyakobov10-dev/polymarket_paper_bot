@@ -131,6 +131,22 @@ class PerpsPaperEngineTests(unittest.TestCase):
             **kwargs,
         )
 
+    def test_positions_table_has_unique_admission_id_column_for_recovery(self):
+        with tempfile.TemporaryDirectory() as directory:
+            with self.make_engine(directory) as engine:
+                columns = {
+                    row[1] for row in engine.db.execute(
+                        "PRAGMA table_info(perps_paper_positions)"
+                    )
+                }
+                self.assertIn("admission_id", columns)
+                indexes = {
+                    row[1] for row in engine.db.execute(
+                        "PRAGMA index_list(perps_paper_positions)"
+                    )
+                }
+                self.assertIn("idx_perps_paper_admission_id", indexes)
+
     def test_opens_isolated_long_after_sufficient_positive_momentum(self):
         with tempfile.TemporaryDirectory() as directory:
             with self.make_engine(directory) as engine:

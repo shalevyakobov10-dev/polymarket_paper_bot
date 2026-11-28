@@ -561,9 +561,13 @@ class ParserTests(unittest.TestCase):
                 self.assertEqual(payload["status"], "degraded")
                 self.assertEqual(payload["unresolved_order_count"], 1)
                 self.assertEqual(
-                    payload["unresolved_orders"][0]["client_order_id"],
-                    "ambiguous-status-1",
+                    payload["unresolved_order_status_counts"]["submission_unknown"], 1
                 )
+                self.assertEqual(
+                    payload["unresolved_reason_counts"]["transport_timeout"], 1
+                )
+                self.assertFalse(payload["order_identifiers_exposed"])
+                self.assertNotIn("ambiguous-status-1", repr(payload))
                 self.assertFalse(payload["venue_open_orders_checked"])
                 self.assertFalse(payload["venue_status_verified"])
                 self.assertFalse(payload["order_submission_allowed"])

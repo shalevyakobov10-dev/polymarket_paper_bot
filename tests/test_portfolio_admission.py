@@ -465,6 +465,8 @@ class PortfolioAdmissionTests(unittest.TestCase):
         result = reopened.reserve(
             admission_id="perps-1", venue="PERPS", exposure_usd="41", positions=1,
             snapshot_exposure_usd="0", snapshot_positions=0,
+            snapshot_daily_pnl_usd="0",
+            max_combined_daily_loss_usd="35",
             snapshot_at=self.now, max_snapshot_age_seconds=120,
             max_total_exposure_usd="100", max_total_positions=3, now=self.now,
         )

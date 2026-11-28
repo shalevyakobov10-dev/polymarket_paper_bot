@@ -646,6 +646,8 @@ class PaperTrader:
         delta: float,
         *,
         execution_diagnostics: dict[str, Any] | None = None,
+        requested_notional: float | None = None,
+        signal_label: str | None = None,
     ) -> tuple[dict[str, Any] | None, str]:
         if self._state.get("circuit_breaker_tripped"):
             return None, "portfolio_drawdown_circuit_breaker_latched"
@@ -684,6 +686,11 @@ class PaperTrader:
             max(0.0, self.config.max_open_exposure_usd - exposure),
             available_cash / (1.0 + fee_reserve_rate),
         )
+        if requested_notional is not None:
+            override = finite_float(requested_notional)
+            if override is None or override <= 0.0:
+                return None, "invalid_requested_notional"
+            spend = min(spend, override)
         open_unrealized_total = sum(
             float(position.get("unrealized_pnl", 0.0)) for position in positions.values()
         )
@@ -831,10 +838,66 @@ class PaperTrader:
         position["unrealized_pnl"] = round(
             self._position_unrealized(position, initial_mark_price), 8
         )
+        if signal_label:
+            position["signal_label"] = str(signal_label)[:120]
         self._state["cash"] = round(available_cash - spend - cash_entry_fee, 8)
         self._state["total_fees"] = round(self._state["total_fees"] + entry_fee, 8)
         positions[key] = position
         return {"event_type": "position_opened", "timestamp": iso_time(now), **copy.deepcopy(position)}, ""
+
+    def open_from_external_signal(
+        self,
+        row: dict[str, Any],
+        *,
+        now: datetime | None = None,
+        requested_notional: float | None = None,
+        signal_label: str = "external_research_signal",
+    ) -> tuple[dict[str, Any] | None, str]:
+        """Simulate one entry from an external research signal.
+
+        Uses the same risk, fee, and order-book fill path as price-delta entries.
+        This method never submits a live order.
+        """
+        current_time = now or utc_now()
+        if current_time.tzinfo is None:
+            current_time = current_time.replace(tzinfo=timezone.utc)
+        current_time = current_time.astimezone(timezone.utc)
+        with self._lock:
+            self._daily_rollover(current_time)
+            key = self._token_key(row)
+            price = finite_float(row.get("observed_price"))
+            if not key or price is None or not 0.0 < price < 1.0:
+                return None, "invalid_signal_row"
+            if key in self._state["positions"]:
+                return None, "position_already_open"
+            diagnostics: dict[str, Any] = {}
+            opened, reason = self._try_open(
+                key,
+                row,
+                price,
+                current_time,
+                0.0,
+                execution_diagnostics=diagnostics,
+                requested_notional=requested_notional,
+                signal_label=signal_label,
+            )
+            event = opened or {
+                "event_type": "external_signal_skipped",
+                "timestamp": iso_time(current_time),
+                "token_id": key,
+                "market_id": str(row.get("market_id") or ""),
+                "skip_reason": reason,
+                "signal_label": str(signal_label)[:120],
+                "execution": "simulated_only",
+                "execution_diagnostics": diagnostics,
+            }
+            self._state["recent_events"] = (self._state.get("recent_events", []) + [event])[-100:]
+            self._update_drawdown_metrics()
+            if opened:
+                self._state["last_prices"][key] = round(price, 8)
+            self._save()
+            self._write_event(event)
+            return opened, reason
 
     def _exit_reason(self, position: dict[str, Any], price: float, now: datetime) -> str | None:
         entry = float(position["entry_price"])

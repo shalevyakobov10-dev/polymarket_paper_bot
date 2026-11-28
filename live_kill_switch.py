@@ -60,6 +60,10 @@ def read_live_kill_switch(
         metadata = os.fstat(descriptor)
         if not stat.S_ISREG(metadata.st_mode):
             return _blocked("kill_switch_not_regular_file")
+        if metadata.st_nlink != 1:
+            return _blocked("kill_switch_hardlink_rejected")
+        if stat.S_IMODE(metadata.st_mode) & 0o022:
+            return _blocked("kill_switch_file_permissions_unsafe")
         if metadata.st_size <= 0 or metadata.st_size > _MAX_BYTES:
             return _blocked("kill_switch_file_size_invalid")
         with os.fdopen(descriptor, "rb") as handle:

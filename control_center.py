@@ -187,12 +187,17 @@ function metricEntries(id,d){
   const perps=d.gateway_inventory&&d.gateway_inventory.perps||{};
   const risk=d.shared_paper_risk||{};
   const policy=d.platform_eligibility_policy||{};
+  const kill=d.event_live_kill_switch||{};
   const rows=[
    ["Overall readiness",d.status],
    ["Execution mode",d.mode],
    ["Event gateway present / integrated",String(!!event.adapter_code_present)+" / "+String(!!event.integrated_into_paper_worker)],
    ["Event order scope",String(event.supported_side||"—")+" "+String(event.supported_order_type||"—")],
    ["Event geoblock checked per order",event.per_order_geoblock_check],
+   ["Event local kill switch required",event.local_kill_switch_check],
+   ["Kill switch fails closed when missing/stale",kill.missing_or_invalid_means_engaged],
+   ["Kill switch checked twice before send",String(!!kill.checked_on_gateway_entry)+" / "+String(!!kill.checked_immediately_before_submission)],
+   ["Kill switch UI disarm available",kill.operator_ui_disarm_available],
    ["Event cancel-only adapter present / integrated",String(!!((d.event_order_management||{}).adapter_code_present))+" / "+String(!!((d.event_order_management||{}).integrated_into_operator_service))],
    ["Single order cancel / cancel all",String(!!((d.event_order_management||{}).supports_cancel_one))+" / "+String(!!((d.event_order_management||{}).supports_cancel_all))],
    ["Cancellation read-back verified",((d.event_order_management||{}).readback_verification)],

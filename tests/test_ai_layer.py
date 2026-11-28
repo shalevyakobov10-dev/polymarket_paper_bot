@@ -285,8 +285,27 @@ class DecisionLoopTests(unittest.TestCase):
                 gateway=gateway,
                 idempotency_key="live-1",
             )
-            self.assertEqual(result["order_reason"], "live_order_adapter_not_implemented", result)
+            self.assertEqual(result["order_reason"], "live_preflight_blocked", result)
             self.assertFalse(result["submitted"])
+            self.assertFalse(result["preflight"]["preflight_passed"])
+            blockers = result["preflight"]["blockers"]
+            # Every release gate must be reported as unverified, not fabricated.
+            for gate in (
+                "account_eligibility_verified",
+                "jurisdiction_and_legal_review_approved",
+                "strategy_validation_passed",
+                "independent_security_review_passed",
+                "production_operations_verified",
+                "explicit_release_approved",
+            ):
+                self.assertIn(f"release_gate_not_verified:{gate}", blockers)
+            # The operational checks still ran against the real book values.
+            self.assertNotIn("stale_or_invalid_order_book", blockers)
+            self.assertNotIn("invalid_best_ask", blockers)
+            self.assertNotIn("limit_price_not_on_tick", blockers)
+            self.assertNotIn("below_minimum_order_size", blockers)
+            self.assertNotIn("price_impact_limit_exceeded", blockers)
+            self.assertNotIn("max_order_notional_exceeded", blockers)
             self.assertEqual(calls, [])
             self.assertEqual(gateway.factory_calls, 0)
             self.assertEqual(trader.snapshot()["metrics"]["open_positions"], 0)

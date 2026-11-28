@@ -182,11 +182,21 @@ def decide_and_execute(
     if not settings.paper_mode:
         live = gateway or LiveOrderGateway(settings)
         book = stamped.get("orderbook") if isinstance(stamped.get("orderbook"), dict) else {}
-        best_ask = book.get("best_ask", price)
-        try:
-            limit_price = float(best_ask)
-        except (TypeError, ValueError):
-            limit_price = price
+
+        def _finite_book_number(key: str) -> float | None:
+            try:
+                value = float(book.get(key))
+            except (TypeError, ValueError):
+                return None
+            if value != value or value in {float("inf"), float("-inf")}:
+                return None
+            return value
+
+        best_ask = _finite_book_number("best_ask")
+        best_bid = _finite_book_number("best_bid")
+        tick_size = _finite_book_number("tick_size")
+        minimum_order_size = _finite_book_number("min_order_size")
+        limit_price = best_ask if best_ask is not None and 0.0 < best_ask < 1.0 else price
         size = float(
             (Decimal(str(decision.approved_notional)) / Decimal(str(limit_price))).quantize(
                 Decimal("0.0001"), rounding=ROUND_DOWN
@@ -197,15 +207,30 @@ def decide_and_execute(
             and not settings.paper_mode
             and settings.live_trading_ack == LIVE_ACK_PHRASE
         )
+        try:
+            observed_at = datetime.fromisoformat(str(book.get("observed_at")))
+            if observed_at.tzinfo is None:
+                observed_at = observed_at.replace(tzinfo=timezone.utc)
+            book_age_seconds = max(0.0, (current - observed_at.astimezone(timezone.utc)).total_seconds())
+        except (TypeError, ValueError):
+            book_age_seconds = None
+        market_active = (
+            best_bid is not None
+            and best_ask is not None
+            and 0.0 < best_bid <= best_ask < 1.0
+        )
+        # Every release gate is reported as unverified: the decision loop has no
+        # evidence for any of them, so the preflight trail must not claim approvals.
+        release_gates = {gate: False for gate in REQUIRED_RELEASE_GATES}
         preflight_args = {
             "token_id": token_id,
             "side": "BUY",
             "limit_price": limit_price,
             "size": size,
-            "best_ask": limit_price,
-            "tick_size": float(book.get("tick_size") or 0.01),
-            "minimum_order_size": float(book.get("min_order_size") or 0.01),
-            "book_age_seconds": 1.0,
+            "best_ask": best_ask,
+            "tick_size": tick_size,
+            "minimum_order_size": minimum_order_size,
+            "book_age_seconds": book_age_seconds,
             "max_book_age_seconds": 30.0,
             "max_price_impact_bps": 100.0,
             "max_order_notional_usd": settings.max_position_usdc,
@@ -216,9 +241,9 @@ def decide_and_execute(
             "daily_loss_limit_usd": settings.max_daily_drawdown_usdc,
             "current_drawdown_pct": float(metrics["current_drawdown_pct"]),
             "max_drawdown_pct": trader.config.max_portfolio_drawdown_pct,
-            "market_active": True,
+            "market_active": market_active,
             "kill_switch_engaged": kill_switch,
-            "release_gates": {gate: True for gate in REQUIRED_RELEASE_GATES},
+            "release_gates": release_gates,
         }
         live_result = live.execute(
             token_id=token_id,
@@ -232,6 +257,8 @@ def decide_and_execute(
             order_reason=live_result.get("reason"),
             live_execution=live_result.get("execution"),
             submitted=False,
+            # Keep the honest preflight artifact in the audit trail.
+            preflight=live_result.get("preflight"),
         )
         journal.write_decision(result)
         return result

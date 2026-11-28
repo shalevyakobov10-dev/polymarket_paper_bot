@@ -50,6 +50,31 @@ class OrderStateMachineTests(unittest.TestCase):
         machine.transition(first.order_id, CANCELLED, reason="operator_cancel")
         self.assertEqual(machine.get(first.order_id).state, CANCELLED)
 
+    def test_load_tolerates_unknown_fields_from_a_future_schema(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "orders.json"
+            machine = OrderStateMachine(path)
+            record, _ = machine.begin(
+                token_id="token-1", market_id="m1", side="BUY", idempotency_key="k1"
+            )
+            machine.transition(record.order_id, REJECTED, reason="no_edge")
+            payload = json.loads(path.read_text(encoding="utf-8"))
+            payload[0]["future_field"] = {"added_by": "a_newer_version"}
+            payload[0]["another_future_field"] = 42
+            path.write_text(json.dumps(payload), encoding="utf-8")
+            reloaded = OrderStateMachine(path)
+            stored = reloaded.get(record.order_id)
+            self.assertIsNotNone(stored)
+            self.assertEqual(stored.state, REJECTED)
+            self.assertEqual(stored.reason, "no_edge")
+
+    def test_load_rejects_rows_missing_required_fields(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "orders.json"
+            path.write_text(json.dumps([{"order_id": "x", "state": "INTENT"}]), encoding="utf-8")
+            with self.assertRaises(OrderStateError):
+                OrderStateMachine(path)
+
     def test_terminal_order_does_not_block_a_new_key(self):
         machine = OrderStateMachine()
         first, _ = machine.begin(token_id="token-1", market_id="m1", side="BUY", idempotency_key="k1")

@@ -4,7 +4,7 @@ from __future__ import annotations
 import json
 import threading
 import uuid
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, fields
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -72,8 +72,20 @@ class OrderStateMachine:
         payload = json.loads(self.path.read_text(encoding="utf-8"))
         if not isinstance(payload, list):
             raise OrderStateError("order state file must be a list")
+        known_fields = {item.name for item in fields(OrderRecord)}
+        required_fields = {
+            "order_id", "idempotency_key", "token_id", "market_id",
+            "side", "state", "reason", "created_at", "updated_at",
+        }
         for item in payload:
-            record = OrderRecord(**item)
+            if not isinstance(item, dict):
+                raise OrderStateError("order state rows must be objects")
+            missing = required_fields - set(item)
+            if missing:
+                raise OrderStateError(f"order state row is missing fields: {sorted(missing)}")
+            # Tolerate rows written by a future schema: drop unknown keys instead
+            # of refusing to start with a persisted state file.
+            record = OrderRecord(**{key: value for key, value in item.items() if key in known_fields})
             self._orders[record.order_id] = record
             self._by_key[record.idempotency_key] = record.order_id
 

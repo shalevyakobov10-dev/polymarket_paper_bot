@@ -45,6 +45,7 @@ footer{margin-top:24px;color:var(--muted);font-size:12px}
 <article class="card" id="card-perps-paper"><h2>Perps Paper engine</h2><div class="empty">Loading status…</div></article>
 <article class="card" id="card-event-paper"><h2>Event Paper engine</h2><div class="empty">Loading status…</div></article>
 <article class="card" id="card-unified-paper-risk"><h2>Unified Paper risk</h2><div class="empty">Loading status…</div></article>
+<article class="card" id="card-event-order-status"><h2>Event order journal</h2><div class="empty">Loading status…</div></article>
 <article class="card" id="card-execution-readiness"><h2>Live execution readiness</h2><div class="empty">Loading status…</div></article>
 <article class="card" id="card-event-release"><h2>Event-market live release gates</h2><div class="empty">Loading status…</div></article>
 <article class="card" id="card-release"><h2>Perps live release gates</h2><div class="empty">Loading status…</div></article>
@@ -63,6 +64,7 @@ const sources=[
  {id:"perps-paper",url:"/perps-paper",title:"Perps Paper engine"},
  {id:"event-paper",url:"/event-paper",title:"Event Paper engine"},
  {id:"unified-paper-risk",url:"/unified-paper-risk",title:"Unified Paper risk"},
+ {id:"event-order-status",url:"/event-order-status",title:"Event order journal"},
  {id:"execution-readiness",url:"/execution-readiness",title:"Live execution readiness"},
  {id:"event-release",url:"/event-live-gate",title:"Event-market live release gates"},
  {id:"release",url:"/perps-live-gate",title:"Perps live release gates"},
@@ -114,6 +116,29 @@ function metricEntries(id,d){
    ["GDELT topic lanes represented",g.topic_categories_seen],
    ["Non-English GDELT articles archived",g.non_english_items_total_recent],
    ["GDELT last error",g.last_error]
+  ]};
+ }
+ if(id==="event-order-status"){
+  const status=d.available===true&&d.snapshot_complete===true?(d.unresolved_order_count>0?"degraded":"healthy"):"stale";
+  return {status,rows:[
+   ["Journal available",d.available],
+   ["Snapshot complete",d.snapshot_complete],
+   ["Source",d.source],
+   ["Total local intents",d.total_intent_count],
+   ["Active local orders",d.active_order_count],
+   ["Unresolved / ambiguous",d.unresolved_order_count],
+   ["Prepared but not submitted",d.prepared_intent_count],
+   ["Filled / cancelled / rejected",String(d.filled_order_count??"—")+" / "+String(d.cancelled_order_count??"—")+" / "+String(d.rejected_order_count??"—")],
+   ["Venue open orders checked",d.venue_open_orders_checked],
+   ["Venue status independently verified",d.venue_status_verified],
+   ["Active local order IDs",d.active_orders],
+   ["Unresolved local order IDs",d.unresolved_orders],
+   ["Active list truncated",d.active_orders_truncated],
+   ["Unresolved list truncated",d.unresolved_orders_truncated],
+   ["Order submission allowed",d.order_submission_allowed],
+   ["Order cancellation allowed",d.order_cancellation_allowed],
+   ["Automatic retry permitted",d.automatic_retry_permitted],
+   ["Reason / unavailable code",d.reason_code]
   ]};
  }
  if(id==="unified-paper-risk"){

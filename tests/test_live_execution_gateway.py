@@ -107,6 +107,12 @@ class RequestRejectedError(Exception):
 
 class LiveExecutionGatewayTests(unittest.TestCase):
     def setUp(self):
+        self.release_gate_patch = patch(
+            "live_execution_gateway.evaluate_event_live_release_gate",
+            return_value={"eligible_for_separate_gateway_review": True},
+        )
+        self.release_gate_patch.start()
+        self.addCleanup(self.release_gate_patch.stop)
         self.temp = tempfile.TemporaryDirectory()
         self.db_path = Path(self.temp.name) / "orders.sqlite3"
         self.journal = OrderJournal(self.db_path)
@@ -187,6 +193,20 @@ class LiveExecutionGatewayTests(unittest.TestCase):
             LiveExecutionGateway._create_secure_client(
                 signer.key.hex(), different_wallet
             )
+
+    def test_source_controlled_event_release_gate_cannot_be_overridden_by_risk_context(self):
+        with patch(
+            "live_execution_gateway.evaluate_event_live_release_gate",
+            return_value={"eligible_for_separate_gateway_review": False},
+        ):
+            result = self._run_gateway()
+        self.assertEqual(result["reason"], "source_controlled_event_release_gate_closed")
+        self.assertEqual(self.client.created, [])
+        self.assertEqual(self.client.posts, [])
+        self.assertEqual(
+            self.journal.get_intent("paper-intent-001")["status"],
+            "prepared",
+        )
 
     def test_default_configuration_does_not_arm_live_orders(self):
         with patch.dict(os.environ, {}, clear=True):

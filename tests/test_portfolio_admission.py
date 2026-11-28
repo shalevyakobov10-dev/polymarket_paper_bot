@@ -93,6 +93,21 @@ class PortfolioAdmissionTests(unittest.TestCase):
         result = self.reserve("perps-1", venue="PERPS", exposure="100")
         self.assertTrue(result.approved)
 
+    def test_verified_absence_can_release_awaiting_reconciliation_reservation(self):
+        self.reserve("poly-uncertain", exposure="60")
+        self.coordinator.mark_committed("poly-uncertain", now=self.now)
+        with self.assertRaisesRegex(PortfolioAdmissionError, "verified_ledger_absence"):
+            self.coordinator.release("poly-uncertain", confirmed_absent_from_ledger=False)
+        self.coordinator.release(
+            "poly-uncertain", confirmed_absent_from_ledger=True,
+            now=self.now + timedelta(seconds=1),
+        )
+        result = self.reserve(
+            "perps-after-verified-absence", venue="PERPS", exposure="100",
+            now=self.now + timedelta(seconds=2),
+        )
+        self.assertTrue(result.approved)
+
     def test_reconcile_is_idempotent_but_entry_identity_is_immutable(self):
         self.reserve("poly-1")
         self.coordinator.mark_committed("poly-1", now=self.now)

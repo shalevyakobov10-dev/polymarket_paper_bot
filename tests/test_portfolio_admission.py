@@ -140,7 +140,12 @@ class PortfolioAdmissionTests(unittest.TestCase):
     def test_storage_reopen_preserves_pending_reservation(self):
         self.reserve("poly-1", exposure="60")
         reopened = PortfolioAdmissionCoordinator(self.path)
-        result = reopened.reserve("perps-1", venue="PERPS", exposure="41")
+        result = reopened.reserve(
+            admission_id="perps-1", venue="PERPS", exposure_usd="41", positions=1,
+            snapshot_exposure_usd="0", snapshot_positions=0,
+            snapshot_at=self.now, max_snapshot_age_seconds=120,
+            max_total_exposure_usd="100", max_total_positions=3, now=self.now,
+        )
         self.assertFalse(result.approved)
 
 

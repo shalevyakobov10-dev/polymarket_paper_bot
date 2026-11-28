@@ -495,6 +495,56 @@ class EventOrderOperations:
         finally:
             lock.release()
 
+    def _reconcile_local_active_intents(self) -> dict[str, list[str]]:
+        """Reconcile all known active IDs, and surface unknown local submissions."""
+        active = self.journal.list_active_intents()
+        uncertain = self.journal.list_unresolved_intents()
+        active_client_ids: set[str] = set()
+        reconciled_order_ids: list[str] = []
+        unresolved_order_ids: list[str] = []
+        unresolved_client_order_ids: list[str] = []
+
+        for intent in active:
+            client_order_id = str(intent.get("client_order_id") or "")
+            order_id = intent.get("exchange_order_id")
+            if not client_order_id:
+                unresolved_client_order_ids.append("unknown_client_order_id")
+                continue
+            active_client_ids.add(client_order_id)
+            if not isinstance(order_id, str) or not order_id.strip():
+                unresolved_client_order_ids.append(client_order_id)
+                continue
+            try:
+                remote = self.session.get_order(order_id=order_id)
+                matched = self._verify_identity(
+                    remote, order_id=order_id, intent=intent
+                )
+                outcome = self._record_final_observation(
+                    client_order_id=client_order_id,
+                    order_id=order_id,
+                    intent=intent,
+                    order=remote,
+                    cumulative_filled=matched,
+                )
+                if outcome is None:
+                    unresolved_order_ids.append(order_id)
+                else:
+                    reconciled_order_ids.append(order_id)
+            except Exception:
+                unresolved_order_ids.append(order_id)
+
+        for intent in uncertain:
+            client_order_id = str(intent.get("client_order_id") or "unknown_client_order_id")
+            if client_order_id not in unresolved_client_order_ids:
+                unresolved_client_order_ids.append(client_order_id)
+
+        return {
+            "active_client_order_ids": sorted(active_client_ids),
+            "reconciled_order_ids": sorted(set(reconciled_order_ids)),
+            "unresolved_order_ids": sorted(set(unresolved_order_ids)),
+            "unresolved_client_order_ids": sorted(set(unresolved_client_order_ids)),
+        }
+
     def cancel_all(
         self, *, confirmation: str | None = None
     ) -> dict[str, Any]:
@@ -517,11 +567,40 @@ class EventOrderOperations:
                 before_orders, _ = self._open_orders()
                 before_ids = [str(_field(item, "id")) for item in before_orders]
                 if not before_ids:
+                    local = self._reconcile_local_active_intents()
+                    unresolved_clients = local["unresolved_client_order_ids"]
+                    unresolved_orders = local["unresolved_order_ids"]
+                    if unresolved_clients or unresolved_orders:
+                        return {
+                            "mode": "EVENT_ORDER_MANAGEMENT",
+                            "state": "manual_review",
+                            "reason_code": "venue_book_empty_but_local_intents_unresolved",
+                            "open_order_count": 0,
+                            "reconciled_order_ids": local["reconciled_order_ids"],
+                            "unresolved_order_ids": unresolved_orders,
+                            "unresolved_client_order_ids": unresolved_clients,
+                            "automatic_retry_permitted": False,
+                            "order_submission_allowed": False,
+                            "execution": "none",
+                        }
+                    if local["reconciled_order_ids"]:
+                        return {
+                            "mode": "EVENT_ORDER_MANAGEMENT",
+                            "state": "already_empty_reconciled",
+                            "reason_code": "venue_book_empty_and_local_active_intents_reconciled",
+                            "open_order_count": 0,
+                            "reconciled_order_ids": local["reconciled_order_ids"],
+                            "automatic_retry_permitted": False,
+                            "order_submission_allowed": False,
+                            "execution": "none",
+                        }
                     return {
                         "mode": "EVENT_ORDER_MANAGEMENT",
                         "state": "already_empty",
+                        "reason_code": "venue_and_local_books_empty",
                         "open_order_count": 0,
                         "automatic_retry_permitted": False,
+                        "order_submission_allowed": False,
                         "execution": "none",
                     }
                 # Do not repeat this request after an unknown outcome.
@@ -546,34 +625,24 @@ class EventOrderOperations:
                         "order_submission_allowed": False,
                         "execution": "cancel_only",
                     }
+                local = self._reconcile_local_active_intents()
                 untracked: list[str] = []
-                unresolved: list[str] = []
-                reconciled: list[str] = []
+                unresolved = list(local["unresolved_order_ids"])
+                unresolved_clients = list(local["unresolved_client_order_ids"])
                 for order_id in before_ids:
                     client_order_id = self.journal.find_client_order_id_by_exchange_order_id(order_id)
                     if client_order_id is None:
                         untracked.append(order_id)
-                        continue
-                    intent = self.journal.get_intent(client_order_id)
-                    if not isinstance(intent, dict):
+                    elif client_order_id not in local["active_client_order_ids"]:
+                        # The venue showed this order as open, but the local
+                        # journal does not consider it an active intent.
                         unresolved.append(order_id)
-                        continue
-                    remote = self.session.get_order(order_id=order_id)
-                    matched = self._verify_identity(
-                        remote, order_id=order_id, intent=intent
-                    )
-                    outcome = self._record_final_observation(
-                        client_order_id=client_order_id,
-                        order_id=order_id,
-                        intent=intent,
-                        order=remote,
-                        cumulative_filled=matched,
-                    )
-                    if outcome is None:
-                        unresolved.append(order_id)
-                    else:
-                        reconciled.append(order_id)
-                state = "cancelled_all_verified" if not untracked and not unresolved else "manual_review"
+                reconciled = local["reconciled_order_ids"]
+                state = (
+                    "cancelled_all_verified"
+                    if not untracked and not unresolved and not unresolved_clients
+                    else "manual_review"
+                )
                 return {
                     "mode": "EVENT_ORDER_MANAGEMENT",
                     "state": state,
@@ -614,38 +683,33 @@ class EventOrderOperations:
                 try:
                     after_error, _ = self._open_orders()
                     after_error_ids = [str(_field(item, "id")) for item in after_error]
+                    local_after_error = (
+                        self._reconcile_local_active_intents()
+                        if not after_error_ids else {
+                            "active_client_order_ids": [],
+                            "reconciled_order_ids": [],
+                            "unresolved_order_ids": [],
+                            "unresolved_client_order_ids": [],
+                        }
+                    )
                     untracked_after_error: list[str] = []
-                    unresolved_after_error: list[str] = []
-                    reconciled_after_error: list[str] = []
+                    unresolved_after_error = list(local_after_error["unresolved_order_ids"])
+                    unresolved_clients_after_error = list(
+                        local_after_error["unresolved_client_order_ids"]
+                    )
+                    reconciled_after_error = list(local_after_error["reconciled_order_ids"])
                     if not after_error_ids:
                         for order_id in before_ids if "before_ids" in locals() else []:
                             client_order_id = self.journal.find_client_order_id_by_exchange_order_id(order_id)
                             if client_order_id is None:
                                 untracked_after_error.append(order_id)
-                                continue
-                            intent = self.journal.get_intent(client_order_id)
-                            if not isinstance(intent, dict):
+                            elif client_order_id not in local_after_error["active_client_order_ids"]:
                                 unresolved_after_error.append(order_id)
-                                continue
-                            remote = self.session.get_order(order_id=order_id)
-                            matched = self._verify_identity(
-                                remote, order_id=order_id, intent=intent
-                            )
-                            outcome = self._record_final_observation(
-                                client_order_id=client_order_id,
-                                order_id=order_id,
-                                intent=intent,
-                                order=remote,
-                                cumulative_filled=matched,
-                            )
-                            if outcome is None:
-                                unresolved_after_error.append(order_id)
-                            else:
-                                reconciled_after_error.append(order_id)
                     if (
                         not after_error_ids
                         and not untracked_after_error
                         and not unresolved_after_error
+                        and not unresolved_clients_after_error
                         and bool(reconciled_after_error)
                     ):
                         return {
@@ -665,7 +729,8 @@ class EventOrderOperations:
                         "reason_code": "cancel_all_response_lost_readback_incomplete",
                         "open_order_ids_after_cancel": after_error_ids,
                         "untracked_order_ids": untracked_after_error,
-                        "unresolved_order_ids": unresolved_after_error,
+                        "unresolved_order_ids": sorted(set(unresolved_after_error)),
+                        "unresolved_client_order_ids": unresolved_clients_after_error,
                         "reconciled_order_ids": reconciled_after_error,
                         "automatic_retry_permitted": False,
                         "order_submission_allowed": False,

@@ -84,6 +84,9 @@ function metricEntries(id,d){
    ["Overall",d.status],
    ["Required failures",failures.length?failures:"None"],
    ["Last success",d.last_success_at],
+  ["Event order journal present",d.event_order_journal_present],
+  ["Event order journal path valid",d.event_order_journal_path_valid],
+  ["Event order journal included in verified backup",d.event_order_journal_backed_up],
    ["Perps journal present",backup.perps_order_journal_present],
    ["Perps journal included in backup",backup.perps_order_journal_backed_up],
    ["Perps backup files",String(backup.backup_files_last_run??"—")+"/"+String(backup.backup_files_expected_last_run??"—")],
@@ -197,7 +200,7 @@ function metricEntries(id,d){
    ["Order submission allowed",d.order_submission_allowed]
   ]};
  }
- if(id==="event-paper")return {status:d.worker_state,rows:[
+ if(id==="event-paper")return {status:(d.worker_state==="running"&&d.event_order_journal_present&&(!d.event_order_journal_path_valid||!d.event_order_journal_backed_up))?"degraded":d.worker_state,rows:[
   ["Worker state",d.worker_state],
   ["Heartbeat fresh",d.heartbeat_fresh],
   ["Last success",d.last_success_at],

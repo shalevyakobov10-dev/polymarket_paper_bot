@@ -253,18 +253,22 @@ class PortfolioAdmissionTests(unittest.TestCase):
         result = self.reserve("perps-1", venue="PERPS", exposure="100")
         self.assertTrue(result.approved)
 
-    def test_verified_absence_can_release_awaiting_reconciliation_reservation(self):
+    def test_awaiting_reconciliation_cannot_be_released_without_recovery_lock(self):
         self.reserve("poly-uncertain", exposure="60")
         self.coordinator.mark_committed("poly-uncertain", now=self.now)
-        self.release_from_ledger(
-            "poly-uncertain", ledger_entry_id="12", exposure="60",
-            now=self.now + timedelta(seconds=1),
-        )
+        with self.assertRaisesRegex(
+            PortfolioAdmissionError, "requires_recovery_lock"
+        ):
+            self.release_from_ledger(
+                "poly-uncertain", ledger_entry_id="12", exposure="60",
+                now=self.now + timedelta(seconds=1),
+            )
         result = self.reserve(
-            "perps-after-verified-absence", venue="PERPS", exposure="100",
+            "perps-after-uncertain-commit", venue="PERPS", exposure="41",
             now=self.now + timedelta(seconds=2),
         )
-        self.assertTrue(result.approved)
+        self.assertFalse(result.approved)
+        self.assertEqual(result.reason, "combined_exposure_limit")
 
     def test_reconcile_is_idempotent_but_entry_identity_is_immutable(self):
         self.reserve("poly-1")

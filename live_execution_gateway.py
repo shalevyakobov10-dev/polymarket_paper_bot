@@ -25,6 +25,7 @@ from order_journal import OrderJournal
 from event_order_management import EventOrderOperationLock
 from event_live_release_gate import evaluate_event_live_release_gate
 from polymarket_geo import check_polymarket_geoblock
+from live_kill_switch import check_live_kill_switch
 
 LIVE_CONFIRMATION_PHRASE = "I_ACCEPT_REAL_MONEY_RISK"
 LIVE_ORDER_TYPE = "FAK"
@@ -167,6 +168,32 @@ def _geoblock_error(result: Any, *, now: datetime | None = None) -> str | None:
     return None
 
 
+def _live_kill_switch_error(
+    result: Any, *, now: datetime | None = None
+) -> str | None:
+    """Require a fresh independently read DISARMED state; all uncertainty blocks."""
+    if not isinstance(result, dict) or result.get("verified") is not True:
+        return "live_kill_switch_status_unverified"
+    if result.get("engaged") is not False or result.get("state") != "disarmed":
+        return "live_kill_switch_engaged"
+    raw_timestamp = result.get("updated_at_utc")
+    try:
+        updated = raw_timestamp if isinstance(raw_timestamp, datetime) else datetime.fromisoformat(
+            str(raw_timestamp).replace("Z", "+00:00")
+        )
+    except (TypeError, ValueError, OverflowError):
+        return "live_kill_switch_timestamp_invalid"
+    if updated.tzinfo is None or updated.utcoffset() is None:
+        return "live_kill_switch_timestamp_invalid"
+    current = now or datetime.now(timezone.utc)
+    if current.tzinfo is None or current.utcoffset() is None:
+        return "live_kill_switch_clock_invalid"
+    age = (current.astimezone(timezone.utc) - updated.astimezone(timezone.utc)).total_seconds()
+    if age < -2 or age > 60:
+        return "live_kill_switch_stale_or_future_dated"
+    return None
+
+
 def _safe_reason(exc: Exception) -> str:
     # Exception text can contain request details. Persist only a stable type code.
     name = type(exc).__name__.lower()
@@ -242,12 +269,16 @@ class LiveExecutionGateway:
         geoblock_checker: Callable[[], dict[str, Any]] = check_polymarket_geoblock,
         book_provider: Callable[[str], dict[str, Any]] | None = None,
         client_factory: Callable[[str, str], Any] | None = None,
+        kill_switch_checker: Callable[[], dict[str, Any]] = check_live_kill_switch,
     ) -> None:
         self.journal = journal
         self.config = config or LiveExecutionConfig()
         self.geoblock_checker = geoblock_checker
         self.book_provider = book_provider or self._fetch_public_book
         self.client_factory = client_factory or self._create_secure_client
+        self.kill_switch_checker = kill_switch_checker
+        if not callable(self.kill_switch_checker):
+            raise ValueError("kill_switch_checker must be callable")
 
     @staticmethod
     def _fetch_public_book(token_id: str) -> dict[str, Any]:
@@ -306,6 +337,12 @@ class LiveExecutionGateway:
         event_release = evaluate_event_live_release_gate()
         if event_release.get("eligible_for_separate_gateway_review") is not True:
             return self._blocked("source_controlled_event_release_gate_closed")
+        try:
+            kill_switch_error = _live_kill_switch_error(self.kill_switch_checker())
+        except Exception:
+            return self._blocked("live_kill_switch_check_failed")
+        if kill_switch_error is not None:
+            return self._blocked(kill_switch_error)
         if not isinstance(risk_context, dict):
             return self._blocked("risk_context_missing")
         try:
@@ -511,6 +548,14 @@ class LiveExecutionGateway:
             if geoblock_error is not None:
                 return self._blocked(geoblock_error)
             geo = final_geo
+            # Re-read the independent local kill switch after signing and all
+            # remote preflight reads, immediately before the durable intent.
+            try:
+                kill_switch_error = _live_kill_switch_error(self.kill_switch_checker())
+            except Exception:
+                return self._blocked("live_kill_switch_check_failed")
+            if kill_switch_error is not None:
+                return self._blocked(kill_switch_error)
             # Durable local state must be committed before the first network post.
             self.journal.begin_submission(client_order_id)
             submission_started = True

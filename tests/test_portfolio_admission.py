@@ -52,6 +52,7 @@ class PortfolioAdmissionTests(unittest.TestCase):
         connection = sqlite3.connect(path)
         try:
             if venue == "POLYMARKET":
+                connection.execute("DROP TABLE IF EXISTS trades")
                 connection.execute(
                     "CREATE TABLE trades (trade_id INTEGER PRIMARY KEY, notional REAL NOT NULL, status TEXT NOT NULL)"
                 )
@@ -61,6 +62,7 @@ class PortfolioAdmissionTests(unittest.TestCase):
                         (int(ledger_entry_id), float(exposure), "OPEN"),
                     )
             else:
+                connection.execute("DROP TABLE IF EXISTS perps_paper_positions")
                 connection.execute(
                     "CREATE TABLE perps_paper_positions (position_id INTEGER PRIMARY KEY, quantity TEXT NOT NULL, entry_price TEXT NOT NULL, status TEXT NOT NULL)"
                 )

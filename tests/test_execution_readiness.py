@@ -8,7 +8,7 @@ from execution_readiness import execution_readiness_payload
 class ExecutionReadinessTests(unittest.TestCase):
     def test_live_execution_is_blocked_by_design(self):
         report = execution_readiness_payload()
-        self.assertEqual(report["schema_version"], 2)
+        self.assertEqual(report["schema_version"], 3)
         self.assertEqual(report["mode"], "paper_only")
         self.assertEqual(report["status"], "blocked")
         self.assertTrue(report["live_order_submission_implemented"])
@@ -28,6 +28,8 @@ class ExecutionReadinessTests(unittest.TestCase):
         self.assertEqual(event["supported_side"], "BUY")
         self.assertEqual(event["supported_order_type"], "FAK")
         self.assertTrue(event["per_order_geoblock_check"])
+        self.assertTrue(event["local_kill_switch_check"])
+        self.assertTrue(event["kill_switch_required_twice"])
         self.assertFalse(event["supports_sell"])
         self.assertFalse(event["supports_resting_orders"])
         self.assertFalse(event["runtime_enabled"])
@@ -56,6 +58,20 @@ class ExecutionReadinessTests(unittest.TestCase):
         self.assertFalse(operations["runtime_enabled"])
         self.assertFalse(operations["integrated_into_operator_service"])
         self.assertFalse(operations["new_order_submission_allowed"])
+
+    def test_event_live_kill_switch_is_mandatory_and_fails_closed(self):
+        report = execution_readiness_payload()
+        switch = report["event_live_kill_switch"]
+        self.assertEqual(switch["status_file_env"], "EVENT_LIVE_KILL_SWITCH_PATH")
+        self.assertEqual(switch["freshness_seconds"], 60)
+        self.assertTrue(switch["missing_or_invalid_means_engaged"])
+        self.assertTrue(switch["checked_on_gateway_entry"])
+        self.assertTrue(switch["checked_immediately_before_submission"])
+        self.assertFalse(switch["operator_ui_disarm_available"])
+        self.assertFalse(switch["order_submission_allowed"])
+        codes = {item["code"] for item in report["blockers"]}
+        self.assertIn("event_live_kill_switch_not_verified", codes)
+        self.assertFalse(report["live_execution_enabled"])
 
     def test_shared_paper_admission_is_reported_as_not_integrated(self):
         risk = execution_readiness_payload()["shared_paper_risk"]

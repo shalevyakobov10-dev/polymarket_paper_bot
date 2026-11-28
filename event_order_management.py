@@ -31,6 +31,11 @@ def _field(item: Any, name: str, default: Any = None) -> Any:
     return getattr(item, name, default)
 
 
+def _decimal_text(value: Decimal) -> str:
+    """Serialize fill quantities without float-style trailing zeros."""
+    return format(value.normalize(), "f") if value else "0"
+
+
 def _decimal(value: Any, field: str) -> Decimal:
     if isinstance(value, bool) or value is None:
         raise ValueError(f"{field}_invalid")
@@ -380,7 +385,7 @@ class EventOrderOperations:
                             "client_order_id": client_order_id,
                             "exchange_order_id": order_id,
                             "terminal_outcome": outcome,
-                            "filled_size": str(before_fill),
+                            "filled_size": _decimal_text(before_fill),
                             "automatic_retry_permitted": False,
                             "execution": "none",
                         }
@@ -418,7 +423,7 @@ class EventOrderOperations:
                                     "client_order_id": client_order_id,
                                     "exchange_order_id": order_id,
                                     "cancel_acknowledged": False,
-                                    "filled_size": str(fill_after_error),
+                                    "filled_size": _decimal_text(fill_after_error),
                                     "automatic_retry_permitted": False,
                                     "order_submission_allowed": False,
                                     "execution": "cancel_only",
@@ -459,7 +464,7 @@ class EventOrderOperations:
                         "cancel_acknowledged": order_id in cancelled_ids,
                         "venue_not_canceled_reason": str(not_cancelled.get(order_id, ""))[:120],
                         "still_open": still_open,
-                        "filled_size": str(after_fill),
+                        "filled_size": _decimal_text(after_fill),
                         "automatic_retry_permitted": False,
                         "order_submission_allowed": False,
                         "execution": "cancel_only",
@@ -471,8 +476,8 @@ class EventOrderOperations:
                     "client_order_id": client_order_id,
                     "exchange_order_id": order_id,
                     "cancel_acknowledged": order_id in cancelled_ids,
-                    "filled_size": str(after_fill),
-                    "unfilled_size": str(max(Decimal("0"), _decimal(intent["size"], "local_order_size") - after_fill)),
+                    "filled_size": _decimal_text(after_fill),
+                    "unfilled_size": _decimal_text(max(Decimal("0"), _decimal(intent["size"], "local_order_size") - after_fill)),
                     "automatic_retry_permitted": False,
                     "order_submission_allowed": False,
                     "execution": "cancel_only",
@@ -590,7 +595,20 @@ class EventOrderOperations:
                     "order_submission_allowed": False,
                     "execution": "cancel_only",
                 }
-            except Exception:
+            except Exception as exc:
+                # Before the request, a failed/incomplete read is not an
+                # ambiguous cancel outcome. Do not make another read request or
+                # claim that cancellation was attempted.
+                if not cancel_all_attempted:
+                    return {
+                        "mode": "EVENT_ORDER_MANAGEMENT",
+                        "state": "manual_review",
+                        "reason_code": type(exc).__name__[:80],
+                        "cancel_request_attempted": False,
+                        "automatic_retry_permitted": False,
+                        "order_submission_allowed": False,
+                        "execution": "none",
+                    }
                 # If the cancel-all response is lost, do not repeat it. Re-read
                 # the complete open-order book and reconcile only exact local IDs.
                 try:

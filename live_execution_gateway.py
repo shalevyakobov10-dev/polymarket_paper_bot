@@ -22,6 +22,7 @@ from typing import Any, Callable
 from account_risk_policy import MAX_ACCOUNT_RISK_SNAPSHOT_AGE_SECONDS
 from live_order_preflight import REQUIRED_RELEASE_GATES, evaluate_live_order_preflight
 from order_journal import OrderJournal
+from event_live_release_gate import evaluate_event_live_release_gate
 from polymarket_geo import check_polymarket_geoblock
 
 LIVE_CONFIRMATION_PHRASE = "I_ACCEPT_REAL_MONEY_RISK"
@@ -283,6 +284,9 @@ class LiveExecutionGateway:
         """
         if not self.config.armed_for_live_orders():
             return self._blocked("live_execution_not_armed")
+        event_release = evaluate_event_live_release_gate()
+        if event_release.get("eligible_for_separate_gateway_review") is not True:
+            return self._blocked("source_controlled_event_release_gate_closed")
         if not isinstance(risk_context, dict):
             return self._blocked("risk_context_missing")
         try:

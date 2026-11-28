@@ -88,6 +88,21 @@ class PortfolioAdmissionTests(unittest.TestCase):
             ledger_entry_id=ledger_entry_id, now=now or self.now,
         )
 
+    def release_from_ledger(
+        self, admission_id, *, ledger_entry_id, venue="POLYMARKET",
+        exposure="40", entry_present=False, now=None,
+    ):
+        ledger_path = self.path.parent / f"{admission_id}-release-ledger.sqlite3"
+        self.make_ledger(
+            ledger_path, venue=venue,
+            ledger_entry_id=ledger_entry_id if entry_present else None,
+            exposure=exposure if entry_present else None,
+        )
+        return self.coordinator.release_from_ledger(
+            admission_id, ledger_database_path=ledger_path,
+            ledger_entry_id=ledger_entry_id, now=now or self.now,
+        )
+
     def test_reservation_is_durable_and_idempotent(self):
         first = self.reserve("poly-1")
         again = self.reserve("poly-1")
@@ -223,21 +238,26 @@ class PortfolioAdmissionTests(unittest.TestCase):
                               snapshot_at=later, now=later)
         self.assertFalse(result.approved)
 
-    def test_release_requires_verified_ledger_absence(self):
-        self.reserve("poly-1")
-        with self.assertRaisesRegex(PortfolioAdmissionError, "verified_ledger_absence"):
-            self.coordinator.release("poly-1", confirmed_absent_from_ledger=False)
-        self.coordinator.release("poly-1", confirmed_absent_from_ledger=True, now=self.now)
+    def test_release_is_blocked_when_exact_venue_entry_is_present(self):
+        self.reserve("poly-1", exposure="40")
+        with self.assertRaisesRegex(PortfolioAdmissionError, "ledger_entry_present"):
+            self.release_from_ledger(
+                "poly-1", ledger_entry_id="11", exposure="40",
+                entry_present=True,
+            )
+        self.assertEqual(self.coordinator.list_unresolved()[0]["status"], "PENDING")
+
+    def test_release_requires_valid_ledger_proof_of_entry_absence(self):
+        self.reserve("poly-1", exposure="40")
+        self.release_from_ledger("poly-1", ledger_entry_id="11", exposure="40")
         result = self.reserve("perps-1", venue="PERPS", exposure="100")
         self.assertTrue(result.approved)
 
     def test_verified_absence_can_release_awaiting_reconciliation_reservation(self):
         self.reserve("poly-uncertain", exposure="60")
         self.coordinator.mark_committed("poly-uncertain", now=self.now)
-        with self.assertRaisesRegex(PortfolioAdmissionError, "verified_ledger_absence"):
-            self.coordinator.release("poly-uncertain", confirmed_absent_from_ledger=False)
-        self.coordinator.release(
-            "poly-uncertain", confirmed_absent_from_ledger=True,
+        self.release_from_ledger(
+            "poly-uncertain", ledger_entry_id="12", exposure="60",
             now=self.now + timedelta(seconds=1),
         )
         result = self.reserve(

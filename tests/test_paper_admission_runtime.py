@@ -334,6 +334,20 @@ class PaperAdmissionRuntimeTests(unittest.TestCase):
             result = output.get(timeout=2)
         self.assertEqual(result, "admission_lock_timeout")
 
+    def test_admission_lock_rejects_symlinked_parent_directory(self):
+        runtime = self.runtime()
+        real_parent = Path(self.temp.name) / "real-lock-directory"
+        real_parent.mkdir()
+        alias_parent = Path(self.temp.name) / "lock-directory-alias"
+        try:
+            alias_parent.symlink_to(real_parent, target_is_directory=True)
+        except (NotImplementedError, OSError):
+            self.skipTest("directory symlinks are unavailable on this filesystem")
+        runtime.admission_lock_path = alias_parent / "admission.lock"
+        with self.assertRaisesRegex(PaperAdmissionRuntimeError, "admission_lock_path_unsafe"):
+            with runtime._exclusive_admission_lock():
+                self.fail("lock under symlinked parent must be rejected")
+
     def test_symlinked_admission_lock_is_rejected(self):
         runtime = self.runtime()
         alias = Path(self.temp.name) / "admission-lock-alias"

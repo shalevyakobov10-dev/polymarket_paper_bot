@@ -166,9 +166,20 @@ class PerpsLiveExecutionGatewayTests(unittest.IsolatedAsyncioTestCase):
             "max_order_notional_usd": "25",
             "max_leverage": 2,
             "now_provider": lambda: NOW,
+            "geoblock_checker": self.geoblock_check,
         }
         options.update(overrides)
         return PerpsLiveExecutionGateway(**options)
+
+    def geoblock_check(self):
+        return {
+            "verified": True,
+            "blocked": False,
+            "country": "IL",
+            "region": "TA",
+            "checked_at_utc": NOW.isoformat(),
+            "ip_redacted": True,
+        }
 
     def risk_decision(self, **overrides):
         result = {
@@ -212,6 +223,53 @@ class PerpsLiveExecutionGatewayTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["reason_code"], "live_execution_not_explicitly_enabled_and_armed")
         self.assertFalse(result["order_placement_attempted"])
         self.assertEqual(self.session.place_calls, [])
+
+    async def test_geoblock_denial_blocks_before_auto_cancel_and_account_preflight(self):
+        gateway = self.gateway(geoblock_checker=lambda: {
+            "verified": True, "blocked": True, "country": "XX",
+            "region": "YY", "checked_at_utc": NOW.isoformat(),
+        })
+        result = await self.submit(gateway)
+        self.assertEqual(result["reason_code"], "polymarket_geoblock_rejected_or_unverified")
+        self.assertFalse(result["order_placement_attempted"])
+        self.assertEqual(self.guard.calls, 0)
+        self.assertEqual(self.preflight.calls, 0)
+        self.assertEqual(self.session.place_calls, [])
+        self.assertIsNone(self.journal.get_intent("a" * 32))
+
+    async def test_geoblock_network_failure_and_stale_result_fail_closed(self):
+        def offline():
+            raise RuntimeError("offline")
+        failed = self.gateway(geoblock_checker=offline)
+        result = await self.submit(failed)
+        self.assertEqual(result["reason_code"], "polymarket_geoblock_check_failed")
+        stale = self.gateway(geoblock_checker=lambda: {
+            "verified": True, "blocked": False, "country": "IL",
+            "region": "TA", "checked_at_utc": "2020-01-01T00:00:00+00:00",
+        })
+        result = await self.submit(stale, client_order_id="b" * 32)
+        self.assertEqual(result["reason_code"], "polymarket_geoblock_stale_or_future_dated")
+        self.assertEqual(self.session.place_calls, [])
+
+    async def test_geoblock_is_rechecked_after_account_reads_before_submission_journal(self):
+        calls = []
+        def changing_location():
+            calls.append(len(calls) + 1)
+            return {
+                "verified": True,
+                "blocked": len(calls) == 2,
+                "country": "IL" if len(calls) == 1 else "XX",
+                "region": "TA",
+                "checked_at_utc": NOW.isoformat(),
+            }
+        gateway = self.gateway(geoblock_checker=changing_location)
+        result = await self.submit(gateway)
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(result["reason_code"], "polymarket_geoblock_rejected_or_unverified")
+        self.assertEqual(self.guard.calls, 1)
+        self.assertEqual(self.preflight.calls, 1)
+        self.assertEqual(self.session.place_calls, [])
+        self.assertIsNone(self.journal.get_intent("a" * 32))
 
     async def test_enabled_gateway_requires_explicit_acknowledgement_and_dry_run_off(self):
         with self.assertRaisesRegex(ValueError, "DRY_RUN"):

@@ -390,8 +390,9 @@ class PortfolioAdmissionCoordinator:
     ) -> None:
         """Release only when a valid read-only venue ledger proves ID absence.
 
-        A missing/unreadable database, incomplete schema, malformed ID, or
-        any row at the requested ID keeps the reservation risk-consuming.
+        A missing/unreadable database, incomplete schema, malformed ID, any row at
+        the requested ID, or an AWAITING_RECONCILIATION state keeps the
+        reservation risk-consuming. This simple path releases PENDING only.
         This is intentionally conservative for uncertain commit outcomes.
         """
         if not isinstance(admission_id, str) or not admission_id.strip() or len(admission_id) > 160:
@@ -411,8 +412,11 @@ class PortfolioAdmissionCoordinator:
         if reservation is None:
             raise PortfolioAdmissionError("reservation_not_found")
         venue, exposure_text, status = reservation
-        if status not in {"PENDING", "AWAITING_RECONCILIATION"}:
-            raise PortfolioAdmissionError("reservation_state_conflict_or_missing")
+        # Once a venue write has been attempted/committed, a missing row is
+        # not sufficient proof that the outcome is safe to release. A separate
+        # recovery coordinator must first establish writer quiescence.
+        if status != "PENDING":
+            raise PortfolioAdmissionError("awaiting_reconciliation_requires_recovery_lock")
 
         try:
             self._verify_ledger_entry(

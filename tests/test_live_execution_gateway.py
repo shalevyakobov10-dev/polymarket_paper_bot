@@ -132,7 +132,8 @@ class LiveExecutionGatewayTests(unittest.TestCase):
         self.gateway_kwargs = {
             "geoblock_checker": lambda: {
                 "verified": True, "blocked": False, "country": "IL",
-                "region": "TA", "ip_redacted": True,
+                "region": "TA", "checked_at_utc": datetime.now(timezone.utc).isoformat(),
+                "ip_redacted": True,
             },
             "book_provider": lambda token: {
                 "token_id": token,
@@ -209,6 +210,38 @@ class LiveExecutionGatewayTests(unittest.TestCase):
         self.assertEqual(result["reason"], "polymarket_geoblock_rejected_or_unverified")
         self.assertEqual(self.client.created, [])
         self.assertEqual(self.client.posts, [])
+
+    def test_stale_geoblock_result_fails_closed_before_sdk_client_creation(self):
+        result = self._run_gateway(
+            geoblock_checker=lambda: {
+                "verified": True, "blocked": False, "country": "IL",
+                "region": "TA", "checked_at_utc": "2020-01-01T00:00:00+00:00",
+            }
+        )
+        self.assertEqual(result["reason"], "polymarket_geoblock_stale_or_future_dated")
+        self.assertEqual(self.client.created, [])
+        self.assertEqual(self.client.posts, [])
+
+    def test_geoblock_is_rechecked_after_signing_before_submission_journal(self):
+        calls = []
+        def changing_location():
+            calls.append(len(calls) + 1)
+            return {
+                "verified": True,
+                "blocked": len(calls) == 2,
+                "country": "IL" if len(calls) == 1 else "XX",
+                "region": "TA",
+                "checked_at_utc": datetime.now(timezone.utc).isoformat(),
+                "ip_redacted": True,
+            }
+        result = self._run_gateway(geoblock_checker=changing_location)
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(result["reason"], "polymarket_geoblock_rejected_or_unverified")
+        self.assertEqual(self.client.posts, [])
+        self.assertEqual(
+            self.journal.get_intent("paper-intent-001")["status"],
+            "prepared",
+        )
 
     def test_geoblock_network_error_fails_closed_before_signing(self):
         def fail():

@@ -1,0 +1,54 @@
+[
+  {
+    "token_id": "token-yes-edge",
+    "market_id": "fixture-market-1",
+    "question": "Will the fixture research estimate be treated as a paper signal?",
+    "outcome": "Yes",
+    "rules": "This is a local fixture. It resolves only inside unit tests and never represents a live event.",
+    "observed_price": 0.42,
+    "research_estimate": 0.7,
+    "research_confidence": 0.8,
+    "fees_enabled": false,
+    "headlines": ["Fixture headline only. No network call is required."],
+    "orderbook": {
+      "token_id": "token-yes-edge",
+      "observed_at": "2020-01-01T00:00:00+00:00",
+      "best_bid": 0.4,
+      "best_ask": 0.42,
+      "spread_bps": 487.8,
+      "bid_depth_usd_top5": 40.0,
+      "ask_depth_usd_top5": 40.0,
+      "bids_top5": [{"price": 0.4, "size": 100.0}],
+      "asks_top5": [{"price": 0.42, "size": 100.0}],
+      "book_usable": true,
+      "crossed_book": false,
+      "tick_size": 0.01,
+      "min_order_size": 1
+    }
+  },
+  {
+    "token_id": "token-no-edge",
+    "market_id": "fixture-market-2",
+    "question": "Will an offline market without a research estimate be skipped?",
+    "outcome": "Yes",
+    "rules": "No estimate is supplied, so the cycle must abstain.",
+    "observed_price": 0.5,
+    "fees_enabled": false,
+    "headlines": [],
+    "orderbook": {
+      "token_id": "token-no-edge",
+      "observed_at": "2020-01-01T00:00:00+00:00",
+      "best_bid": 0.48,
+      "best_ask": 0.5,
+      "spread_bps": 408.16,
+      "bid_depth_usd_top5": 20.0,
+      "ask_depth_usd_top5": 20.0,
+      "bids_top5": [{"price": 0.48, "size": 50.0}],
+      "asks_top5": [{"price": 0.5, "size": 50.0}],
+      "book_usable": true,
+      "crossed_book": false,
+      "tick_size": 0.01,
+      "min_order_size": 1
+    }
+  }
+]

@@ -5,6 +5,7 @@ __pycache__/
 venv/
 .env
 .env.*
+!.env.example
 data/
 *.jsonl
 

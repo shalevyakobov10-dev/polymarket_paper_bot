@@ -4,6 +4,8 @@ WORKDIR /app
 COPY requirements.txt /app/requirements.txt
 RUN pip install --no-cache-dir -r /app/requirements.txt
 COPY *.py /app/
+COPY ai /app/ai
+COPY core /app/core
 RUN useradd --create-home --uid 10001 appuser && mkdir -p /app/data && chown -R appuser:appuser /app
 USER appuser
 EXPOSE 8080

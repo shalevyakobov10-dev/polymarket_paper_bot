@@ -165,9 +165,13 @@ class EventOrderOperationsTests(unittest.TestCase):
         result = self.manager.cancel_order(
             "venue-order-1", confirmation=CANCEL_ONE_ACKNOWLEDGEMENT
         )
-        self.assertEqual(result["state"], "manual_review")
+        self.assertEqual(result["state"], "cancelled")
+        self.assertEqual(
+            result["reason_code"],
+            "cancel_response_lost_but_terminal_state_verified",
+        )
         self.assertEqual(self.session.cancel_calls, ["venue-order-1"])
-        self.assertEqual(self.journal.get_intent("client-venue-order-1")["status"], "open")
+        self.assertEqual(self.journal.get_intent("client-venue-order-1")["status"], "cancelled")
 
     def test_cancel_refuses_order_not_owned_by_local_journal(self):
         self.session.orders["manual-order"] = fake_order("manual-order")

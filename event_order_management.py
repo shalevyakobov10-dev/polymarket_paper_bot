@@ -451,7 +451,8 @@ class EventOrderOperations:
                         "still_open": still_open,
                         "filled_size": str(after_fill),
                         "automatic_retry_permitted": False,
-                        "execution": "none",
+                        "order_submission_allowed": False,
+                        "execution": "cancel_only",
                     }
                 return {
                     "mode": "EVENT_ORDER_MANAGEMENT",
@@ -463,7 +464,8 @@ class EventOrderOperations:
                     "filled_size": str(after_fill),
                     "unfilled_size": str(max(Decimal("0"), _decimal(intent["size"], "local_order_size") - after_fill)),
                     "automatic_retry_permitted": False,
-                    "execution": "none",
+                    "order_submission_allowed": False,
+                    "execution": "cancel_only",
                 }
             except Exception as exc:
                 return {
@@ -573,13 +575,77 @@ class EventOrderOperations:
                     "automatic_retry_permitted": False,
                     "execution": "none",
                 }
-            except Exception as exc:
-                return {
-                    "mode": "EVENT_ORDER_MANAGEMENT",
-                    "state": "manual_review",
-                    "reason_code": type(exc).__name__[:80],
-                    "automatic_retry_permitted": False,
-                    "execution": "none",
-                }
+            except Exception:
+                # If the cancel-all response is lost, do not repeat it. Re-read
+                # the complete open-order book and reconcile only exact local IDs.
+                try:
+                    after_error, _ = self._open_orders()
+                    after_error_ids = [str(_field(item, "id")) for item in after_error]
+                    untracked_after_error: list[str] = []
+                    unresolved_after_error: list[str] = []
+                    reconciled_after_error: list[str] = []
+                    if not after_error_ids:
+                        for order_id in before_ids if "before_ids" in locals() else []:
+                            client_order_id = self.journal.find_client_order_id_by_exchange_order_id(order_id)
+                            if client_order_id is None:
+                                untracked_after_error.append(order_id)
+                                continue
+                            intent = self.journal.get_intent(client_order_id)
+                            if not isinstance(intent, dict):
+                                unresolved_after_error.append(order_id)
+                                continue
+                            remote = self.session.get_order(order_id=order_id)
+                            matched = self._verify_identity(
+                                remote, order_id=order_id, intent=intent
+                            )
+                            outcome = self._record_final_observation(
+                                client_order_id=client_order_id,
+                                order_id=order_id,
+                                intent=intent,
+                                order=remote,
+                                cumulative_filled=matched,
+                            )
+                            if outcome is None:
+                                unresolved_after_error.append(order_id)
+                            else:
+                                reconciled_after_error.append(order_id)
+                    if (
+                        not after_error_ids
+                        and not untracked_after_error
+                        and not unresolved_after_error
+                        and bool(reconciled_after_error)
+                    ):
+                        return {
+                            "mode": "EVENT_ORDER_MANAGEMENT",
+                            "state": "cancelled_all_verified",
+                            "reason_code": "cancel_all_response_lost_but_readback_verified",
+                            "cancel_acknowledged": False,
+                            "reconciled_order_ids": reconciled_after_error,
+                            "open_order_ids_after_cancel": [],
+                            "automatic_retry_permitted": False,
+                            "order_submission_allowed": False,
+                            "execution": "cancel_only",
+                        }
+                    return {
+                        "mode": "EVENT_ORDER_MANAGEMENT",
+                        "state": "manual_review" if not after_error_ids else "cancel_unresolved",
+                        "reason_code": "cancel_all_response_lost_readback_incomplete",
+                        "open_order_ids_after_cancel": after_error_ids,
+                        "untracked_order_ids": untracked_after_error,
+                        "unresolved_order_ids": unresolved_after_error,
+                        "reconciled_order_ids": reconciled_after_error,
+                        "automatic_retry_permitted": False,
+                        "order_submission_allowed": False,
+                        "execution": "cancel_only",
+                    }
+                except Exception:
+                    return {
+                        "mode": "EVENT_ORDER_MANAGEMENT",
+                        "state": "manual_review",
+                        "reason_code": "cancel_all_response_lost_and_readback_failed",
+                        "automatic_retry_permitted": False,
+                        "order_submission_allowed": False,
+                        "execution": "cancel_only",
+                    }
         finally:
             lock.release()

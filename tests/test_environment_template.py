@@ -45,6 +45,16 @@ class EnvironmentTemplateTests(unittest.TestCase):
         self.assertEqual(values.get("LIVE_TRADING_ENABLED"), "false")
         self.assertEqual(values.get("LIVE_TRADING_ARMED"), "false")
 
+    def test_event_live_kill_switch_uses_protected_separate_operator_mount(self):
+        values = parse_environment_template()
+        self.assertEqual(
+            values.get("EVENT_LIVE_KILL_SWITCH_PATH"),
+            "/etc/polymarket/event_live_kill_switch.json",
+        )
+        self.assertEqual(values.get("EVENT_LIVE_KILL_SWITCH_OWNER_UID"), "0")
+        self.assertNotIn("/app/data", values["EVENT_LIVE_KILL_SWITCH_PATH"])
+        self.assertNotIn("./data", values["EVENT_LIVE_KILL_SWITCH_PATH"])
+
     def test_perps_backup_settings_have_one_canonical_destination(self):
         values = parse_environment_template()
         self.assertEqual(values.get("PERPS_BACKUP_DIRECTORY"), "./data/perps_backups")

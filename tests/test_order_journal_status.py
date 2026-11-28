@@ -55,10 +55,12 @@ class LocalOrderJournalStatusTests(unittest.TestCase):
         self.assertEqual(result["status"], "degraded")
         self.assertEqual(result["active_order_count"], 1)
         self.assertEqual(result["unresolved_order_count"], 1)
-        self.assertEqual(result["active_orders"][0]["client_order_id"], "active-1")
-        self.assertEqual(result["active_orders"][0]["exchange_order_id"], "venue-101")
-        self.assertEqual(result["unresolved_orders"][0]["client_order_id"], "ambiguous-1")
-        self.assertTrue(result["unresolved_orders"][0]["reconciliation_required"])
+        self.assertEqual(result["active_order_status_counts"]["open"], 1)
+        self.assertEqual(
+            result["unresolved_order_status_counts"]["submission_unknown"], 1
+        )
+        self.assertEqual(result["unresolved_reason_counts"]["transport_timeout"], 1)
+        self.assertFalse(result["order_identifiers_exposed"])
         self.assertFalse(result["automatic_retry_permitted"])
         self.assertEqual(result["execution"], "none")
         self.assertNotIn("token-public-1", repr(result))

@@ -308,6 +308,28 @@ class ParserTests(unittest.TestCase):
         self.assertEqual(payload["status"], "unhealthy")
         self.assertEqual(payload["components"]["event_paper_worker"]["status"], "degraded")
         self.assertIn("event_paper_worker", payload["required_component_failures"])
+
+        journal_not_backed_up = {
+            **paper,
+            "event_order_journal_present": True,
+            "event_order_journal_path_valid": True,
+            "event_order_journal_backed_up": False,
+        }
+        healthy, payload = app.health_payload(
+            core, now, paper_worker_snapshot=journal_not_backed_up
+        )
+        self.assertFalse(healthy)
+        self.assertEqual(
+            payload["components"]["event_paper_worker"]["event_order_journal_present"],
+            True,
+        )
+        self.assertFalse(
+            payload["components"]["event_paper_worker"]["event_order_journal_backed_up"]
+        )
+        self.assertEqual(
+            payload["components"]["event_paper_worker"]["status"], "degraded"
+        )
+        self.assertIn("event_paper_worker", payload["required_component_failures"])
         self.assertEqual(
             payload["components"]["event_paper_worker"]["backup_error_type"], "OSError"
         )

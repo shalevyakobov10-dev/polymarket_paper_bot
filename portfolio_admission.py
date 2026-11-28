@@ -97,9 +97,11 @@ class PortfolioAdmissionCoordinator:
 
     def reserve(
         self, *, admission_id: str, venue: str, exposure_usd: Any, positions: int,
-        snapshot_exposure_usd: Any, snapshot_positions: int, snapshot_at: datetime | str,
-        max_snapshot_age_seconds: float, max_total_exposure_usd: Any,
-        max_total_positions: int, now: datetime | None = None,
+        snapshot_exposure_usd: Any, snapshot_positions: int,
+        snapshot_daily_pnl_usd: Any, max_combined_daily_loss_usd: Any,
+        snapshot_at: datetime | str, max_snapshot_age_seconds: float,
+        max_total_exposure_usd: Any, max_total_positions: int,
+        now: datetime | None = None,
     ) -> AdmissionResult:
         if not isinstance(admission_id, str) or not admission_id.strip() or len(admission_id) > 160:
             raise PortfolioAdmissionError("admission_id_invalid")
@@ -108,9 +110,17 @@ class PortfolioAdmissionCoordinator:
             raise PortfolioAdmissionError("venue_invalid")
         requested = _amount(exposure_usd, "exposure_usd")
         observed = _amount(snapshot_exposure_usd, "snapshot_exposure_usd")
+        daily_pnl = _amount(
+            snapshot_daily_pnl_usd, "snapshot_daily_pnl_usd", allow_negative=True
+        )
+        daily_loss_limit = _amount(
+            max_combined_daily_loss_usd, "max_combined_daily_loss_usd"
+        )
         maximum = _amount(max_total_exposure_usd, "max_total_exposure_usd")
         if requested <= 0 or maximum <= 0:
             raise PortfolioAdmissionError("exposure_must_be_positive")
+        if daily_loss_limit <= 0:
+            raise PortfolioAdmissionError("combined_daily_loss_limit_must_be_positive")
         if isinstance(positions, bool) or not isinstance(positions, int) or positions < 1:
             raise PortfolioAdmissionError("positions_invalid")
         if isinstance(snapshot_positions, bool) or not isinstance(snapshot_positions, int) or snapshot_positions < 0:
@@ -146,6 +156,16 @@ class PortfolioAdmissionCoordinator:
                 return AdmissionResult(
                     admission_id, False, "idempotent_existing_reservation_no_new_entry",
                     existing[1], existing[2], existing[3],
+                )
+
+            # Combined realized + mark-to-market daily PnL is supplied by the
+            # complete, fresh unified read-only snapshot. Reject new risk once
+            # the portfolio-wide loss limit has been reached.
+            if daily_pnl <= -daily_loss_limit:
+                db.rollback()
+                return AdmissionResult(
+                    admission_id, False, "combined_daily_loss_limit",
+                    "0", 0, "REJECTED",
                 )
 
             # A RECONCILED reservation is still counted for snapshots captured

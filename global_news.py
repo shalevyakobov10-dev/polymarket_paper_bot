@@ -12,6 +12,7 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
+from news_fusion import canonical_article_identity_url, canonical_article_url
 from paper_trading import rotate_jsonl_file
 from publisher_identity import publisher_identity
 
@@ -126,13 +127,19 @@ def normalize_gdelt_articles(
             continue
         title = " ".join(str(article.get("title") or "").split())[:400]
         url = str(article.get("url") or "").strip()[:2000]
-        canonical_url = url.split("#", 1)[0]
-        if not title or not canonical_url.startswith("https://") or canonical_url in seen:
+        canonical_url = canonical_article_url(url)
+        identity_url = canonical_article_identity_url(canonical_url)
+        if (
+            not title
+            or not canonical_url.startswith("https://")
+            or not identity_url
+            or identity_url in seen
+        ):
             continue
-        seen.add(canonical_url)
+        seen.add(identity_url)
         source_language = _language_code(article.get("language"))
         records.append({
-            "id": hashlib.sha256(canonical_url.encode("utf-8")).hexdigest(),
+            "id": hashlib.sha256(identity_url.encode("utf-8")).hexdigest(),
             "source": str(article.get("domain") or "GDELT indexed source")[:100],
             "publisher_id": publisher_identity(
                 str(article.get("domain") or ""), article_url=url

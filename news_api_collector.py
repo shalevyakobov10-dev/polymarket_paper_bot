@@ -18,7 +18,7 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
-from news_fusion import canonical_article_url
+from news_fusion import canonical_article_identity_url, canonical_article_url
 from publisher_identity import publisher_identity
 
 
@@ -247,7 +247,8 @@ class NewsAPICollector:
                 published_at = published.isoformat()
             summary = str(raw.get("description") or raw.get("content") or "").strip()
             publisher = publisher_identity(source_name, "", url)
-            identifier = hashlib.sha256(url.encode("utf-8")).hexdigest()
+            identity_url = canonical_article_identity_url(url)
+            identifier = hashlib.sha256(identity_url.encode("utf-8")).hexdigest()
             items.append({
                 "id": identifier,
                 "url": url,

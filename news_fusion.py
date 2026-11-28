@@ -22,11 +22,6 @@ def canonical_article_url(value: Any) -> str:
         if parsed.scheme.lower() not in {"https", "http"} or not parsed.hostname:
             return ""
         hostname = parsed.hostname.lower().rstrip(".")
-        # Feed providers often alternate between www and apex hosts for the
-        # same publisher URL. Normalize this presentation-only prefix so
-        # cross-source deduplication uses one canonical article identity.
-        if hostname.startswith("www."):
-            hostname = hostname[4:]
         port = parsed.port
         if port and not (
             (parsed.scheme.lower() == "https" and port == 443)
@@ -54,6 +49,35 @@ def canonical_article_url(value: Any) -> str:
             urlencode(query, doseq=True),
             "",
         ))
+    except (TypeError, ValueError, UnicodeError):
+        return ""
+
+
+def canonical_article_identity_url(value: Any) -> str:
+    """Return a stable deduplication key without rewriting the stored source URL.
+
+    Some publishers serve one story on both www and apex hosts. Keep
+    canonical_article_url() faithful to the URL host supplied by the publisher,
+    but collapse that presentation-only host prefix for identity comparisons.
+    """
+    canonical = canonical_article_url(value)
+    if not canonical:
+        return ""
+    try:
+        parsed = urlsplit(canonical)
+        hostname = (parsed.hostname or "").lower().rstrip(".")
+        if hostname.startswith("www."):
+            hostname = hostname[4:]
+            port = parsed.port
+            host = f"{hostname}:{port}" if port else hostname
+            return urlunsplit((
+                parsed.scheme.lower(),
+                host,
+                parsed.path or "/",
+                parsed.query,
+                "",
+            ))
+        return canonical
     except (TypeError, ValueError, UnicodeError):
         return ""
 
@@ -106,13 +130,14 @@ def merge_news_sources(
             if not isinstance(raw, dict):
                 continue
             url = canonical_article_url(raw.get("url"))
+            identity_url = canonical_article_identity_url(url)
             raw_id = str(raw.get("id") or "").strip()
             if not url and not raw_id:
                 continue
-            identity = url or raw_id
+            identity = identity_url or raw_id
             item_id = (
-                hashlib.sha256(url.encode("utf-8")).hexdigest()
-                if url else raw_id[:160]
+                hashlib.sha256(identity_url.encode("utf-8")).hexdigest()
+                if identity_url else raw_id[:160]
             )
             source = str(raw.get("source") or "").strip()[:100]
             feed_url = str(raw.get("feed_url") or "").strip()[:1000]

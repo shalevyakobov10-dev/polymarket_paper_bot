@@ -1,6 +1,7 @@
 import unittest
 
 from news_fusion import (
+    canonical_article_identity_url,
     canonical_article_url,
     merge_news_sources,
     summarize_news_source_coverage,
@@ -14,6 +15,10 @@ class NewsFusionTests(unittest.TestCase):
                 "https://www.bbc.com/news/world-123?utm_source=rss&fbclid=abc#section"
             ),
             "https://www.bbc.com/news/world-123",
+        )
+        self.assertEqual(
+            canonical_article_identity_url("https://www.bbc.com/news/world-123"),
+            "https://bbc.com/news/world-123",
         )
         rss = [{
             "id": "rss-copy",
@@ -48,6 +53,7 @@ class NewsFusionTests(unittest.TestCase):
 
         self.assertEqual(len(rows), 1)
         row = rows[0]
+        self.assertEqual(row["url"], "https://www.bbc.com/news/world-123")
         self.assertEqual(row["publisher_id"], "bbc")
         self.assertEqual(row["published_at"], "2026-11-23T10:00:00+00:00")
         self.assertEqual(row["indexed_at"], "2026-11-23T10:02:00+00:00")

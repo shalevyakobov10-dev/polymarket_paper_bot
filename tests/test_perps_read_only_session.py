@@ -25,7 +25,7 @@ from perps_account_supervisor_worker import (
 )
 
 
-NOW = datetime(2026, 11, 22, 18, 0, tzinfo=timezone.utc)
+NOW = datetime.now(timezone.utc).replace(microsecond=0)
 
 
 class FakeRawPerpsSession:

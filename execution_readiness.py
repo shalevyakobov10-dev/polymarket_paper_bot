@@ -43,7 +43,7 @@ def execution_readiness_payload() -> dict[str, Any]:
             "detail": (
                 "The Perps IOC/FOK limit gateway is not connected to the Perps "
                 "strategy worker or an operator-facing execution service. "
-                "The gateway has no independent per-order geoblock check."
+                "The gateway has no independent per-order geoblock check and repeats it immediately before durable submission intent."
             ),
         },
         {
@@ -75,7 +75,7 @@ def execution_readiness_payload() -> dict[str, Any]:
             "detail": (
                 "Local legal review has not been recorded. The live event "
                 "gateway checks Polymarket geoblock on its order path, but this "
-                "readiness endpoint does not call it; the Perps gateway has no "
+                "readiness endpoint does not call it; the Perps gateway now performs a fresh "
                 "independent per-order geoblock check."
             ),
         },
@@ -135,7 +135,7 @@ def execution_readiness_payload() -> dict[str, Any]:
                 "integrated_into_strategy_worker": False,
                 "supported_order_type": "LIMIT",
                 "supported_time_in_force": ["IOC", "FOK"],
-                "per_order_geoblock_check": False,
+                "per_order_geoblock_check": True,
                 "source_controlled_release_gates_passed": False,
                 "runtime_enabled": False,
                 "order_submission_allowed": False,

@@ -384,13 +384,50 @@ class PortfolioAdmissionCoordinator:
         finally:
             db.close()
 
-    def release(self, admission_id: str, *, confirmed_absent_from_ledger: bool, now: datetime | None = None) -> None:
-        if confirmed_absent_from_ledger is not True:
-            raise PortfolioAdmissionError("release_requires_verified_ledger_absence")
-        # A caller may verify absence after a crash or failed venue-ledger
-        # commit, when the reservation has already reached
-        # AWAITING_RECONCILIATION. Both pre-commit and uncertain reservations
-        # may be released, but only on this explicit verified-absence path.
+    def release_from_ledger(
+        self, admission_id: str, *, ledger_database_path: str | Path,
+        ledger_entry_id: str, now: datetime | None = None,
+    ) -> None:
+        """Release only when a valid read-only venue ledger proves ID absence.
+
+        A missing/unreadable database, incomplete schema, malformed ID, or
+        any row at the requested ID keeps the reservation risk-consuming.
+        This is intentionally conservative for uncertain commit outcomes.
+        """
+        if not isinstance(admission_id, str) or not admission_id.strip() or len(admission_id) > 160:
+            raise PortfolioAdmissionError("admission_id_invalid")
+        db = self._connect()
+        try:
+            reservation = db.execute(
+                "SELECT venue,exposure_usd,status FROM portfolio_admissions WHERE admission_id=?",
+                (admission_id,),
+            ).fetchone()
+        except sqlite3.Error as exc:
+            raise PortfolioAdmissionError(
+                f"coordinator_storage_failure:{type(exc).__name__}"
+            ) from None
+        finally:
+            db.close()
+        if reservation is None:
+            raise PortfolioAdmissionError("reservation_not_found")
+        venue, exposure_text, status = reservation
+        if status not in {"PENDING", "AWAITING_RECONCILIATION"}:
+            raise PortfolioAdmissionError("reservation_state_conflict_or_missing")
+
+        try:
+            self._verify_ledger_entry(
+                venue=str(venue),
+                ledger_database_path=ledger_database_path,
+                ledger_entry_id=ledger_entry_id,
+                expected_exposure=_amount(exposure_text, "reserved_exposure"),
+                coordinator_path=self.path,
+            )
+        except PortfolioAdmissionError as exc:
+            if exc.args != ("ledger_entry_not_found",):
+                raise
+        else:
+            raise PortfolioAdmissionError("ledger_entry_present_cannot_release")
+
         db = self._connect()
         stamp = _aware(now or datetime.now(timezone.utc), "now").isoformat()
         try:
@@ -408,7 +445,9 @@ class PortfolioAdmissionCoordinator:
             raise
         except sqlite3.Error as exc:
             db.rollback()
-            raise PortfolioAdmissionError(f"coordinator_storage_failure:{type(exc).__name__}") from None
+            raise PortfolioAdmissionError(
+                f"coordinator_storage_failure:{type(exc).__name__}"
+            ) from None
         finally:
             db.close()
 

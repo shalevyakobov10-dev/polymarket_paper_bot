@@ -79,8 +79,13 @@ def read_local_order_journal_status(
         if len(rows) > maximum_intents:
             raise OrderJournalStatusError("order_journal_intent_limit_exceeded")
 
-        active: list[dict[str, Any]] = []
-        unresolved: list[dict[str, Any]] = []
+        active_status_counts = {"open": 0, "partially_filled": 0}
+        unresolved_status_counts = {
+            "submission_pending": 0,
+            "submission_unknown": 0,
+            "manual_review": 0,
+        }
+        unresolved_reason_counts: dict[str, int] = {}
         prepared = filled = cancelled = rejected = 0
         for row in rows:
             stored_client_id = _safe_identifier(row["client_order_id"], maximum=128)
@@ -102,26 +107,13 @@ def read_local_order_journal_status(
                 raise OrderJournalStatusError("order_journal_client_id_mismatch")
 
             status = policy["status"]
-            summary = {
-                "client_order_id": client_id,
-                "exchange_order_id": (
-                    _safe_identifier(state["exchange_order_id"])
-                    if state.get("exchange_order_id") is not None else None
-                ),
-                "status": status,
-                "side": state["side"],
-                "filled_size": str(state["filled_size"]),
-                "size": str(state["size"]),
-                "last_reason_code": state.get("last_reason_code"),
-                "reconciliation_required": policy["reconciliation_required"],
-                "automatic_retry_permitted": False,
-                "execution": "none",
-            }
-
-            if status in {"open", "partially_filled"}:
-                active.append(summary)
-            elif status in {"submission_pending", "submission_unknown", "manual_review"}:
-                unresolved.append(summary)
+            if status in active_status_counts:
+                active_status_counts[status] += 1
+            elif status in unresolved_status_counts:
+                unresolved_status_counts[status] += 1
+                reason = state.get("last_reason_code")
+                if isinstance(reason, str) and reason:
+                    unresolved_reason_counts[reason] = unresolved_reason_counts.get(reason, 0) + 1
             elif status == "prepared":
                 prepared += 1
             elif status == "filled":
@@ -132,24 +124,26 @@ def read_local_order_journal_status(
                 rejected += 1
 
         total = len(rows)
+        active_count = sum(active_status_counts.values())
+        unresolved_count = sum(unresolved_status_counts.values())
         return {
-            "status": "healthy" if not unresolved else "degraded",
+            "status": "healthy" if unresolved_count == 0 else "degraded",
             "available": True,
             "snapshot_complete": True,
             "source": "local_order_journal_only",
             "venue_open_orders_checked": False,
             "venue_status_verified": False,
-            "active_order_count": len(active),
-            "unresolved_order_count": len(unresolved),
+            "active_order_count": active_count,
+            "active_order_status_counts": active_status_counts,
+            "unresolved_order_count": unresolved_count,
+            "unresolved_order_status_counts": unresolved_status_counts,
+            "unresolved_reason_counts": unresolved_reason_counts,
             "prepared_intent_count": prepared,
             "filled_order_count": filled,
             "cancelled_order_count": cancelled,
             "rejected_order_count": rejected,
             "total_intent_count": total,
-            "active_orders": active[:_MAX_DISPLAY],
-            "unresolved_orders": unresolved[:_MAX_DISPLAY],
-            "active_orders_truncated": len(active) > _MAX_DISPLAY,
-            "unresolved_orders_truncated": len(unresolved) > _MAX_DISPLAY,
+            "order_identifiers_exposed": False,
             "order_submission_allowed": False,
             "order_cancellation_allowed": False,
             "automatic_retry_permitted": False,

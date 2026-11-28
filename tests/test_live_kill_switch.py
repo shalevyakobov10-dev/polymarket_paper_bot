@@ -112,6 +112,28 @@ class LiveKillSwitchTests(unittest.TestCase):
         self.assertTrue(report["engaged"])
         self.assertEqual(report["reason_code"], "kill_switch_symlink_rejected")
 
+    def test_group_or_other_writable_status_file_fails_closed(self):
+        self.write_status()
+        self.path.chmod(0o666)
+        report = self.read()
+        self.assertFalse(report["verified"])
+        self.assertTrue(report["engaged"])
+        self.assertEqual(
+            report["reason_code"], "kill_switch_file_permissions_unsafe"
+        )
+
+    def test_hard_link_status_file_fails_closed(self):
+        self.write_status()
+        alias = Path(self.temp.name) / "event-live-kill-switch-alias.json"
+        try:
+            alias.hardlink_to(self.path)
+        except (NotImplementedError, OSError):
+            self.skipTest("hard links are unavailable on this filesystem")
+        report = self.read()
+        self.assertFalse(report["verified"])
+        self.assertTrue(report["engaged"])
+        self.assertEqual(report["reason_code"], "kill_switch_hardlink_rejected")
+
     def test_non_regular_or_oversized_file_fails_closed(self):
         self.path.mkdir()
         report = self.read()

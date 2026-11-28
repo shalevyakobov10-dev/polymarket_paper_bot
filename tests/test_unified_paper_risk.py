@@ -63,7 +63,7 @@ class UnifiedPaperRiskSnapshotTests(unittest.TestCase):
                 entry_fee TEXT, funding_paid TEXT, last_mark TEXT, status TEXT,
                 closed_at TEXT, net_pnl TEXT
             );
-            INSERT INTO perps_paper_account VALUES (1,'80','105','2026-11-28','100',0);
+            INSERT INTO perps_paper_account VALUES (1,'90','105','2026-11-28','100',0);
             INSERT INTO perps_paper_positions VALUES (1,7,'BTC','LONG','0.1','100','10',
                 '0.01','0.02','110','OPEN',NULL,'0');
         """)

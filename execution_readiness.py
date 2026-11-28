@@ -38,6 +38,15 @@ def execution_readiness_payload() -> dict[str, Any]:
             ),
         },
         {
+            "code": "event_live_kill_switch_not_verified",
+            "detail": (
+                "The event BUY gateway now requires a fresh local DISARMED "
+                "kill-switch status at entry and immediately before submission. "
+                "A missing, unreadable, stale, malformed, or symlinked status "
+                "file is treated as engaged; no UI action can disarm it."
+            ),
+        },
+        {
             "code": "event_order_management_not_integrated",
             "detail": (
                 "A cancel-only adapter supports fresh open-order reads, "
@@ -123,7 +132,7 @@ def execution_readiness_payload() -> dict[str, Any]:
         },
     ]
     return {
-        "schema_version": 2,
+        "schema_version": 3,
         "mode": "paper_only",
         "status": "blocked",
         # True means bounded adapter source code exists, not that it is armed.
@@ -141,6 +150,8 @@ def execution_readiness_payload() -> dict[str, Any]:
                 "supported_side": "BUY",
                 "supported_order_type": "FAK",
                 "per_order_geoblock_check": True,
+                "local_kill_switch_check": True,
+                "kill_switch_required_twice": True,
                 "supports_sell": False,
                 "supports_resting_orders": False,
                 "supports_batch_orders": False,
@@ -158,6 +169,17 @@ def execution_readiness_payload() -> dict[str, Any]:
                 "runtime_enabled": False,
                 "order_submission_allowed": False,
             },
+        },
+        "event_live_kill_switch": {
+            "status_file_env": "EVENT_LIVE_KILL_SWITCH_PATH",
+            "default_path": "DATA_DIR/event_live_kill_switch.json",
+            "freshness_seconds": 60,
+            "missing_or_invalid_means_engaged": True,
+            "read_only_gateway_check": True,
+            "checked_on_gateway_entry": True,
+            "checked_immediately_before_submission": True,
+            "operator_ui_disarm_available": False,
+            "order_submission_allowed": False,
         },
         "event_order_management": {
             "adapter_code_present": True,

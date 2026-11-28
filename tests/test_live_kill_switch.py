@@ -6,7 +6,7 @@ import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from live_kill_switch import read_live_kill_switch
+from live_kill_switch import engage_live_kill_switch, read_live_kill_switch
 
 
 class LiveKillSwitchTests(unittest.TestCase):
@@ -133,6 +133,35 @@ class LiveKillSwitchTests(unittest.TestCase):
         self.assertFalse(report["verified"])
         self.assertTrue(report["engaged"])
         self.assertEqual(report["reason_code"], "kill_switch_hardlink_rejected")
+
+    def test_engage_command_atomically_engages_missing_switch(self):
+        report = engage_live_kill_switch(
+            self.path, reason_code="operator_request", now=self.now
+        )
+        self.assertTrue(report["verified"])
+        self.assertTrue(report["engaged"])
+        self.assertEqual(report["state"], "engaged")
+        self.assertEqual(report["reason_code"], "operator_request")
+        self.assertEqual(self.path.stat().st_mode & 0o777, 0o600)
+
+    def test_engage_command_overwrites_disarmed_state_with_engaged(self):
+        self.write_status(state="DISARMED")
+        report = engage_live_kill_switch(
+            self.path, reason_code="incident_detected", now=self.now
+        )
+        self.assertTrue(report["verified"])
+        self.assertTrue(report["engaged"])
+        self.assertEqual(report["state"], "engaged")
+        self.assertEqual(report["reason_code"], "incident_detected")
+
+    def test_engage_command_rejects_unsafe_reason_code(self):
+        for reason in ("", "operator request", "../switch", "a" * 65):
+            with self.subTest(reason=reason):
+                with self.assertRaisesRegex(ValueError, "reason_code"):
+                    engage_live_kill_switch(
+                        self.path, reason_code=reason, now=self.now
+                    )
+        self.assertFalse(self.path.exists())
 
     def test_non_regular_or_oversized_file_fails_closed(self):
         self.path.mkdir()

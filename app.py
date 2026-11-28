@@ -37,6 +37,7 @@ from perps_account_supervisor import (
 from perps_live_release_gate import evaluate_perps_live_release_gate
 from event_live_release_gate import evaluate_event_live_release_gate
 from live_kill_switch import check_live_kill_switch
+from unified_paper_risk import build_unified_paper_risk_snapshot
 from control_center import CONTROL_CENTER_HTML
 
 GAMMA_URL = "https://gamma-api.polymarket.com/markets"
@@ -1569,7 +1570,7 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         if self.path in ("/control-center", "/control-center/"):
             self._send_html(200, CONTROL_CENTER_HTML)
-        elif self.path in ("/", "/status", "/health", "/paper", "/news", "/matches", "/market-stream", "/resolutions", "/forecast-evaluation", "/research-features", "/independent-model-evaluation", "/model-forecasts", "/learning", "/execution-readiness", "/service-supervisor", "/event-paper", "/perps-market", "/perps-paper", "/perps-account-supervisor", "/perps-live-gate", "/event-live-gate"):
+        elif self.path in ("/", "/status", "/health", "/paper", "/news", "/matches", "/market-stream", "/resolutions", "/forecast-evaluation", "/research-features", "/independent-model-evaluation", "/model-forecasts", "/learning", "/execution-readiness", "/service-supervisor", "/event-paper", "/perps-market", "/perps-paper", "/perps-account-supervisor", "/perps-live-gate", "/event-live-gate", "/unified-paper-risk"):
             with _lock:
                 snapshot = dict(_state)
             if self.path == "/health":
@@ -1751,6 +1752,50 @@ class Handler(BaseHTTPRequestHandler):
                         "error": f"{type(exc).__name__}: {str(exc)[:300]}",
                         "research_only": True,
                         "forecast": None,
+                        "execution": "none",
+                    })
+            elif self.path == "/unified-paper-risk":
+                data_dir = Path(os.getenv("DATA_DIR", "data")).expanduser()
+                polymarket_database = Path(os.getenv(
+                    "PAPER_DATABASE_PATH",
+                    str(data_dir / "offline_news_paper.sqlite3"),
+                )).expanduser()
+                perps_database = Path(os.getenv(
+                    "PERPS_PAPER_DB",
+                    str(data_dir / "perps_paper.sqlite3"),
+                )).expanduser()
+                perps_history_database = Path(os.getenv(
+                    "PERPS_MARKET_HISTORY_DB",
+                    str(data_dir / "perps_market_history.sqlite3"),
+                )).expanduser()
+                try:
+                    snapshot = build_unified_paper_risk_snapshot(
+                        polymarket_db_path=polymarket_database,
+                        perps_db_path=perps_database,
+                        perps_history_db_path=perps_history_database,
+                    )
+                    payload = snapshot.as_dict()
+                    payload.update({
+                        "status": "healthy" if payload.get("snapshot_complete") is True
+                                  and payload.get("marks_fresh") is True else "degraded",
+                        "available": True,
+                        "source": "read_only_paper_ledgers",
+                        "shared_admission_gate_connected": False,
+                        "order_admission_allowed": False,
+                        "live_execution_enabled": False,
+                        "execution": "none",
+                    })
+                    self._send(200, payload)
+                except Exception as exc:
+                    self._send(503, {
+                        "status": "unavailable",
+                        "available": False,
+                        "reason_code": type(exc).__name__[:80],
+                        "snapshot_complete": False,
+                        "marks_fresh": False,
+                        "shared_admission_gate_connected": False,
+                        "order_admission_allowed": False,
+                        "live_execution_enabled": False,
                         "execution": "none",
                     })
             elif self.path == "/execution-readiness":

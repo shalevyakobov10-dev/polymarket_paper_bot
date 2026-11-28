@@ -7,14 +7,19 @@ returned admission_id into that row, commit, and then reconcile by admission ID.
 """
 from __future__ import annotations
 
+import errno
+import fcntl
 import hashlib
 import math
 import os
+import stat
+import time
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable, Iterator
 
 from portfolio_admission import (
     AdmissionResult,
@@ -129,6 +134,8 @@ class PaperAdmissionRuntime:
         max_total_exposure_usd: Decimal = Decimal("95"),
         max_total_positions: int = 8,
         max_combined_daily_loss_usd: Decimal = Decimal("35"),
+        admission_lock_path: str | Path | None = None,
+        admission_lock_timeout_seconds: float = 10.0,
     ) -> None:
         paths = [
             Path(polymarket_db_path).expanduser().resolve(),
@@ -152,6 +159,22 @@ class PaperAdmissionRuntime:
                 raise PaperAdmissionRuntimeError(f"{name}_invalid")
         if not isinstance(max_total_positions, int) or isinstance(max_total_positions, bool) or not 1 <= max_total_positions <= 1000:
             raise PaperAdmissionRuntimeError("max_total_positions_invalid")
+        if (
+            isinstance(admission_lock_timeout_seconds, bool)
+            or not isinstance(admission_lock_timeout_seconds, (int, float))
+            or not math.isfinite(float(admission_lock_timeout_seconds))
+            or not 0.1 <= float(admission_lock_timeout_seconds) <= 300
+        ):
+            raise PaperAdmissionRuntimeError("admission_lock_timeout_invalid")
+        lock_path = (
+            Path(admission_lock_path).expanduser().absolute()
+            if admission_lock_path is not None
+            else Path(str(paths[3]) + ".lock")
+        )
+        if lock_path.resolve() in set(paths):
+            raise PaperAdmissionRuntimeError("admission_lock_path_must_be_distinct")
+        self.admission_lock_path = lock_path
+        self.admission_lock_timeout_seconds = float(admission_lock_timeout_seconds)
         self.polymarket_db_path, self.perps_db_path, self.perps_history_db_path, self.coordinator_db_path = paths
         self.max_snapshot_age_seconds = float(max_snapshot_age_seconds)
         self.max_cross_venue_skew_seconds = float(max_cross_venue_skew_seconds)
@@ -185,11 +208,19 @@ class PaperAdmissionRuntime:
         coordinator_path = os.getenv(
             "PAPER_ADMISSION_DB", str(data_dir / "portfolio_admission.sqlite3")
         )
+        lock_path = os.getenv(
+            "PAPER_ADMISSION_LOCK_PATH",
+            str(data_dir / "portfolio_admission.lock"),
+        )
         return cls(
             polymarket_db_path=polymarket_db_path,
             perps_db_path=perps_path,
             perps_history_db_path=history_path,
             coordinator_db_path=coordinator_path,
+            admission_lock_path=lock_path,
+            admission_lock_timeout_seconds=_bounded_seconds_env(
+                "PAPER_ADMISSION_LOCK_TIMEOUT_SECONDS", 10.0, maximum=300
+            ),
             max_snapshot_age_seconds=_bounded_seconds_env(
                 "PAPER_COMBINED_RISK_MAX_SNAPSHOT_AGE_SECONDS", 120.0, maximum=3600
             ),
@@ -206,6 +237,62 @@ class PaperAdmissionRuntime:
                 "PAPER_COMBINED_DAILY_LOSS_LIMIT_USD", "35"
             ),
         )
+
+    @contextmanager
+    def _exclusive_admission_lock(self) -> Iterator[None]:
+        """Hold a trusted OS lock for the complete Paper admission transaction."""
+        path = self.admission_lock_path
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            if path.is_symlink() or path.parent.is_symlink():
+                raise PaperAdmissionRuntimeError("admission_lock_path_unsafe")
+            flags = os.O_CREAT | os.O_RDWR
+            if hasattr(os, "O_NOFOLLOW"):
+                flags |= os.O_NOFOLLOW
+            descriptor = os.open(path, flags, 0o600)
+        except PaperAdmissionRuntimeError:
+            raise
+        except OSError:
+            raise PaperAdmissionRuntimeError("admission_lock_open_failed") from None
+
+        locked = False
+        try:
+            metadata = os.fstat(descriptor)
+            if (
+                not stat.S_ISREG(metadata.st_mode)
+                or metadata.st_nlink != 1
+                or metadata.st_uid != os.geteuid()
+                or stat.S_IMODE(metadata.st_mode) & 0o077
+            ):
+                raise PaperAdmissionRuntimeError("admission_lock_file_permissions_unsafe")
+            parent_meta = os.stat(path.parent, follow_symlinks=False)
+            if (
+                not stat.S_ISDIR(parent_meta.st_mode)
+                or parent_meta.st_uid != os.geteuid()
+                or stat.S_IMODE(parent_meta.st_mode) & 0o022
+            ):
+                raise PaperAdmissionRuntimeError("admission_lock_parent_permissions_unsafe")
+
+            deadline = time.monotonic() + self.admission_lock_timeout_seconds
+            while True:
+                try:
+                    fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    locked = True
+                    break
+                except BlockingIOError:
+                    if time.monotonic() >= deadline:
+                        raise PaperAdmissionRuntimeError("admission_lock_timeout") from None
+                    time.sleep(min(0.05, max(0.0, deadline - time.monotonic())))
+                except OSError:
+                    raise PaperAdmissionRuntimeError("admission_lock_failed") from None
+            yield
+        finally:
+            if locked:
+                try:
+                    fcntl.flock(descriptor, fcntl.LOCK_UN)
+                except OSError:
+                    pass
+            os.close(descriptor)
 
     def reserve(
         self, *, venue: str, source_identity: str, strategy_version: str,

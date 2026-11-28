@@ -271,6 +271,15 @@ class OfflineNewsPaperBot:
                 result_json TEXT NOT NULL
             );
         """)
+        trade_columns = {
+            row[1] for row in self.db.execute("PRAGMA table_info(trades)").fetchall()
+        }
+        if "admission_id" not in trade_columns:
+            self.db.execute("ALTER TABLE trades ADD COLUMN admission_id TEXT")
+        self.db.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_trades_admission_id "
+            "ON trades(admission_id) WHERE admission_id IS NOT NULL"
+        )
         self.db.commit()
 
     def _ensure_account(self, now: datetime | None = None) -> None:

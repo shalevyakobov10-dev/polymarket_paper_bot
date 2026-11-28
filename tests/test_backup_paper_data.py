@@ -150,6 +150,20 @@ class PaperDataBackupTests(unittest.TestCase):
             self.assertEqual(event_item["integrity_check"], "ok")
             self.assertEqual(len(event_item["sha256"]), 64)
 
+    def test_symlink_database_source_is_rejected(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "real.sqlite3"
+            alias = root / "alias.sqlite3"
+            self._database(source, "paper")
+            try:
+                alias.symlink_to(source)
+            except (NotImplementedError, OSError):
+                self.skipTest("symlinks are unavailable on this filesystem")
+            with self.assertRaisesRegex(ValueError, "must not be a symlink"):
+                create_paper_data_backups([alias], root / "backups")
+            self.assertFalse((root / "backups").exists())
+
     def test_corrupt_database_is_not_published_as_backup(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

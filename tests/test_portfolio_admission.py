@@ -18,6 +18,7 @@ def _reserve_from_process(database_path, admission_id, venue, barrier, output):
         result = coordinator.reserve(
             admission_id=admission_id, venue=venue, exposure_usd="60", positions=1,
             snapshot_exposure_usd="0", snapshot_positions=0,
+            snapshot_daily_pnl_usd="0", max_combined_daily_loss_usd="1000",
             snapshot_at=datetime(2026, 11, 28, 12, tzinfo=timezone.utc),
             max_snapshot_age_seconds=120, max_total_exposure_usd="100",
             max_total_positions=3,
@@ -37,12 +38,14 @@ class PortfolioAdmissionTests(unittest.TestCase):
         self.now = datetime(2026, 11, 28, 12, tzinfo=timezone.utc)
 
     def reserve(self, admission_id, *, venue="POLYMARKET", exposure="40", snapshot="0",
-                positions=1, snapshot_positions=0, maximum="100", max_positions=3,
-                snapshot_at=None, now=None):
+                positions=1, snapshot_positions=0, daily_pnl="0", daily_limit="1000",
+                maximum="100", max_positions=3, snapshot_at=None, now=None):
         return self.coordinator.reserve(
             admission_id=admission_id, venue=venue, exposure_usd=exposure,
             positions=positions, snapshot_exposure_usd=snapshot,
             snapshot_positions=snapshot_positions,
+            snapshot_daily_pnl_usd=daily_pnl,
+            max_combined_daily_loss_usd=daily_limit,
             snapshot_at=snapshot_at or self.now,
             max_snapshot_age_seconds=120, max_total_exposure_usd=maximum,
             max_total_positions=max_positions, now=now or self.now,
@@ -197,6 +200,25 @@ class PortfolioAdmissionTests(unittest.TestCase):
         self.reserve("poly-1")
         with self.assertRaisesRegex(PortfolioAdmissionError, "payload_conflict"):
             self.reserve("poly-1", exposure="41")
+
+    def test_combined_daily_loss_limit_blocks_new_risk_across_both_venues(self):
+        result = self.reserve(
+            "poly-daily-loss", daily_pnl="-35", daily_limit="35"
+        )
+        self.assertFalse(result.approved)
+        self.assertEqual(result.reason, "combined_daily_loss_limit")
+        self.assertEqual(self.coordinator.list_unresolved(), [])
+
+    def test_combined_daily_loss_limit_allows_entry_above_floor_and_rejects_invalid_limit(self):
+        result = self.reserve(
+            "perps-daily-buffer", venue="PERPS",
+            exposure="10", daily_pnl="-34.99", daily_limit="35",
+        )
+        self.assertTrue(result.approved)
+        with self.assertRaisesRegex(
+            PortfolioAdmissionError, "combined_daily_loss_limit_must_be_positive"
+        ):
+            self.reserve("invalid-daily-limit", daily_limit="0")
 
     def test_cross_venue_pending_reservation_consumes_shared_capacity(self):
         self.assertTrue(self.reserve("poly-1", exposure="60").approved)

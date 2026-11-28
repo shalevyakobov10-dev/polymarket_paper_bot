@@ -22,6 +22,7 @@ from typing import Any, Callable
 from account_risk_policy import MAX_ACCOUNT_RISK_SNAPSHOT_AGE_SECONDS
 from live_order_preflight import REQUIRED_RELEASE_GATES, evaluate_live_order_preflight
 from order_journal import OrderJournal
+from event_order_management import EventOrderOperationLock
 from event_live_release_gate import evaluate_event_live_release_gate
 from polymarket_geo import check_polymarket_geoblock
 
@@ -270,6 +271,24 @@ class LiveExecutionGateway:
         return SecureClient.create(private_key=private_key, wallet=wallet)
 
     def submit_prepared_buy(
+        self,
+        client_order_id: str,
+        *,
+        risk_context: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Serialize one BUY attempt against concurrent event order cancellation."""
+        lock = EventOrderOperationLock(self.journal.database_path)
+        if not lock.acquire():
+            return self._blocked("event_order_operation_lock_busy_or_stale")
+        try:
+            return self._submit_prepared_buy_under_operation_lock(
+                client_order_id,
+                risk_context=risk_context,
+            )
+        finally:
+            lock.release()
+
+    def _submit_prepared_buy_under_operation_lock(
         self,
         client_order_id: str,
         *,

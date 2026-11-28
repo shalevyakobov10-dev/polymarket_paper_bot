@@ -139,8 +139,14 @@ class PortfolioAdmissionCoordinator:
                 if existing[0] != venue or Decimal(existing[1]) != requested or existing[2] != positions:
                     raise PortfolioAdmissionError("idempotency_key_payload_conflict")
                 db.commit()
-                return AdmissionResult(admission_id, existing[3] != "RELEASED",
-                    "idempotent_existing_reservation", existing[1], existing[2], existing[3])
+                # An idempotent replay proves that this admission key already
+                # exists; it must never authorize a second venue-ledger write.
+                # PENDING/AWAITING require reconciliation, RECONCILED means the
+                # original entry already exists, and RELEASED is terminal.
+                return AdmissionResult(
+                    admission_id, False, "idempotent_existing_reservation_no_new_entry",
+                    existing[1], existing[2], existing[3],
+                )
 
             # A RECONCILED reservation is still counted for snapshots captured
             # before reconciliation; those snapshots cannot yet include its fill.

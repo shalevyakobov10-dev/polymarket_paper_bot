@@ -201,6 +201,62 @@ class EventOrderOperationsTests(unittest.TestCase):
         self.assertEqual(self.session.cancel_all_calls, 1)
         self.assertEqual(self.journal.get_intent("client-venue-order-2")["status"], "cancelled")
 
+    def test_empty_venue_book_reconciles_local_open_intents_before_reporting_empty(self):
+        self.session.orders["venue-order-1"].status = "CANCELLED"
+        result = self.manager.cancel_all(confirmation=CANCEL_ALL_ACKNOWLEDGEMENT)
+        self.assertEqual(result["state"], "already_empty_reconciled")
+        self.assertEqual(result["reconciled_order_ids"], ["venue-order-1"])
+        self.assertEqual(self.session.cancel_all_calls, 0)
+        self.assertEqual(
+            self.journal.get_intent("client-venue-order-1")["status"],
+            "cancelled",
+        )
+
+    def test_empty_venue_book_with_still_live_local_order_requires_manual_review(self):
+        self.session.orders["venue-order-1"].status = "LIVE"
+        class HiddenOrderSession(FakeSession):
+            def list_open_orders(self):
+                return FakePaginator([FakePage([])])
+        session = HiddenOrderSession([self.session.orders["venue-order-1"]])
+        manager = EventOrderOperations(
+            session=session,
+            journal=self.journal,
+            enabled=True,
+            manually_armed=True,
+            dry_run=False,
+            geoblock_checker=self.geo,
+        )
+        result = manager.cancel_all(confirmation=CANCEL_ALL_ACKNOWLEDGEMENT)
+        self.assertEqual(result["state"], "manual_review")
+        self.assertEqual(result["reason_code"], "venue_book_empty_but_local_intents_unresolved")
+        self.assertEqual(result["unresolved_order_ids"], ["venue-order-1"])
+        self.assertEqual(session.cancel_all_calls, 0)
+
+    def test_empty_venue_book_with_submission_unknown_local_intent_is_not_clean(self):
+        client_order_id = "client-ambiguous"
+        intent = create_order_intent(
+            client_order_id=client_order_id,
+            token_id="token-2",
+            side="BUY",
+            limit_price="0.5",
+            size="4",
+        )
+        self.journal.create_intent(intent)
+        self.journal.begin_submission(client_order_id)
+        self.journal.record_submission_response(
+            client_order_id,
+            outcome="ambiguous",
+            reason_code="transport_timeout",
+        )
+        self.session.orders["venue-order-1"].status = "CANCELLED"
+        result = self.manager.cancel_all(confirmation=CANCEL_ALL_ACKNOWLEDGEMENT)
+        self.assertEqual(result["state"], "manual_review")
+        self.assertEqual(
+            result["unresolved_client_order_ids"],
+            ["client-ambiguous"],
+        )
+        self.assertEqual(self.session.cancel_all_calls, 0)
+
     def test_cancel_all_reports_unknown_orders_for_manual_review(self):
         self.session.orders["manual-order"] = fake_order("manual-order")
         result = self.manager.cancel_all(confirmation=CANCEL_ALL_ACKNOWLEDGEMENT)

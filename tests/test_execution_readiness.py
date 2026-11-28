@@ -24,6 +24,7 @@ class ExecutionReadinessTests(unittest.TestCase):
         event = execution_readiness_payload()["gateway_inventory"]["event_contracts"]
         self.assertTrue(event["adapter_code_present"])
         self.assertFalse(event["integrated_into_paper_worker"])
+        self.assertFalse(event["source_controlled_release_gates_passed"])
         self.assertEqual(event["supported_side"], "BUY")
         self.assertEqual(event["supported_order_type"], "FAK")
         self.assertTrue(event["per_order_geoblock_check"])
@@ -83,6 +84,7 @@ class ExecutionReadinessTests(unittest.TestCase):
         codes = {item["code"] for item in execution_readiness_payload()["blockers"]}
         expected = {
             "live_execution_disabled_by_default",
+            "event_source_release_gates_closed",
             "event_gateway_not_integrated",
             "perps_gateway_not_integrated",
             "perps_source_release_gates_closed",

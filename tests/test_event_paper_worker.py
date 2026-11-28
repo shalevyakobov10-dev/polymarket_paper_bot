@@ -210,7 +210,10 @@ class EventPaperWorkerTests(unittest.TestCase):
                 return {
                     "created_at": datetime.now(timezone.utc).isoformat(),
                     "manifest_name": "manifest.json",
-                    "files": [{"backup_name": "paper.sqlite3"}, {"backup_name": "history.sqlite3"}],
+                    "files": [
+                        {"source_name": paper.name, "backup_name": "paper.sqlite3"},
+                        {"source_name": history.name, "backup_name": "history.sqlite3"},
+                    ],
                     "skipped_missing_sources": [],
                 }
 
@@ -236,6 +239,110 @@ class EventPaperWorkerTests(unittest.TestCase):
             self.assertEqual(status["backup_manifest_name"], "manifest.json")
             self.assertEqual(status["backup_files_last_run"], 2)
             self.assertIsNone(status["backup_error_type"])
+
+    def test_scheduled_backup_includes_existing_event_order_journal(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            paper = root / "paper.sqlite3"
+            history = root / "history.sqlite3"
+            journal = root / "order_journal.sqlite3"
+            for path in (paper, history, journal):
+                connection = sqlite3.connect(path)
+                connection.execute("CREATE TABLE sample (value TEXT)")
+                connection.execute("INSERT INTO sample(value) VALUES('persist')")
+                connection.commit()
+                connection.close()
+            bot = FakeBot([{
+                "markets_loaded": 1, "opened": [], "closed": [], "close_blocked": [],
+                "portfolio": {"cash": 100, "equity": 100, "realized_pnl": 0,
+                              "open_positions": 0, "closed_positions": 0},
+            }])
+            bot.config = SimpleNamespace(
+                database_path=paper,
+                market_history_database_path=history,
+            )
+            calls = []
+
+            def backup_function(paths, directory, *, retain):
+                calls.append((list(paths), Path(directory), retain))
+                return {
+                    "created_at": datetime.now(timezone.utc).isoformat(),
+                    "manifest_name": "manifest.json",
+                    "files": [
+                        {"source_name": Path(path).name, "backup_name": f"{Path(path).stem}.backup.sqlite3"}
+                        for path in paths
+                    ],
+                    "skipped_missing_sources": [],
+                }
+
+            status_path = root / "worker.json"
+            stop = StopAfterWaits(1)
+            with patch.dict(os.environ, {"ORDER_JOURNAL_DB": str(journal)}):
+                result = run_worker(
+                    bot_factory=lambda: bot,
+                    stop_event=stop,
+                    status_path=status_path,
+                    poll_seconds=30,
+                    backup_function=backup_function,
+                    backup_interval_hours=6,
+                    backup_directory=root / "backups",
+                    backup_retain=7,
+                )
+            self.assertEqual(result, 0)
+            self.assertEqual(calls[0][0], [paper, history, journal])
+            status = read_event_paper_worker_status(status_path)
+            self.assertTrue(status["event_order_journal_present"])
+            self.assertTrue(status["event_order_journal_path_valid"])
+            self.assertTrue(status["event_order_journal_backed_up"])
+            self.assertEqual(status["backup_files_last_run"], 3)
+
+    def test_existing_symlinked_event_order_journal_degrades_and_is_not_backed_up(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            paper = root / "paper.sqlite3"
+            history = root / "history.sqlite3"
+            real_journal = root / "real.sqlite3"
+            journal_link = root / "order_journal.sqlite3"
+            for path in (paper, history, real_journal):
+                connection = sqlite3.connect(path)
+                connection.execute("CREATE TABLE sample (value TEXT)")
+                connection.commit()
+                connection.close()
+            journal_link.symlink_to(real_journal)
+            bot = FakeBot([{
+                "markets_loaded": 1, "opened": [], "closed": [], "close_blocked": [],
+            }])
+            bot.config = SimpleNamespace(
+                database_path=paper,
+                market_history_database_path=history,
+            )
+
+            def backup_function(paths, directory, *, retain):
+                return {
+                    "created_at": datetime.now(timezone.utc).isoformat(),
+                    "manifest_name": "manifest.json",
+                    "files": [
+                        {"source_name": Path(path).name, "backup_name": f"{Path(path).stem}.sqlite3"}
+                        for path in paths
+                    ],
+                    "skipped_missing_sources": [],
+                }
+
+            status_path = root / "worker.json"
+            with patch.dict(os.environ, {"ORDER_JOURNAL_DB": str(journal_link)}):
+                result = run_worker(
+                    bot_factory=lambda: bot,
+                    stop_event=StopAfterWaits(1),
+                    status_path=status_path,
+                    poll_seconds=30,
+                    backup_function=backup_function,
+                )
+            self.assertEqual(result, 0)
+            status = read_event_paper_worker_status(status_path)
+            self.assertTrue(status["event_order_journal_present"])
+            self.assertFalse(status["event_order_journal_path_valid"])
+            self.assertFalse(status["event_order_journal_backed_up"])
+            self.assertEqual(status["worker_state"], "stopped")
 
     def test_backup_failure_marks_worker_degraded_without_faking_backup_success(self):
         with tempfile.TemporaryDirectory() as directory:

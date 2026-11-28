@@ -27,7 +27,7 @@ class UnifiedPaperRiskSnapshot:
     polymarket_equity: str
     perps_equity: str
     combined_equity: str
-    combined_starting_capital: str
+    combined_starting_capital: str | None
     combined_peak_equity: str
     combined_drawdown_pct: str
     polymarket_daily_pnl: str
@@ -121,7 +121,7 @@ def _polymarket_snapshot(
             "trade_id", "token_id", "opened_at", "shares", "notional", "entry_fee",
             "last_mark_price", "status", "closed_at", "pnl"
         })
-        _require_columns(db, "observations", {"token_id", "observed_at"})
+        _require_columns(db, "observations", {"observation_id", "token_id", "observed_at"})
         account = db.execute(
             "SELECT cash,starting_cash,equity_peak,day_key,day_start_equity "
             "FROM account_state WHERE singleton_id=1"
@@ -169,7 +169,7 @@ def _polymarket_snapshot(
         realized_row = db.execute(
             "SELECT COALESCE(SUM(pnl),0) AS pnl FROM trades "
             "WHERE status='CLOSED' AND closed_at>=? AND closed_at<?",
-            (f"{day}T00:00:00+00:00", f"{(now.date()).isoformat()}T23:59:59.999999+00:00"),
+            (f"{day}T00:00:00+00:00", now.isoformat()),
         ).fetchone()
         realized = _decimal(realized_row["pnl"], "Polymarket realized PnL", allow_negative=True)
         return {
@@ -260,12 +260,11 @@ def _perps_snapshot(
         realized_row = db.execute(
             "SELECT COALESCE(SUM(net_pnl),0) AS pnl FROM perps_paper_positions "
             "WHERE status IN ('CLOSED','LIQUIDATED') AND closed_at>=? AND closed_at<?",
-            (f"{day}T00:00:00+00:00", f"{day}T23:59:59.999999+00:00"),
+            (f"{day}T00:00:00+00:00", now.isoformat()),
         ).fetchone()
         realized = _decimal(realized_row["pnl"], "Perps realized PnL", allow_negative=True)
         return {
             "equity": equity,
-            "starting": _decimal(account["peak_equity"], "Perps peak equity") if False else None,
             "peak": _decimal(account["peak_equity"], "Perps peak equity"),
             "baseline": _decimal(account["day_start_equity"], "Perps day baseline"),
             "daily_pnl": equity - _decimal(account["day_start_equity"], "Perps day baseline"),
@@ -322,8 +321,6 @@ def build_unified_paper_risk_snapshot(
 
     poly = _polymarket_snapshot(paths[0], captured, float(max_mark_age_seconds))
     perps = _perps_snapshot(paths[1], paths[2], captured, float(max_mark_age_seconds))
-    if perps["halted"]:
-        raise UnifiedPaperRiskError("Perps Paper account is halted")
     marks = poly["marks"] + perps["marks"]
     if marks:
         ages = [(captured - mark).total_seconds() for mark in marks]
@@ -338,9 +335,9 @@ def build_unified_paper_risk_snapshot(
         freshest = stalest = 0.0
 
     equity = poly["equity"] + perps["equity"]
-    starting = poly["starting"] + perps["equity"] * Decimal("0") + _decimal(
-        _perps_starting_capital(paths[1]), "Perps starting capital"
-    )
+    # The current Perps schema does not persist immutable initial equity; do not
+    # substitute peak equity or the current baseline and mislabel it as starting capital.
+    starting = None
     peak = poly["peak"] + perps["peak"]
     drawdown = max(Decimal("0"), (peak - equity) / peak * Decimal("100")) if peak > 0 else Decimal("100")
     combined_daily = poly["daily_pnl"] + perps["daily_pnl"]
@@ -350,7 +347,7 @@ def build_unified_paper_risk_snapshot(
         polymarket_equity=_text(poly["equity"]),
         perps_equity=_text(perps["equity"]),
         combined_equity=_text(equity),
-        combined_starting_capital=_text(starting),
+        combined_starting_capital=_text(starting) if starting is not None else None,
         combined_peak_equity=_text(peak),
         combined_drawdown_pct=_text(drawdown),
         polymarket_daily_pnl=_text(poly["daily_pnl"]),
@@ -372,22 +369,3 @@ def build_unified_paper_risk_snapshot(
         snapshot_complete=True,
     )
 
-
-def _perps_starting_capital(path: str | Path) -> str:
-    db = _readonly(path)
-    try:
-        _require_columns(db, "perps_paper_account", {"cash", "peak_equity", "day_start_equity"})
-        row = db.execute(
-            "SELECT cash,peak_equity,day_start_equity FROM perps_paper_account WHERE account_id=1"
-        ).fetchone()
-        if row is None:
-            raise UnifiedPaperRiskError("Perps Paper account row is missing")
-        # Initial equity is immutable in this ledger: day-start equity is only a
-        # UTC baseline, so derive starting capital from the account's creation
-        # value only when the schema provides it. The current schema does not.
-        # The conservative fallback is the configured account peak on first day.
-        return str(row["peak_equity"])
-    except sqlite3.Error as exc:
-        raise UnifiedPaperRiskError(f"Perps Paper account read failed: {exc}") from None
-    finally:
-        db.close()

@@ -379,7 +379,51 @@ class EventOrderOperations:
                     return self._blocked("order_absence_not_matched_to_terminal_status")
                 # A cancellation request is made at most once. Any exception or
                 # uncertain response is reconciled by reads, never by retry.
-                cancel_response = self.session.cancel_order(order_id=order_id)
+                try:
+                    cancel_response = self.session.cancel_order(order_id=order_id)
+                except Exception:
+                    # The request may have reached the venue. Reconcile by reads
+                    # only; never repeat the cancel request after transport loss.
+                    try:
+                        remote_after_error = self.session.get_order(order_id=order_id)
+                        fill_after_error = self._verify_identity(
+                            remote_after_error, order_id=order_id, intent=intent
+                        )
+                        orders_after_error, _ = self._open_orders()
+                        still_open_after_error = order_id in {
+                            str(_field(item, "id")) for item in orders_after_error
+                        }
+                        if not still_open_after_error:
+                            outcome_after_error = self._record_final_observation(
+                                client_order_id=client_order_id,
+                                order_id=order_id,
+                                intent=intent,
+                                order=remote_after_error,
+                                cumulative_filled=fill_after_error,
+                            )
+                            if outcome_after_error is not None:
+                                return {
+                                    "mode": "EVENT_ORDER_MANAGEMENT",
+                                    "state": "cancelled" if outcome_after_error == "cancelled" else "filled",
+                                    "reason_code": "cancel_response_lost_but_terminal_state_verified",
+                                    "client_order_id": client_order_id,
+                                    "exchange_order_id": order_id,
+                                    "cancel_acknowledged": False,
+                                    "filled_size": str(fill_after_error),
+                                    "automatic_retry_permitted": False,
+                                    "execution": "none",
+                                }
+                    except Exception:
+                        pass
+                    return {
+                        "mode": "EVENT_ORDER_MANAGEMENT",
+                        "state": "manual_review",
+                        "reason_code": "cancel_response_lost_outcome_not_proven",
+                        "client_order_id": client_order_id,
+                        "exchange_order_id": order_id,
+                        "automatic_retry_permitted": False,
+                        "execution": "none",
+                    }
                 cancelled_ids = tuple(_field(cancel_response, "canceled", ()) or ())
                 not_cancelled = _field(cancel_response, "not_canceled", {}) or {}
                 remote_after = self.session.get_order(order_id=order_id)

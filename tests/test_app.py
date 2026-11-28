@@ -463,6 +463,41 @@ class ParserTests(unittest.TestCase):
 
 
 
+    def test_execution_readiness_reports_live_kill_switch_status_read_only(self):
+        server = app.ThreadingHTTPServer(("127.0.0.1", 0), app.Handler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        with tempfile.TemporaryDirectory() as directory, patch.dict(os.environ, {
+            "EVENT_LIVE_KILL_SWITCH_PATH": str(Path(directory) / "event-live-kill-switch.json"),
+            "DATA_DIR": directory,
+        }):
+            switch_path = Path(os.environ["EVENT_LIVE_KILL_SWITCH_PATH"])
+            try:
+                thread.start()
+                address = f"http://127.0.0.1:{server.server_port}/execution-readiness"
+                with http_urlopen(address, timeout=3) as response:
+                    missing = json.loads(response.read().decode("utf-8"))
+                self.assertFalse(missing["event_live_kill_switch"]["verified"])
+                self.assertTrue(missing["event_live_kill_switch"]["engaged"])
+                self.assertFalse(missing["event_live_kill_switch"]["order_submission_allowed"])
+
+                switch_path.write_text(json.dumps({
+                    "schema_version": 1,
+                    "state": "DISARMED",
+                    "updated_at_utc": datetime.now(timezone.utc).isoformat(),
+                    "reason_code": "operator_review",
+                }), encoding="utf-8")
+                with http_urlopen(address, timeout=3) as response:
+                    disarmed = json.loads(response.read().decode("utf-8"))
+                self.assertTrue(disarmed["event_live_kill_switch"]["verified"])
+                self.assertFalse(disarmed["event_live_kill_switch"]["engaged"])
+                self.assertEqual(disarmed["event_live_kill_switch"]["state"], "disarmed")
+                self.assertFalse(disarmed["event_live_kill_switch"]["order_submission_allowed"])
+                self.assertTrue(switch_path.exists(), "readiness endpoint must never delete or rewrite switch")
+            finally:
+                server.shutdown()
+                server.server_close()
+                thread.join(timeout=2)
+
     def test_event_paper_endpoint_reports_disabled_state_without_enabling_execution(self):
         server = app.ThreadingHTTPServer(("127.0.0.1", 0), app.Handler)
         thread = threading.Thread(target=server.serve_forever, daemon=True)

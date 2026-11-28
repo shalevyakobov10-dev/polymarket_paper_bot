@@ -92,3 +92,33 @@ The adapter now exposes each engine's own peak equity separately and leaves comb
 Reservations are never automatically expired. A crash or uncertain outcome therefore consumes capacity until an operator/reconciler resolves it, rather than silently freeing risk. The initial regression suite covers cross-venue contention, concurrent reservations, idempotency, durable reopen, stale/future snapshots, reconciliation ordering, and guarded release. Replaying an existing admission key is now explicitly denied as a new entry, including when the original reservation is already reconciled; idempotency must never authorize a duplicate venue-ledger write.
 
 **Integration status: foundation only.** Neither Paper engine calls this coordinator yet. It does not atomically commit a venue entry, read the two source ledgers itself, establish a shared peak-equity history, or authorize trading. The caller-side sequence and crash-recovery reconciler still need implementation and tests before it can be used as an admission gate. It must remain disabled for order authorization until that work is complete.
+
+
+### Entry-path integration review (2026-11-28)
+
+A source-level review of the current entry paths found an important transaction-boundary constraint that must be handled before wiring the coordinator:
+
+- Event/Polymarket: `OfflineNewsPaperBot.run_cycle()` owns an outer `with self.db:` transaction and calls `_open_trade()` from inside it. The durable `trades` INSERT and account cash update currently occur inside that transaction.
+- Perps: `PerpsPaperEngine.process_snapshot()` owns an outer `with self._lock, self.db:` transaction and calls `_try_open()` from inside it. The position INSERT, account cash update, and `PAPER_POSITION_OPENED` event are part of that transaction.
+- Therefore, simply adding `reserve()` inside either private entry helper is insufficient. It would create a coordinator reservation while the venue transaction is still open, but the caller would need a carefully defined commit/reconcile boundary and deterministic rollback/absence verification. The current event helper returns a trade object before the outer transaction commits; the Perps helper returns no durable entry identity until its outer transaction commits.
+
+#### Required integration shape
+
+1. Refactor each engine to produce a fully validated entry candidate without writing it.
+2. Move the admission boundary to a coordinator/orchestrator layer that can obtain a fresh, complete read-only snapshot of both Paper ledgers before opening the venue write transaction.
+3. Derive a stable idempotency key from venue + source snapshot/event identity + strategy version. A repeated key must be a hard no-new-entry result.
+4. Reserve the candidate notional and one position through `PortfolioAdmissionCoordinator.reserve()`. The coordinator database must be on a durable shared filesystem visible to both workers; separate container-local SQLite files do not provide cross-process or cross-venue serialization.
+5. Begin the venue's short write transaction, revalidate local cash, duplicate-position constraints, and any venue-specific limits, then insert the position/trade and its audit event. Commit before transitioning the reservation to `AWAITING_RECONCILIATION`.
+6. Re-read the venue ledger through a fresh connection and verify the exact immutable entry identity, venue, notional, and open status. Only then call `reconcile()` with that ledger entry ID.
+7. If the venue transaction definitively rolled back, verify the entry is absent with a fresh ledger read and only then call `release(..., confirmed_absent_from_ledger=True)`. If the outcome is uncertain, leave the reservation consuming capacity and surface an operator-visible reconciliation alert.
+8. Startup recovery scans all non-terminal reservations, checks both Paper ledgers, reconciles exact matches, releases only verified absences, and leaves ambiguous/mismatched records blocked for manual review.
+
+#### Additional blockers surfaced by the review
+
+- A read-only combined snapshot taken before reservation is not itself a lock. All new entry paths must use the same coordinator and shared database; any legacy/uncoordinated writer must be disabled or treated as a deployment blocker.
+- The current coordinator checks total exposure and position count, but it does not yet enforce a shared daily-loss budget, a true combined peak/drawdown, or immutable combined starting capital. Those metrics need their own durable shared portfolio ledger before they can be claimed as enforced controls.
+- The coordinator's SQLite guarantees apply only when both workers access the same database file on a filesystem with supported SQLite locking semantics. Deployment storage and restart behavior must be tested; do not place the coordinator DB on an unsupported network filesystem.
+- The existing Polymarket outer transaction and Perps transaction must not be held open while waiting on network data, news, or the other venue. Candidate construction and market-data validation happen first; the durable write phase must remain short.
+- A Paper admission coordinator must reject any attempt to point either worker at Live account state. No Live code path is part of this integration.
+
+**Status:** review and implementation sequence documented; engine code is not yet wired to the coordinator. These are explicit release blockers, not completed features.

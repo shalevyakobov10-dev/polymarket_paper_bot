@@ -28,8 +28,10 @@ class UnifiedPaperRiskSnapshot:
     perps_equity: str
     combined_equity: str
     combined_starting_capital: str | None
-    combined_peak_equity: str
-    combined_drawdown_pct: str
+    polymarket_peak_equity: str
+    perps_peak_equity: str
+    combined_peak_equity: str | None
+    combined_drawdown_pct: str | None
     polymarket_daily_pnl: str
     perps_daily_pnl: str
     combined_daily_pnl: str
@@ -339,8 +341,10 @@ def build_unified_paper_risk_snapshot(
     # The current Perps schema does not persist immutable initial equity; do not
     # substitute peak equity or the current baseline and mislabel it as starting capital.
     starting = None
-    peak = poly["peak"] + perps["peak"]
-    drawdown = max(Decimal("0"), (peak - equity) / peak * Decimal("100")) if peak > 0 else Decimal("100")
+    # The two engines retain independent peak histories. Adding their peaks
+    # would invent a combined high-water mark that may never have existed at
+    # the same time, so combined drawdown remains unavailable until a shared
+    # portfolio-level peak ledger is introduced.
     combined_daily = poly["daily_pnl"] + perps["daily_pnl"]
     return UnifiedPaperRiskSnapshot(
         captured_at_utc=captured.isoformat(),
@@ -349,8 +353,10 @@ def build_unified_paper_risk_snapshot(
         perps_equity=_text(perps["equity"]),
         combined_equity=_text(equity),
         combined_starting_capital=_text(starting) if starting is not None else None,
-        combined_peak_equity=_text(peak),
-        combined_drawdown_pct=_text(drawdown),
+        polymarket_peak_equity=_text(poly["peak"]),
+        perps_peak_equity=_text(perps["peak"]),
+        combined_peak_equity=None,
+        combined_drawdown_pct=None,
         polymarket_daily_pnl=_text(poly["daily_pnl"]),
         perps_daily_pnl=_text(perps["daily_pnl"]),
         combined_daily_pnl=_text(combined_daily),

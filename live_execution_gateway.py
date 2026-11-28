@@ -131,6 +131,40 @@ def _rejected_venue_receipt(response: Any) -> dict[str, Any]:
     return {"kind": "rejected", "code": code}
 
 
+def _geoblock_error(result: Any, *, now: datetime | None = None) -> str | None:
+    """Validate a current official geoblock response without retaining the IP."""
+    if not isinstance(result, dict) or result.get("verified") is not True:
+        return "polymarket_geoblock_rejected_or_unverified"
+    if result.get("blocked") is not False:
+        return "polymarket_geoblock_rejected_or_unverified"
+    country = result.get("country")
+    region = result.get("region")
+    if (
+        not isinstance(country, str) or len(country) != 2
+        or not country.isalpha() or country != country.upper()
+        or not isinstance(region, str) or not region.strip() or len(region) > 16
+    ):
+        return "polymarket_geoblock_location_invalid"
+    raw_timestamp = result.get("checked_at_utc")
+    try:
+        checked_at = raw_timestamp if isinstance(raw_timestamp, datetime) else datetime.fromisoformat(
+            str(raw_timestamp).replace("Z", "+00:00")
+        )
+    except (TypeError, ValueError, OverflowError):
+        return "polymarket_geoblock_timestamp_invalid"
+    if checked_at.tzinfo is None or checked_at.utcoffset() is None:
+        return "polymarket_geoblock_timestamp_invalid"
+    current = now or datetime.now(timezone.utc)
+    if current.tzinfo is None or current.utcoffset() is None:
+        return "polymarket_geoblock_clock_invalid"
+    age = (
+        current.astimezone(timezone.utc) - checked_at.astimezone(timezone.utc)
+    ).total_seconds()
+    if age < -2 or age > 30:
+        return "polymarket_geoblock_stale_or_future_dated"
+    return None
+
+
 def _safe_reason(exc: Exception) -> str:
     # Exception text can contain request details. Persist only a stable type code.
     name = type(exc).__name__.lower()
@@ -310,10 +344,9 @@ class LiveExecutionGateway:
             geo = self.geoblock_checker()
         except Exception:
             return self._blocked("polymarket_geoblock_check_failed")
-        if not isinstance(geo, dict) or geo.get("verified") is not True or geo.get("blocked") is not False:
-            return self._blocked("polymarket_geoblock_rejected_or_unverified")
-        if geo.get("country") != str(geo.get("country") or "").upper():
-            return self._blocked("polymarket_geoblock_country_invalid")
+        geoblock_error = _geoblock_error(geo)
+        if geoblock_error is not None:
+            return self._blocked(geoblock_error)
 
         token_id = str(intent.get("token_id") or "").strip()
         if not token_id:
@@ -445,6 +478,16 @@ class LiveExecutionGateway:
                 max_price=str(limit_price),
                 order_type=LIVE_ORDER_TYPE,
             )
+            # Recheck geographic eligibility after account/book/network reads,
+            # immediately before the durable submission transition.
+            try:
+                final_geo = self.geoblock_checker()
+            except Exception:
+                return self._blocked("polymarket_geoblock_check_failed")
+            geoblock_error = _geoblock_error(final_geo)
+            if geoblock_error is not None:
+                return self._blocked(geoblock_error)
+            geo = final_geo
             # Durable local state must be committed before the first network post.
             self.journal.begin_submission(client_order_id)
             submission_started = True

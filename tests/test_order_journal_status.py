@@ -111,6 +111,36 @@ class LocalOrderJournalStatusTests(unittest.TestCase):
         with self.assertRaisesRegex(OrderJournalStatusError, "intent_invalid"):
             read_local_order_journal_status(self.database)
 
+    def test_duplicate_json_keys_fail_closed(self):
+        connection = sqlite3.connect(self.database)
+        try:
+            connection.execute(
+                "INSERT INTO order_intents(client_order_id,state_json) VALUES(?,?)",
+                (
+                    "duplicate",
+                    '{"schema_version":1,"mode":"LOCAL_ORDER_LIFECYCLE_ONLY",'
+                    '"client_order_id":"duplicate","client_order_id":"other"}',
+                ),
+            )
+            connection.commit()
+        finally:
+            connection.close()
+        with self.assertRaisesRegex(OrderJournalStatusError, "intent_invalid"):
+            read_local_order_journal_status(self.database)
+
+    def test_oversized_intent_json_fails_closed(self):
+        connection = sqlite3.connect(self.database)
+        try:
+            connection.execute(
+                "INSERT INTO order_intents(client_order_id,state_json) VALUES(?,?)",
+                ("oversized", "x" * 64001),
+            )
+            connection.commit()
+        finally:
+            connection.close()
+        with self.assertRaisesRegex(OrderJournalStatusError, "intent_invalid"):
+            read_local_order_journal_status(self.database)
+
     def test_intent_limit_is_bounded_and_rejects_invalid_values(self):
         for limit in (0, -1, True, 2001, 1.5):
             with self.subTest(limit=limit):

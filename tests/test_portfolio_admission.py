@@ -56,6 +56,17 @@ class PortfolioAdmissionTests(unittest.TestCase):
         self.assertEqual(again.status, "PENDING")
         self.assertEqual(first.status, "PENDING")
 
+    def test_reconciled_replay_cannot_authorize_duplicate_venue_entry(self):
+        self.reserve("poly-replayed", exposure="40")
+        self.coordinator.mark_committed("poly-replayed", now=self.now)
+        self.coordinator.reconcile(
+            "poly-replayed", ledger_entry_id="trade-verified", now=self.now,
+        )
+        replay = self.reserve("poly-replayed", exposure="40")
+        self.assertFalse(replay.approved)
+        self.assertEqual(replay.status, "RECONCILED")
+        self.assertEqual(replay.reason, "idempotent_existing_reservation_no_new_entry")
+
     def test_idempotency_key_cannot_change_payload(self):
         self.reserve("poly-1")
         with self.assertRaisesRegex(PortfolioAdmissionError, "payload_conflict"):

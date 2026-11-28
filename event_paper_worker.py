@@ -451,6 +451,7 @@ def read_event_paper_worker_status(
             "backup_files_last_run": max(0, int(raw.get("backup_files_last_run", 0))),
             "backup_error_type": str(raw.get("backup_error_type") or "")[:80] or None,
             "event_order_journal_present": raw.get("event_order_journal_present") is True,
+            "event_order_journal_path_valid": raw.get("event_order_journal_path_valid") is True,
             "event_order_journal_backed_up": raw.get("event_order_journal_backed_up") is True,
             "backup_consecutive_failures": max(0, int(raw.get("backup_consecutive_failures", 0))),
             "backup_retry_delay_seconds": max(0.0, float(raw.get("backup_retry_delay_seconds", 0.0))),
@@ -526,6 +527,10 @@ def run_worker(
         "ORDER_JOURNAL_DB", str(data_dir / "order_journal.sqlite3")
     )).expanduser()
     event_order_journal_present = (
+        event_order_journal_database.exists()
+        or event_order_journal_database.is_symlink()
+    )
+    event_order_journal_path_valid = (
         event_order_journal_database.is_file()
         and not event_order_journal_database.is_symlink()
     )
@@ -599,6 +604,7 @@ def run_worker(
         "backup_files_last_run": max(0, int(previous.get("backup_files_last_run", 0) or 0)),
         "backup_error_type": previous.get("backup_error_type"),
         "event_order_journal_present": event_order_journal_present,
+        "event_order_journal_path_valid": event_order_journal_path_valid,
         "event_order_journal_backed_up": (
             event_order_journal_present
             and previous.get("event_order_journal_backed_up") is True
@@ -687,10 +693,15 @@ def run_worker(
                 )
                 current_backup_check = datetime.now(timezone.utc)
                 event_order_journal_present = (
+                    event_order_journal_database.exists()
+                    or event_order_journal_database.is_symlink()
+                )
+                event_order_journal_path_valid = (
                     event_order_journal_database.is_file()
                     and not event_order_journal_database.is_symlink()
                 )
                 status["event_order_journal_present"] = event_order_journal_present
+                status["event_order_journal_path_valid"] = event_order_journal_path_valid
                 if not event_order_journal_present:
                     status["event_order_journal_backed_up"] = False
                 elif previous.get("event_order_journal_backed_up") is not True:
@@ -774,7 +785,10 @@ def run_worker(
                         })
                 if (
                     status.get("event_order_journal_present") is True
-                    and status.get("event_order_journal_backed_up") is not True
+                    and (
+                        status.get("event_order_journal_path_valid") is not True
+                        or status.get("event_order_journal_backed_up") is not True
+                    )
                 ):
                     status["worker_state"] = "degraded"
                 _write_status(target, {**status, "updated_at": _utc_now()})

@@ -40,7 +40,22 @@ DEFAULT_FEEDS = (
     {"source": "NPR - Top Stories", "url": "https://feeds.npr.org/1001/rss.xml"},
     {"source": "Deutsche Welle - Top Stories", "url": "https://rss.dw.com/rdf/rss-en-top"},
     {"source": "Sky News - World", "url": "https://feeds.skynews.com/feeds/rss/world.xml"},
-    {"source": "France 24 - English", "url": "https://www.france24.com/en/rss"},
+    {"source": "France 24 - English", "url": "https://www.france24.com/en/rss", "language": "en", "region": "global"},
+    # Multilingual regional wires. Original titles are preserved; they are not
+    # fed to the English-only directional event classifier without translation.
+    {"source": "BBC Arabic", "url": "https://feeds.bbci.co.uk/arabic/rss.xml", "language": "ar", "region": "middle_east_north_africa"},
+    {"source": "BBC Mundo", "url": "https://feeds.bbci.co.uk/mundo/rss.xml", "language": "es", "region": "latin_america"},
+    {"source": "BBC Hindi", "url": "https://feeds.bbci.co.uk/hindi/rss.xml", "language": "hi", "region": "south_asia"},
+    {"source": "NHK News Web", "url": "https://www.nhk.or.jp/rss/news/cat0.xml", "language": "ja", "region": "east_asia"},
+    {"source": "BBC Chinese", "url": "https://feeds.bbci.co.uk/zhongwen/simp/rss.xml", "language": "zh", "region": "east_asia"},
+    {"source": "BBC Russian", "url": "https://feeds.bbci.co.uk/russian/rss.xml", "language": "ru", "region": "eurasia"},
+    {"source": "BBC Turkish", "url": "https://feeds.bbci.co.uk/turkce/rss.xml", "language": "tr", "region": "middle_east_north_africa"},
+    {"source": "BBC Ukrainian", "url": "https://feeds.bbci.co.uk/ukrainian/rss.xml", "language": "uk", "region": "europe_eurasia"},
+    {"source": "BBC Portuguese", "url": "https://feeds.bbci.co.uk/portuguese/rss.xml", "language": "pt", "region": "latin_america"},
+    {"source": "France 24 - French", "url": "https://www.france24.com/fr/rss", "language": "fr", "region": "europe_africa"},
+    {"source": "Deutsche Welle - German", "url": "https://rss.dw.com/rdf/rss-de-top", "language": "de", "region": "europe"},
+    {"source": "CNA - Asia", "url": "https://www.channelnewsasia.com/api/v1/rss-outbound-feed?_format=xml&category=6511", "language": "en", "region": "south_east_asia"},
+    {"source": "CNA - World", "url": "https://www.channelnewsasia.com/api/v1/rss-outbound-feed?_format=xml&category=6311", "language": "en", "region": "global"},
 )
 
 MAX_FEED_BYTES = 1_000_000
@@ -248,6 +263,8 @@ def parse_feed(
     source: str,
     feed_url: str,
     fetched_at: str | None = None,
+    *,
+    feed_metadata: dict[str, Any] | None = None,
 ) -> list[dict[str, str]]:
     """Parse RSS 2.0 or Atom XML into bounded, attributed headline records."""
     if len(xml_data) > MAX_FEED_BYTES:
@@ -282,6 +299,7 @@ def parse_feed(
         records.append({
             "id": item_id,
             "source": source[:100],
+            "source_type": "rss_atom",
             "publisher_id": publisher_identity(source, feed_url, link),
             "feed_url": feed_url[:1000],
             "title": title,
@@ -289,6 +307,11 @@ def parse_feed(
             "url": link,
             "published_at": published[:100],
             "fetched_at": observed_at,
+            "source_language": str((feed_metadata or {}).get("language") or "en")[:12].lower(),
+            "coverage_region": str((feed_metadata or {}).get("region") or "global")[:48].lower(),
+            "directional_analysis_supported": (
+                str((feed_metadata or {}).get("language") or "en").lower() in {"en", "eng"}
+            ),
         })
     return records
 
@@ -777,11 +800,64 @@ class NewsCollector:
                 payload = response.read(MAX_FEED_BYTES + 1)
             if len(payload) > MAX_FEED_BYTES:
                 raise ValueError("Feed exceeded the 1 MB response limit")
-            return source, parse_feed(payload, source, url), None
+            return source, parse_feed(
+                payload,
+                source,
+                url,
+                feed_metadata=feed,
+            ), None
         except (HTTPError, URLError, TimeoutError, OSError, ValueError, RuntimeError) as exc:
             return source, [], {"source": source, "error": f"{type(exc).__name__}: {str(exc)[:240]}"}
         except Exception as exc:
             return source, [], {"source": source, "error": f"Unexpected {type(exc).__name__}: {str(exc)[:240]}"}
+
+    def read_archive_snapshot(self) -> dict[str, Any]:
+        """Refresh the local RSS archive without making any feed requests.
+
+        The HTTP application is the single RSS network poller. Separate Paper
+        workers read the same append-only/rotated archive and must not refetch
+        each feed with their own network connections.
+        """
+        self.items = []
+        self.seen_ids.clear()
+        self._load_existing()
+        languages_seen = sorted({
+            str(item.get("source_language") or "en").lower()
+            for item in self.items
+        })
+        regions_seen = sorted({
+            str(item.get("coverage_region") or "global").lower()
+            for item in self.items
+        })
+        non_english = sum(
+            1 for item in self.items
+            if item.get("directional_analysis_supported") is False
+        )
+        return {
+            "source": "shared_rss_archive",
+            "poll_status_available": False,
+            "network_requests_made": 0,
+            "feeds_configured": len(self.feeds),
+            "feeds_succeeded": 0,
+            "feeds_failed": 0,
+            "items_added": 0,
+            "items_total_recent": len(self.items),
+            "languages_configured": sorted({
+                str(feed.get("language") or "en").lower()
+                for feed in self.feeds
+            }),
+            "languages_succeeded": [],
+            "regions_configured": sorted({
+                str(feed.get("region") or "global").lower()
+                for feed in self.feeds
+            }),
+            "regions_succeeded": [],
+            "languages_seen": languages_seen,
+            "regions_seen": regions_seen,
+            "directional_analysis_languages": ["en"],
+            "non_english_items_total_recent": non_english,
+            "latest_items": list(reversed(self.items[-MAX_RECENT_ITEMS:])),
+        }
 
     def fetch_once(self) -> dict[str, Any]:
         """Fetch feeds concurrently; isolate errors and persist de-duplicated items."""
@@ -809,6 +885,22 @@ class NewsCollector:
         self.items = self.items[-MAX_RECENT_ITEMS:]
         if len(self.seen_ids) > 20_000:
             self.seen_ids = {str(item["id"]) for item in self.items if item.get("id")}
+        metadata_by_source = {
+            str(feed.get("source") or "Unknown feed")[:100]: feed
+            for feed in self.feeds
+        }
+        successful_languages = set()
+        successful_regions = set()
+        for source, _parsed, error in results:
+            if error is not None:
+                continue
+            metadata = metadata_by_source.get(source, {})
+            successful_languages.add(str(metadata.get("language") or "en").lower())
+            successful_regions.add(str(metadata.get("region") or "global").lower())
+        configured_languages = sorted({
+            str(feed.get("language") or "en").lower()
+            for feed in self.feeds
+        })
         return {
             "feeds_configured": len(self.feeds),
             "feeds_succeeded": successes,
@@ -817,5 +909,17 @@ class NewsCollector:
             "items_added": len(added),
             "new_items": added,
             "items_total_recent": len(self.items),
+            "languages_configured": configured_languages,
+            "languages_succeeded": sorted(successful_languages),
+            "regions_configured": sorted({
+                str(feed.get("region") or "global").lower()
+                for feed in self.feeds
+            }),
+            "regions_succeeded": sorted(successful_regions),
+            "directional_analysis_languages": ["en"],
+            "non_english_items_added": sum(
+                1 for item in added
+                if item.get("directional_analysis_supported") is not True
+            ),
             "latest_items": list(reversed(self.items[-MAX_RECENT_ITEMS:])),
         }

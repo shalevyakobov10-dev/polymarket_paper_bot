@@ -1,0 +1,55 @@
+name: Perps public market-data smoke
+
+on:
+  push:
+    branches: [research/event-aware-news-signals]
+  pull_request:
+    branches: [research/live-execution-gateway]
+  schedule:
+    - cron: "17,47 * * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  public-perps-data:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Compile Perps market data modules
+        run: python -m py_compile perps_market_data.py perps_market_history_store.py perps_market_worker.py
+      - name: Fetch current public Perps instruments, tickers and books
+        env:
+          PERPS_MARKET_LIMIT: "10"
+          PERPS_POLL_INTERVAL_SECONDS: "30"
+          PERPS_MARKET_HISTORY_DB: ${{ runner.temp }}/perps-market-history.sqlite3
+          PERPS_MARKET_WORKER_STATUS_FILE: ${{ runner.temp }}/perps-market-worker-status.json
+        run: python perps_market_worker.py --once
+      - name: Assert public data is healthy and fee-gated entries remain safe
+        env:
+          PERPS_MARKET_WORKER_STATUS_FILE: ${{ runner.temp }}/perps-market-worker-status.json
+        run: |
+          python - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          status = json.loads(Path(os.environ["PERPS_MARKET_WORKER_STATUS_FILE"]).read_text())
+          assert status["worker_state"] == "healthy", status
+          assert status["markets_in_last_snapshot"] >= 1, status
+          fee_markets = status.get("markets_with_fee_schedule")
+          assert isinstance(fee_markets, int) and not isinstance(fee_markets, bool), status
+          assert 0 <= fee_markets <= status["markets_in_last_snapshot"], status
+          if fee_markets == 0:
+              print("Public fee schedule unavailable in this poll; paper entries must stay fail-closed until verified rates return.")
+          assert status["history_rows"] >= 1, status
+          assert status["research_only"] is True, status
+          assert status["live_execution_enabled"] is False, status
+          assert status["execution"] == "none", status
+          print(f"Public Perps market-data smoke passed: {status['markets_in_last_snapshot']} instruments.")
+          PY

@@ -1,0 +1,546 @@
+import sqlite3
+import tempfile
+import unittest
+from datetime import datetime, timezone
+from pathlib import Path
+from unittest.mock import patch
+from types import SimpleNamespace
+from pathlib import Path
+
+from event_paper_worker import read_event_paper_worker_status, run_worker
+
+
+class StopAfterWaits:
+    def __init__(self, stop_after):
+        self.stop_after = stop_after
+        self.wait_count = 0
+        self.stopped = False
+
+    def is_set(self):
+        return self.stopped
+
+    def wait(self, timeout=None):
+        self.wait_count += 1
+        if self.wait_count >= self.stop_after:
+            self.stopped = True
+            return True
+        return False
+
+
+class FakeBot:
+    def __init__(self, results):
+        self.results = list(results)
+        self.closed = False
+        self.calls = 0
+
+    def run_once(self):
+        self.calls += 1
+        result = self.results.pop(0)
+        if isinstance(result, Exception):
+            raise result
+        return result
+
+    def close(self):
+        self.closed = True
+
+
+class EventPaperWorkerTests(unittest.TestCase):
+    def test_runs_paper_cycle_and_persists_sanitized_heartbeat(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "worker.json"
+            bot = FakeBot([{
+                "markets_loaded": 3, "opened": [{"market_id": "m1"}],
+                "closed": [], "close_blocked": [],
+                "market_universe_discovered": 200,
+                "markets_selected_for_orderbooks": 30,
+                "market_orderbook_token_requests": 60,
+                "market_snapshots_usable": 27,
+                "market_selected_categories": ["politics", "economics", "technology"],
+                "market_discovery_pages_attempted": 3,
+                "market_discovery_pages_succeeded": 3,
+                "market_discovery_pages_failed": 0,
+                "market_discovery_scan_complete": True,
+                "market_category_quota": 8,
+                "news_feeds_configured": 28,
+                "news_feeds_succeeded": 25,
+                "news_feeds_failed": 3,
+                "news_poll_status_available": False,
+                "news_network_requests_made": 0,
+                "news_archive_items_total_recent": 490,
+                "news_poll_status_available": False,
+                "news_network_requests_made": 0,
+                "news_archive_items_total_recent": 490,
+                "news_items_considered": 412,
+                "news_source_coverage": {
+                    "unique_article_count": 380,
+                    "distinct_publisher_count": 21,
+                    "articles_with_publisher_publication_time": 300,
+                    "articles_with_index_time_only_or_unknown_publication_time": 80,
+                },
+                "news_distinct_publishers": 21,
+                "news_sources_used": ["rss_atom", "gdelt_doc_api", "<script>"],
+                "news_non_english_items_unscored": 138,
+                "gdelt_topics_configured": 18,
+                "gdelt_topics_succeeded": 4,
+                "gdelt_topics_failed": 0,
+                "gdelt_items_added": 87,
+                "gdelt_items_total_recent": 412,
+                "gdelt_topics_seen_in_archive_count": 9,
+                "gdelt_network_requests_made": 0,
+                "gdelt_error_type": None,
+                "news_languages_seen": ["en", "ar", "es", "hi", "ja", "<script>"],
+                "news_regions_seen": ["global", "east_asia", "latin_america", "middle_east_north_africa", "MENA<script>"],
+                "portfolio": {"cash": 98.0, "equity": 100.0, "realized_pnl": 0.0,
+                              "open_positions": 1, "closed_positions": 0, "win_rate_pct": None,
+                              "active_event_evidence_threshold": 0.75,
+                              "performance": {"evaluation_status": "insufficient_sample",
+                                             "closed_trades": 2, "fees_paid": 0.4,
+                                             "out_of_sample_validated": True,
+                                             "live_execution_eligible": True,
+                                             "warnings": ["sample too small"],
+                                             "api_key": "must-not-persist"},
+                              "last_tuning": {
+                                  "ran_at": "2026-11-07T12:00:00+00:00",
+                                  "result": {
+                                      "status": "rejected", "applied": False,
+                                      "input_dataset_sha256": "a" * 64,
+                                      "evaluation_run_sha256": "b" * 64,
+                                      "live_execution_eligible": True,
+                                      "real_money_execution": "enabled",
+                                      "fold_reports": [{"fold": 1, "status": "rejected",
+                                                        "net_pnl_improvement": -1.0,
+                                                        "api_key": "must-not-persist"}],
+                                      "private_key": "must-not-persist",
+                                  },
+                              },
+                              "POLYMARKET_PRIVATE_KEY": "must-not-persist"},
+            }])
+            stop = StopAfterWaits(1)
+            result = run_worker(
+                bot_factory=lambda: bot, stop_event=stop,
+                status_path=path, poll_seconds=30,
+            )
+            self.assertEqual(result, 0)
+            self.assertTrue(bot.closed)
+            status = read_event_paper_worker_status(path)
+            self.assertEqual(status["worker_state"], "stopped")
+            self.assertEqual(status["cycles"], 1)
+            self.assertEqual(status["markets_loaded_last_cycle"], 3)
+            self.assertEqual(status["market_universe_discovered_last_cycle"], 200)
+            self.assertEqual(status["markets_selected_for_orderbooks_last_cycle"], 30)
+            self.assertEqual(status["market_orderbook_token_requests_last_cycle"], 60)
+            self.assertEqual(status["market_snapshots_usable_last_cycle"], 27)
+            self.assertEqual(
+                status["market_selected_categories_last_cycle"],
+                ["economics", "politics", "technology"],
+            )
+            self.assertEqual(status["market_discovery_pages_attempted_last_cycle"], 3)
+            self.assertEqual(status["market_discovery_pages_succeeded_last_cycle"], 3)
+            self.assertEqual(status["market_discovery_pages_failed_last_cycle"], 0)
+            self.assertTrue(status["market_discovery_scan_complete_last_cycle"])
+            self.assertEqual(status["market_category_quota"], 8)
+            self.assertEqual(status["opened_last_cycle"], 1)
+            self.assertEqual(status["news_feeds_configured_last_cycle"], 28)
+            self.assertEqual(status["news_feeds_succeeded_last_cycle"], 25)
+            self.assertEqual(status["news_feeds_failed_last_cycle"], 3)
+            self.assertFalse(status["news_poll_status_available_last_cycle"])
+            self.assertEqual(status["news_network_requests_made_last_cycle"], 0)
+            self.assertEqual(status["news_archive_items_total_recent_last_cycle"], 490)
+            self.assertFalse(status["news_poll_status_available_last_cycle"])
+            self.assertEqual(status["news_network_requests_made_last_cycle"], 0)
+            self.assertEqual(status["news_archive_items_total_recent_last_cycle"], 490)
+            self.assertEqual(status["news_items_considered_last_cycle"], 412)
+            self.assertEqual(status["news_unique_articles_last_cycle"], 380)
+            self.assertEqual(status["news_distinct_publishers_last_cycle"], 21)
+            self.assertEqual(status["news_source_types_seen"], ["gdelt_doc_api", "rss_atom"])
+            self.assertEqual(status["news_articles_with_publisher_time_last_cycle"], 300)
+            self.assertEqual(status["news_articles_with_index_time_only_last_cycle"], 80)
+            self.assertEqual(status["news_non_english_items_unscored_last_cycle"], 138)
+            self.assertEqual(status["gdelt_topics_configured_last_cycle"], 18)
+            self.assertEqual(status["gdelt_topics_succeeded_last_cycle"], 4)
+            self.assertEqual(status["gdelt_items_added_last_cycle"], 87)
+            self.assertEqual(status["gdelt_items_total_recent_last_cycle"], 412)
+            self.assertEqual(status["gdelt_topics_seen_in_archive_count"], 9)
+            self.assertEqual(status["gdelt_network_requests_made_last_cycle"], 0)
+            self.assertEqual(status["news_languages_seen"], ["ar", "en", "es", "hi", "ja"])
+            self.assertIn("middle_east_north_africa", status["news_regions_seen"])
+            self.assertNotIn("<script>", status["news_languages_seen"])
+            self.assertNotIn("mena<script>", status["news_regions_seen"])
+            self.assertEqual(status["portfolio"]["cash"], 98.0)
+            self.assertEqual(status["portfolio"]["open_positions"], 1)
+            self.assertNotIn("POLYMARKET_PRIVATE_KEY", status["portfolio"])
+            self.assertEqual(status["portfolio"]["performance"]["closed_trades"], 2)
+            self.assertFalse(status["portfolio"]["performance"]["out_of_sample_validated"])
+            self.assertFalse(status["portfolio"]["performance"]["live_execution_eligible"])
+            self.assertNotIn("api_key", status["portfolio"]["performance"])
+            tuning = status["portfolio"]["last_tuning"]
+            self.assertEqual(tuning["result"]["input_dataset_sha256"], "a" * 64)
+            self.assertEqual(tuning["result"]["evaluation_run_sha256"], "b" * 64)
+            self.assertFalse(tuning["result"]["live_execution_eligible"])
+            self.assertEqual(tuning["result"]["real_money_execution"], "not_implemented")
+            self.assertNotIn("private_key", tuning["result"])
+            self.assertNotIn("api_key", tuning["result"]["fold_reports"][0])
+            self.assertEqual(status["execution"], "none")
+            self.assertTrue(status["research_only"])
+            self.assertNotIn("environment", status)
+            self.assertNotIn("command", status)
+
+    def test_successful_paper_cycle_runs_scheduled_two_database_backup(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            paper = root / "paper.sqlite3"
+            history = root / "history.sqlite3"
+            for path in (paper, history):
+                connection = sqlite3.connect(path)
+                connection.execute("CREATE TABLE sample (value TEXT)")
+                connection.commit()
+                connection.close()
+            bot = FakeBot([{
+                "markets_loaded": 1, "opened": [], "closed": [], "close_blocked": [],
+                "portfolio": {"cash": 100, "equity": 100, "realized_pnl": 0,
+                              "open_positions": 0, "closed_positions": 0},
+            }])
+            bot.config = SimpleNamespace(
+                database_path=paper,
+                market_history_database_path=history,
+            )
+            calls = []
+
+            def backup_function(paths, directory, *, retain):
+                calls.append((list(paths), Path(directory), retain))
+                return {
+                    "created_at": datetime.now(timezone.utc).isoformat(),
+                    "manifest_name": "manifest.json",
+                    "files": [
+                        {"source_name": paper.name, "backup_name": "paper.sqlite3"},
+                        {"source_name": history.name, "backup_name": "history.sqlite3"},
+                    ],
+                    "skipped_missing_sources": [],
+                }
+
+            status_path = root / "worker.json"
+            stop = StopAfterWaits(1)
+            result = run_worker(
+                bot_factory=lambda: bot,
+                stop_event=stop,
+                status_path=status_path,
+                poll_seconds=30,
+                backup_function=backup_function,
+                backup_interval_hours=6,
+                backup_directory=root / "backups",
+                backup_retain=7,
+            )
+            self.assertEqual(result, 0)
+            self.assertEqual(len(calls), 1)
+            self.assertEqual(calls[0][0], [paper, history])
+            self.assertEqual(calls[0][1], root / "backups")
+            self.assertEqual(calls[0][2], 7)
+            status = read_event_paper_worker_status(status_path)
+            self.assertEqual(status["last_backup_at"] is not None, True)
+            self.assertEqual(status["backup_manifest_name"], "manifest.json")
+            self.assertEqual(status["backup_files_last_run"], 2)
+            self.assertIsNone(status["backup_error_type"])
+
+    def test_scheduled_backup_includes_existing_event_order_journal(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            paper = root / "paper.sqlite3"
+            history = root / "history.sqlite3"
+            journal = root / "order_journal.sqlite3"
+            for path in (paper, history, journal):
+                connection = sqlite3.connect(path)
+                connection.execute("CREATE TABLE sample (value TEXT)")
+                connection.execute("INSERT INTO sample(value) VALUES('persist')")
+                connection.commit()
+                connection.close()
+            bot = FakeBot([{
+                "markets_loaded": 1, "opened": [], "closed": [], "close_blocked": [],
+                "portfolio": {"cash": 100, "equity": 100, "realized_pnl": 0,
+                              "open_positions": 0, "closed_positions": 0},
+            }])
+            bot.config = SimpleNamespace(
+                database_path=paper,
+                market_history_database_path=history,
+            )
+            calls = []
+
+            def backup_function(paths, directory, *, retain):
+                calls.append((list(paths), Path(directory), retain))
+                return {
+                    "created_at": datetime.now(timezone.utc).isoformat(),
+                    "manifest_name": "manifest.json",
+                    "files": [
+                        {"source_name": Path(path).name, "backup_name": f"{Path(path).stem}.backup.sqlite3"}
+                        for path in paths
+                    ],
+                    "skipped_missing_sources": [],
+                }
+
+            status_path = root / "worker.json"
+            stop = StopAfterWaits(1)
+            with patch.dict(os.environ, {"ORDER_JOURNAL_DB": str(journal)}):
+                result = run_worker(
+                    bot_factory=lambda: bot,
+                    stop_event=stop,
+                    status_path=status_path,
+                    poll_seconds=30,
+                    backup_function=backup_function,
+                    backup_interval_hours=6,
+                    backup_directory=root / "backups",
+                    backup_retain=7,
+                )
+            self.assertEqual(result, 0)
+            self.assertEqual(calls[0][0], [paper, history, journal])
+            status = read_event_paper_worker_status(status_path)
+            self.assertTrue(status["event_order_journal_present"])
+            self.assertTrue(status["event_order_journal_path_valid"])
+            self.assertTrue(status["event_order_journal_backed_up"])
+            self.assertEqual(
+                status["event_order_journal_backup_mtime_ns"],
+                journal.stat().st_mtime_ns,
+            )
+            self.assertEqual(status["backup_files_last_run"], 3)
+
+    def test_changed_event_order_journal_forces_new_backup_after_restart(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            paper = root / "paper.sqlite3"
+            history = root / "history.sqlite3"
+            journal = root / "order_journal.sqlite3"
+            for path in (paper, history, journal):
+                connection = sqlite3.connect(path)
+                connection.execute("CREATE TABLE sample (value TEXT)")
+                connection.commit()
+                connection.close()
+
+            status_path = root / "worker.json"
+            first_bot = FakeBot([{
+                "markets_loaded": 1, "opened": [], "closed": [], "close_blocked": [],
+            }])
+            first_bot.config = SimpleNamespace(
+                database_path=paper,
+                market_history_database_path=history,
+            )
+
+            def backup_function(paths, directory, *, retain):
+                return {
+                    "created_at": datetime.now(timezone.utc).isoformat(),
+                    "manifest_name": "manifest.json",
+                    "files": [
+                        {"source_name": Path(path).name, "backup_name": f"{Path(path).stem}.sqlite3"}
+                        for path in paths
+                    ],
+                    "skipped_missing_sources": [],
+                }
+
+            with patch.dict(os.environ, {"ORDER_JOURNAL_DB": str(journal)}):
+                run_worker(
+                    bot_factory=lambda: first_bot,
+                    stop_event=StopAfterWaits(1),
+                    status_path=status_path,
+                    poll_seconds=30,
+                    backup_function=backup_function,
+                    backup_interval_hours=6,
+                )
+                first_status = read_event_paper_worker_status(status_path)
+                first_mtime = first_status["event_order_journal_backup_mtime_ns"]
+                self.assertEqual(first_mtime, journal.stat().st_mtime_ns)
+
+                connection = sqlite3.connect(journal)
+                try:
+                    connection.execute("INSERT INTO sample(value) VALUES('changed')")
+                    connection.commit()
+                finally:
+                    connection.close()
+                self.assertNotEqual(journal.stat().st_mtime_ns, first_mtime)
+
+                calls = []
+                def second_backup(paths, directory, *, retain):
+                    calls.append(list(paths))
+                    return backup_function(paths, directory, retain=retain)
+
+                second_bot = FakeBot([{
+                    "markets_loaded": 1, "opened": [], "closed": [], "close_blocked": [],
+                }])
+                second_bot.config = first_bot.config
+                run_worker(
+                    bot_factory=lambda: second_bot,
+                    stop_event=StopAfterWaits(1),
+                    status_path=status_path,
+                    poll_seconds=30,
+                    backup_function=second_backup,
+                    backup_interval_hours=6,
+                )
+            self.assertEqual(len(calls), 1)
+            self.assertEqual(calls[0], [paper, history, journal])
+            final_status = read_event_paper_worker_status(status_path)
+            self.assertTrue(final_status["event_order_journal_backed_up"])
+            self.assertEqual(
+                final_status["event_order_journal_backup_mtime_ns"],
+                journal.stat().st_mtime_ns,
+            )
+
+    def test_existing_symlinked_event_order_journal_degrades_and_is_not_backed_up(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            paper = root / "paper.sqlite3"
+            history = root / "history.sqlite3"
+            real_journal = root / "real.sqlite3"
+            journal_link = root / "order_journal.sqlite3"
+            for path in (paper, history, real_journal):
+                connection = sqlite3.connect(path)
+                connection.execute("CREATE TABLE sample (value TEXT)")
+                connection.commit()
+                connection.close()
+            journal_link.symlink_to(real_journal)
+            bot = FakeBot([{
+                "markets_loaded": 1, "opened": [], "closed": [], "close_blocked": [],
+            }])
+            bot.config = SimpleNamespace(
+                database_path=paper,
+                market_history_database_path=history,
+            )
+
+            def backup_function(paths, directory, *, retain):
+                return {
+                    "created_at": datetime.now(timezone.utc).isoformat(),
+                    "manifest_name": "manifest.json",
+                    "files": [
+                        {"source_name": Path(path).name, "backup_name": f"{Path(path).stem}.sqlite3"}
+                        for path in paths
+                    ],
+                    "skipped_missing_sources": [],
+                }
+
+            status_path = root / "worker.json"
+            with patch.dict(os.environ, {"ORDER_JOURNAL_DB": str(journal_link)}):
+                result = run_worker(
+                    bot_factory=lambda: bot,
+                    stop_event=StopAfterWaits(1),
+                    status_path=status_path,
+                    poll_seconds=30,
+                    backup_function=backup_function,
+                )
+            self.assertEqual(result, 0)
+            status = read_event_paper_worker_status(status_path)
+            self.assertTrue(status["event_order_journal_present"])
+            self.assertFalse(status["event_order_journal_path_valid"])
+            self.assertFalse(status["event_order_journal_backed_up"])
+            self.assertEqual(status["worker_state"], "stopped")
+
+    def test_backup_failure_marks_worker_degraded_without_faking_backup_success(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            paper = root / "paper.sqlite3"
+            history = root / "history.sqlite3"
+            for path in (paper, history):
+                connection = sqlite3.connect(path)
+                connection.execute("CREATE TABLE sample (value TEXT)")
+                connection.commit()
+                connection.close()
+            bot = FakeBot([{
+                "markets_loaded": 1, "opened": [], "closed": [], "close_blocked": [],
+            }])
+            bot.config = SimpleNamespace(
+                database_path=paper,
+                market_history_database_path=history,
+            )
+
+            def fail_backup(*_args, **_kwargs):
+                raise OSError("private path details must not be recorded")
+
+            status_path = root / "worker.json"
+            result = run_worker(
+                bot_factory=lambda: bot,
+                stop_event=StopAfterWaits(1),
+                status_path=status_path,
+                poll_seconds=30,
+                backup_function=fail_backup,
+            )
+            self.assertEqual(result, 0)
+            status = read_event_paper_worker_status(status_path)
+            self.assertEqual(status["worker_state"], "stopped")
+            self.assertIsNone(status["last_backup_at"])
+            self.assertEqual(status["backup_error_type"], "OSError")
+            self.assertEqual(status["backup_consecutive_failures"], 1)
+            self.assertGreaterEqual(status["backup_retry_delay_seconds"], 60)
+
+    def test_zero_usable_market_snapshots_marks_worker_degraded(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "worker.json"
+            bot = FakeBot([{
+                "markets_loaded": 0, "opened": [], "closed": [], "close_blocked": [],
+                "portfolio": {"cash": 100, "equity": 100, "realized_pnl": 0,
+                              "open_positions": 0, "closed_positions": 0},
+            }])
+            result = run_worker(
+                bot_factory=lambda: bot,
+                stop_event=StopAfterWaits(1),
+                status_path=path,
+                poll_seconds=30,
+                backup_function=None,
+            )
+            self.assertEqual(result, 0)
+            status = read_event_paper_worker_status(path)
+            self.assertEqual(status["last_cycle_warning"], "no_usable_market_snapshots")
+            self.assertEqual(status["markets_loaded_last_cycle"], 0)
+            self.assertFalse(status["heartbeat_fresh"] is False)
+
+    def test_transient_error_retries_and_recovers(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "worker.json"
+            bot = FakeBot([
+                RuntimeError("response content must not be stored"),
+                {"markets_loaded": 2, "opened": [], "closed": [], "close_blocked": [1]},
+            ])
+            stop = StopAfterWaits(2)
+            result = run_worker(
+                bot_factory=lambda: bot, stop_event=stop,
+                status_path=path, poll_seconds=30,
+            )
+            self.assertEqual(result, 0)
+            self.assertTrue(bot.closed)
+            status = read_event_paper_worker_status(path)
+            self.assertEqual(status["worker_state"], "stopped")
+            self.assertEqual(status["cycles"], 1)
+            self.assertEqual(status["total_failures"], 1)
+            self.assertEqual(status["consecutive_failures"], 0)
+            self.assertEqual(status["close_blocked_last_cycle"], 1)
+            self.assertIsNone(status["last_error_type"])
+
+    def test_repeated_failures_exit_for_supervisor_restart(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "worker.json"
+            bot = FakeBot([RuntimeError("failure 1"), RuntimeError("failure 2")])
+            stop = StopAfterWaits(10)
+            result = run_worker(
+                bot_factory=lambda: bot, stop_event=stop,
+                status_path=path, poll_seconds=30,
+                max_consecutive_failures=2,
+            )
+            self.assertEqual(result, 1)
+            self.assertTrue(bot.closed)
+            status = read_event_paper_worker_status(path)
+            self.assertEqual(status["worker_state"], "failed")
+            self.assertEqual(status["total_failures"], 2)
+            self.assertEqual(status["last_error_type"], "RuntimeError")
+
+    def test_invalid_poll_interval_is_rejected(self):
+        with self.assertRaisesRegex(ValueError, "between 30 and 86400"):
+            run_worker(
+                bot_factory=lambda: FakeBot([]),
+                stop_event=StopAfterWaits(1),
+                status_path="worker.json",
+                poll_seconds=10,
+            )
+
+    def test_missing_status_is_not_reported_as_healthy(self):
+        with tempfile.TemporaryDirectory() as directory:
+            status = read_event_paper_worker_status(Path(directory) / "missing.json")
+        self.assertEqual(status["worker_state"], "unknown")
+        self.assertFalse(status["heartbeat_fresh"])
+        self.assertEqual(status["status_error"], "status_file_missing")
+
+
+if __name__ == "__main__":
+    unittest.main()

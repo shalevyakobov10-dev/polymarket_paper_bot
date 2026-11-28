@@ -1,14 +1,14 @@
 name: Railway IaC validation
 on:
   push:
-    branches: [main]
+    branches: [main, research/event-aware-news-signals]
     paths:
       - ".railway/**"
       - "package.json"
       - "tsconfig.json"
       - ".github/workflows/railway-iac-check.yml"
   pull_request:
-    branches: [main]
+    branches: [main, research/live-execution-gateway, research/event-aware-news-signals]
     paths:
       - ".railway/**"
       - "package.json"

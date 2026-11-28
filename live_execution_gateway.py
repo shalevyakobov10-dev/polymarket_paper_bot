@@ -22,7 +22,10 @@ from typing import Any, Callable
 from account_risk_policy import MAX_ACCOUNT_RISK_SNAPSHOT_AGE_SECONDS
 from live_order_preflight import REQUIRED_RELEASE_GATES, evaluate_live_order_preflight
 from order_journal import OrderJournal
+from event_order_management import EventOrderOperationLock
+from event_live_release_gate import evaluate_event_live_release_gate
 from polymarket_geo import check_polymarket_geoblock
+from live_kill_switch import check_live_kill_switch
 
 LIVE_CONFIRMATION_PHRASE = "I_ACCEPT_REAL_MONEY_RISK"
 LIVE_ORDER_TYPE = "FAK"
@@ -131,6 +134,66 @@ def _rejected_venue_receipt(response: Any) -> dict[str, Any]:
     return {"kind": "rejected", "code": code}
 
 
+def _geoblock_error(result: Any, *, now: datetime | None = None) -> str | None:
+    """Validate a current official geoblock response without retaining the IP."""
+    if not isinstance(result, dict) or result.get("verified") is not True:
+        return "polymarket_geoblock_rejected_or_unverified"
+    if result.get("blocked") is not False:
+        return "polymarket_geoblock_rejected_or_unverified"
+    country = result.get("country")
+    region = result.get("region")
+    if (
+        not isinstance(country, str) or len(country) != 2
+        or not country.isalpha() or country != country.upper()
+        or not isinstance(region, str) or not region.strip() or len(region) > 16
+    ):
+        return "polymarket_geoblock_location_invalid"
+    raw_timestamp = result.get("checked_at_utc")
+    try:
+        checked_at = raw_timestamp if isinstance(raw_timestamp, datetime) else datetime.fromisoformat(
+            str(raw_timestamp).replace("Z", "+00:00")
+        )
+    except (TypeError, ValueError, OverflowError):
+        return "polymarket_geoblock_timestamp_invalid"
+    if checked_at.tzinfo is None or checked_at.utcoffset() is None:
+        return "polymarket_geoblock_timestamp_invalid"
+    current = now or datetime.now(timezone.utc)
+    if current.tzinfo is None or current.utcoffset() is None:
+        return "polymarket_geoblock_clock_invalid"
+    age = (
+        current.astimezone(timezone.utc) - checked_at.astimezone(timezone.utc)
+    ).total_seconds()
+    if age < -2 or age > 30:
+        return "polymarket_geoblock_stale_or_future_dated"
+    return None
+
+
+def _live_kill_switch_error(
+    result: Any, *, now: datetime | None = None
+) -> str | None:
+    """Require a fresh independently read DISARMED state; all uncertainty blocks."""
+    if not isinstance(result, dict) or result.get("verified") is not True:
+        return "live_kill_switch_status_unverified"
+    if result.get("engaged") is not False or result.get("state") != "disarmed":
+        return "live_kill_switch_engaged"
+    raw_timestamp = result.get("updated_at_utc")
+    try:
+        updated = raw_timestamp if isinstance(raw_timestamp, datetime) else datetime.fromisoformat(
+            str(raw_timestamp).replace("Z", "+00:00")
+        )
+    except (TypeError, ValueError, OverflowError):
+        return "live_kill_switch_timestamp_invalid"
+    if updated.tzinfo is None or updated.utcoffset() is None:
+        return "live_kill_switch_timestamp_invalid"
+    current = now or datetime.now(timezone.utc)
+    if current.tzinfo is None or current.utcoffset() is None:
+        return "live_kill_switch_clock_invalid"
+    age = (current.astimezone(timezone.utc) - updated.astimezone(timezone.utc)).total_seconds()
+    if age < -2 or age > 60:
+        return "live_kill_switch_stale_or_future_dated"
+    return None
+
+
 def _safe_reason(exc: Exception) -> str:
     # Exception text can contain request details. Persist only a stable type code.
     name = type(exc).__name__.lower()
@@ -206,12 +269,16 @@ class LiveExecutionGateway:
         geoblock_checker: Callable[[], dict[str, Any]] = check_polymarket_geoblock,
         book_provider: Callable[[str], dict[str, Any]] | None = None,
         client_factory: Callable[[str, str], Any] | None = None,
+        kill_switch_checker: Callable[[], dict[str, Any]] = check_live_kill_switch,
     ) -> None:
         self.journal = journal
         self.config = config or LiveExecutionConfig()
         self.geoblock_checker = geoblock_checker
         self.book_provider = book_provider or self._fetch_public_book
         self.client_factory = client_factory or self._create_secure_client
+        self.kill_switch_checker = kill_switch_checker
+        if not callable(self.kill_switch_checker):
+            raise ValueError("kill_switch_checker must be callable")
 
     @staticmethod
     def _fetch_public_book(token_id: str) -> dict[str, Any]:
@@ -240,6 +307,24 @@ class LiveExecutionGateway:
         *,
         risk_context: dict[str, Any],
     ) -> dict[str, Any]:
+        """Serialize one BUY attempt against concurrent event order cancellation."""
+        lock = EventOrderOperationLock(self.journal.database_path)
+        if not lock.acquire():
+            return self._blocked("event_order_operation_lock_busy_or_stale")
+        try:
+            return self._submit_prepared_buy_under_operation_lock(
+                client_order_id,
+                risk_context=risk_context,
+            )
+        finally:
+            lock.release()
+
+    def _submit_prepared_buy_under_operation_lock(
+        self,
+        client_order_id: str,
+        *,
+        risk_context: dict[str, Any],
+    ) -> dict[str, Any]:
         """Submit exactly one BUY FAK for a prepared intent or fail closed.
 
         This method never changes a prepared intent to pending until all
@@ -249,6 +334,15 @@ class LiveExecutionGateway:
         """
         if not self.config.armed_for_live_orders():
             return self._blocked("live_execution_not_armed")
+        event_release = evaluate_event_live_release_gate()
+        if event_release.get("eligible_for_separate_gateway_review") is not True:
+            return self._blocked("source_controlled_event_release_gate_closed")
+        try:
+            kill_switch_error = _live_kill_switch_error(self.kill_switch_checker())
+        except Exception:
+            return self._blocked("live_kill_switch_check_failed")
+        if kill_switch_error is not None:
+            return self._blocked(kill_switch_error)
         if not isinstance(risk_context, dict):
             return self._blocked("risk_context_missing")
         try:
@@ -310,10 +404,9 @@ class LiveExecutionGateway:
             geo = self.geoblock_checker()
         except Exception:
             return self._blocked("polymarket_geoblock_check_failed")
-        if not isinstance(geo, dict) or geo.get("verified") is not True or geo.get("blocked") is not False:
-            return self._blocked("polymarket_geoblock_rejected_or_unverified")
-        if geo.get("country") != str(geo.get("country") or "").upper():
-            return self._blocked("polymarket_geoblock_country_invalid")
+        geoblock_error = _geoblock_error(geo)
+        if geoblock_error is not None:
+            return self._blocked(geoblock_error)
 
         token_id = str(intent.get("token_id") or "").strip()
         if not token_id:
@@ -445,6 +538,24 @@ class LiveExecutionGateway:
                 max_price=str(limit_price),
                 order_type=LIVE_ORDER_TYPE,
             )
+            # Recheck geographic eligibility after account/book/network reads,
+            # immediately before the durable submission transition.
+            try:
+                final_geo = self.geoblock_checker()
+            except Exception:
+                return self._blocked("polymarket_geoblock_check_failed")
+            geoblock_error = _geoblock_error(final_geo)
+            if geoblock_error is not None:
+                return self._blocked(geoblock_error)
+            geo = final_geo
+            # Re-read the independent local kill switch after signing and all
+            # remote preflight reads, immediately before the durable intent.
+            try:
+                kill_switch_error = _live_kill_switch_error(self.kill_switch_checker())
+            except Exception:
+                return self._blocked("live_kill_switch_check_failed")
+            if kill_switch_error is not None:
+                return self._blocked(kill_switch_error)
             # Durable local state must be committed before the first network post.
             self.journal.begin_submission(client_order_id)
             submission_started = True

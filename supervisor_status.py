@@ -19,6 +19,15 @@ SERVICE_STATES = frozenset({
 MONITOR_STATES = frozenset({
     "disabled", "starting", "running", "restarting", "stopped",
 })
+PAPER_WORKER_STATES = frozenset({
+    "disabled", "starting", "running", "restarting", "stopped",
+})
+PERPS_WORKER_STATES = frozenset({
+    "disabled", "starting", "running", "restarting", "stopped",
+})
+PERPS_ACCOUNT_WORKER_STATES = frozenset({
+    "disabled", "starting", "running", "restarting", "stopped",
+})
 STATUS_SCHEMA_VERSION = 1
 
 
@@ -31,6 +40,21 @@ def build_supervisor_status(
     last_exit_code: int | None = None,
     app_exit_code: int | None = None,
     next_restart_at: str | None = None,
+    event_paper_worker_enabled: bool = False,
+    event_paper_worker_state: str = "disabled",
+    event_paper_worker_restart_count: int = 0,
+    event_paper_worker_last_exit_code: int | None = None,
+    event_paper_worker_next_restart_at: str | None = None,
+    perps_market_worker_enabled: bool = False,
+    perps_market_worker_state: str = "disabled",
+    perps_market_worker_restart_count: int = 0,
+    perps_market_worker_last_exit_code: int | None = None,
+    perps_market_worker_next_restart_at: str | None = None,
+    perps_account_supervisor_enabled: bool = False,
+    perps_account_supervisor_state: str = "disabled",
+    perps_account_supervisor_restart_count: int = 0,
+    perps_account_supervisor_last_exit_code: int | None = None,
+    perps_account_supervisor_next_restart_at: str | None = None,
     updated_at: str | None = None,
 ) -> dict[str, Any]:
     if service_state not in SERVICE_STATES:
@@ -74,6 +98,104 @@ def build_supervisor_status(
             raise ValueError("next_restart_at must be timezone-aware")
     if monitor_state != "restarting" and next_restart_at is not None:
         raise ValueError("next_restart_at is valid only while monitor is restarting")
+    if not isinstance(event_paper_worker_enabled, bool):
+        raise ValueError("event_paper_worker_enabled must be boolean")
+    if event_paper_worker_state not in PAPER_WORKER_STATES:
+        raise ValueError("invalid event_paper_worker_state")
+    if not event_paper_worker_enabled and event_paper_worker_state != "disabled":
+        raise ValueError("disabled event paper worker must use disabled state")
+    if event_paper_worker_enabled and event_paper_worker_state == "disabled":
+        raise ValueError("enabled event paper worker cannot use disabled state")
+    if (
+        isinstance(event_paper_worker_restart_count, bool)
+        or not isinstance(event_paper_worker_restart_count, int)
+        or event_paper_worker_restart_count < 0
+    ):
+        raise ValueError("event_paper_worker_restart_count must be a nonnegative integer")
+    if event_paper_worker_last_exit_code is not None and (
+        isinstance(event_paper_worker_last_exit_code, bool)
+        or not isinstance(event_paper_worker_last_exit_code, int)
+    ):
+        raise ValueError("event_paper_worker_last_exit_code must be an integer or null")
+    if event_paper_worker_next_restart_at is not None:
+        if not isinstance(event_paper_worker_next_restart_at, str) or not event_paper_worker_next_restart_at.strip():
+            raise ValueError("event_paper_worker_next_restart_at must be an ISO timestamp or null")
+        try:
+            paper_restart_time = datetime.fromisoformat(event_paper_worker_next_restart_at)
+        except ValueError:
+            raise ValueError("event_paper_worker_next_restart_at must be a valid ISO timestamp") from None
+        if paper_restart_time.tzinfo is None or paper_restart_time.utcoffset() is None:
+            raise ValueError("event_paper_worker_next_restart_at must be timezone-aware")
+    if event_paper_worker_state != "restarting" and event_paper_worker_next_restart_at is not None:
+        raise ValueError("event_paper_worker_next_restart_at is valid only while restarting")
+    if not isinstance(perps_market_worker_enabled, bool):
+        raise ValueError("perps_market_worker_enabled must be boolean")
+    if perps_market_worker_state not in PERPS_WORKER_STATES:
+        raise ValueError("invalid perps_market_worker_state")
+    if not perps_market_worker_enabled and perps_market_worker_state != "disabled":
+        raise ValueError("disabled Perps market worker must use disabled state")
+    if perps_market_worker_enabled and perps_market_worker_state == "disabled":
+        raise ValueError("enabled Perps market worker cannot use disabled state")
+    if (
+        isinstance(perps_market_worker_restart_count, bool)
+        or not isinstance(perps_market_worker_restart_count, int)
+        or perps_market_worker_restart_count < 0
+    ):
+        raise ValueError("perps_market_worker_restart_count must be a nonnegative integer")
+    if perps_market_worker_last_exit_code is not None and (
+        isinstance(perps_market_worker_last_exit_code, bool)
+        or not isinstance(perps_market_worker_last_exit_code, int)
+    ):
+        raise ValueError("perps_market_worker_last_exit_code must be an integer or null")
+    if perps_market_worker_next_restart_at is not None:
+        if not isinstance(perps_market_worker_next_restart_at, str) or not perps_market_worker_next_restart_at.strip():
+            raise ValueError("perps_market_worker_next_restart_at must be an ISO timestamp or null")
+        try:
+            perps_restart_time = datetime.fromisoformat(perps_market_worker_next_restart_at)
+        except ValueError:
+            raise ValueError("perps_market_worker_next_restart_at must be a valid ISO timestamp") from None
+        if perps_restart_time.tzinfo is None or perps_restart_time.utcoffset() is None:
+            raise ValueError("perps_market_worker_next_restart_at must be timezone-aware")
+    if perps_market_worker_state != "restarting" and perps_market_worker_next_restart_at is not None:
+        raise ValueError("perps_market_worker_next_restart_at is valid only while restarting")
+    if not isinstance(perps_account_supervisor_enabled, bool):
+        raise ValueError("perps_account_supervisor_enabled must be boolean")
+    if perps_account_supervisor_state not in PERPS_ACCOUNT_WORKER_STATES:
+        raise ValueError("invalid perps_account_supervisor_state")
+    if not perps_account_supervisor_enabled and perps_account_supervisor_state != "disabled":
+        raise ValueError("disabled Perps account supervisor must use disabled state")
+    if perps_account_supervisor_enabled and perps_account_supervisor_state == "disabled":
+        raise ValueError("enabled Perps account supervisor cannot use disabled state")
+    if (
+        isinstance(perps_account_supervisor_restart_count, bool)
+        or not isinstance(perps_account_supervisor_restart_count, int)
+        or perps_account_supervisor_restart_count < 0
+    ):
+        raise ValueError("perps_account_supervisor_restart_count must be a nonnegative integer")
+    if perps_account_supervisor_last_exit_code is not None and (
+        isinstance(perps_account_supervisor_last_exit_code, bool)
+        or not isinstance(perps_account_supervisor_last_exit_code, int)
+    ):
+        raise ValueError("perps_account_supervisor_last_exit_code must be an integer or null")
+    if perps_account_supervisor_next_restart_at is not None:
+        if (
+            not isinstance(perps_account_supervisor_next_restart_at, str)
+            or not perps_account_supervisor_next_restart_at.strip()
+        ):
+            raise ValueError("perps_account_supervisor_next_restart_at must be an ISO timestamp or null")
+        try:
+            account_restart_time = datetime.fromisoformat(perps_account_supervisor_next_restart_at)
+        except ValueError:
+            raise ValueError("perps_account_supervisor_next_restart_at must be a valid ISO timestamp") from None
+        if account_restart_time.tzinfo is None or account_restart_time.utcoffset() is None:
+            raise ValueError("perps_account_supervisor_next_restart_at must be timezone-aware")
+    if (
+        perps_account_supervisor_state != "restarting"
+        and perps_account_supervisor_next_restart_at is not None
+    ):
+        raise ValueError(
+            "perps_account_supervisor_next_restart_at is valid only while restarting"
+        )
 
     return {
         "schema_version": STATUS_SCHEMA_VERSION,
@@ -85,6 +207,21 @@ def build_supervisor_status(
         "monitor_last_exit_code": last_exit_code,
         "app_exit_code": app_exit_code,
         "monitor_next_restart_at": next_restart_at,
+        "event_paper_worker_enabled": event_paper_worker_enabled,
+        "event_paper_worker_state": event_paper_worker_state,
+        "event_paper_worker_restart_count": event_paper_worker_restart_count,
+        "event_paper_worker_last_exit_code": event_paper_worker_last_exit_code,
+        "event_paper_worker_next_restart_at": event_paper_worker_next_restart_at,
+        "perps_market_worker_enabled": perps_market_worker_enabled,
+        "perps_market_worker_state": perps_market_worker_state,
+        "perps_market_worker_restart_count": perps_market_worker_restart_count,
+        "perps_market_worker_last_exit_code": perps_market_worker_last_exit_code,
+        "perps_market_worker_next_restart_at": perps_market_worker_next_restart_at,
+        "perps_account_supervisor_enabled": perps_account_supervisor_enabled,
+        "perps_account_supervisor_state": perps_account_supervisor_state,
+        "perps_account_supervisor_restart_count": perps_account_supervisor_restart_count,
+        "perps_account_supervisor_last_exit_code": perps_account_supervisor_last_exit_code,
+        "perps_account_supervisor_next_restart_at": perps_account_supervisor_next_restart_at,
         "updated_at": parsed.astimezone(timezone.utc).isoformat(),
         "execution": "none",
     }
@@ -102,6 +239,21 @@ def write_supervisor_status(path: str | Path, payload: dict[str, Any]) -> None:
         last_exit_code=payload.get("monitor_last_exit_code"),
         app_exit_code=payload.get("app_exit_code"),
         next_restart_at=payload.get("monitor_next_restart_at"),
+        event_paper_worker_enabled=payload.get("event_paper_worker_enabled", False),
+        event_paper_worker_state=payload.get("event_paper_worker_state", "disabled"),
+        event_paper_worker_restart_count=payload.get("event_paper_worker_restart_count", 0),
+        event_paper_worker_last_exit_code=payload.get("event_paper_worker_last_exit_code"),
+        event_paper_worker_next_restart_at=payload.get("event_paper_worker_next_restart_at"),
+        perps_market_worker_enabled=payload.get("perps_market_worker_enabled", False),
+        perps_market_worker_state=payload.get("perps_market_worker_state", "disabled"),
+        perps_market_worker_restart_count=payload.get("perps_market_worker_restart_count", 0),
+        perps_market_worker_last_exit_code=payload.get("perps_market_worker_last_exit_code"),
+        perps_market_worker_next_restart_at=payload.get("perps_market_worker_next_restart_at"),
+        perps_account_supervisor_enabled=payload.get("perps_account_supervisor_enabled", False),
+        perps_account_supervisor_state=payload.get("perps_account_supervisor_state", "disabled"),
+        perps_account_supervisor_restart_count=payload.get("perps_account_supervisor_restart_count", 0),
+        perps_account_supervisor_last_exit_code=payload.get("perps_account_supervisor_last_exit_code"),
+        perps_account_supervisor_next_restart_at=payload.get("perps_account_supervisor_next_restart_at"),
         updated_at=payload.get("updated_at"),
     )
     target = Path(path).expanduser()
@@ -162,6 +314,21 @@ def read_supervisor_status(
             last_exit_code=raw.get("monitor_last_exit_code"),
             app_exit_code=raw.get("app_exit_code"),
             next_restart_at=raw.get("monitor_next_restart_at"),
+            event_paper_worker_enabled=raw.get("event_paper_worker_enabled", False),
+            event_paper_worker_state=raw.get("event_paper_worker_state", "disabled"),
+            event_paper_worker_restart_count=raw.get("event_paper_worker_restart_count", 0),
+            event_paper_worker_last_exit_code=raw.get("event_paper_worker_last_exit_code"),
+            event_paper_worker_next_restart_at=raw.get("event_paper_worker_next_restart_at"),
+            perps_market_worker_enabled=raw.get("perps_market_worker_enabled", False),
+            perps_market_worker_state=raw.get("perps_market_worker_state", "disabled"),
+            perps_market_worker_restart_count=raw.get("perps_market_worker_restart_count", 0),
+            perps_market_worker_last_exit_code=raw.get("perps_market_worker_last_exit_code"),
+            perps_market_worker_next_restart_at=raw.get("perps_market_worker_next_restart_at"),
+            perps_account_supervisor_enabled=raw.get("perps_account_supervisor_enabled", False),
+            perps_account_supervisor_state=raw.get("perps_account_supervisor_state", "disabled"),
+            perps_account_supervisor_restart_count=raw.get("perps_account_supervisor_restart_count", 0),
+            perps_account_supervisor_last_exit_code=raw.get("perps_account_supervisor_last_exit_code"),
+            perps_account_supervisor_next_restart_at=raw.get("perps_account_supervisor_next_restart_at"),
             updated_at=raw.get("updated_at"),
         )
         current = now or datetime.now(timezone.utc)
@@ -183,6 +350,21 @@ def read_supervisor_status(
             "monitor_last_exit_code": None,
             "app_exit_code": None,
             "monitor_next_restart_at": None,
+            "event_paper_worker_enabled": False,
+            "event_paper_worker_state": "disabled",
+            "event_paper_worker_restart_count": 0,
+            "event_paper_worker_last_exit_code": None,
+            "event_paper_worker_next_restart_at": None,
+            "perps_market_worker_enabled": False,
+            "perps_market_worker_state": "disabled",
+            "perps_market_worker_restart_count": 0,
+            "perps_market_worker_last_exit_code": None,
+            "perps_market_worker_next_restart_at": None,
+            "perps_account_supervisor_enabled": False,
+            "perps_account_supervisor_state": "disabled",
+            "perps_account_supervisor_restart_count": 0,
+            "perps_account_supervisor_last_exit_code": None,
+            "perps_account_supervisor_next_restart_at": None,
             "updated_at": None,
             "status_age_seconds": None,
             "status_fresh": False,
@@ -200,6 +382,21 @@ def read_supervisor_status(
             "monitor_last_exit_code": None,
             "app_exit_code": None,
             "monitor_next_restart_at": None,
+            "event_paper_worker_enabled": False,
+            "event_paper_worker_state": "disabled",
+            "event_paper_worker_restart_count": 0,
+            "event_paper_worker_last_exit_code": None,
+            "event_paper_worker_next_restart_at": None,
+            "perps_market_worker_enabled": False,
+            "perps_market_worker_state": "disabled",
+            "perps_market_worker_restart_count": 0,
+            "perps_market_worker_last_exit_code": None,
+            "perps_market_worker_next_restart_at": None,
+            "perps_account_supervisor_enabled": False,
+            "perps_account_supervisor_state": "disabled",
+            "perps_account_supervisor_restart_count": 0,
+            "perps_account_supervisor_last_exit_code": None,
+            "perps_account_supervisor_next_restart_at": None,
             "updated_at": None,
             "status_age_seconds": None,
             "status_fresh": False,

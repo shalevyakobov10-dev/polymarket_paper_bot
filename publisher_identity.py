@@ -45,6 +45,10 @@ _SOURCE_ALIASES = {
     "the jerusalem post": "jpost",
     "haaretz": "haaretz",
     "nikkei asia": "nikkei",
+    "channel news asia": "cna",
+    "cna": "cna",
+    "kyodo news": "kyodo",
+    "the straits times": "straits-times",
 }
 _DOMAIN_ALIASES = {
     "bbc.com": "bbc",
@@ -78,6 +82,9 @@ _DOMAIN_ALIASES = {
     "haaretz.com": "haaretz",
     "nikkei.com": "nikkei",
     "asia.nikkei.com": "nikkei",
+    "channelnewsasia.com": "cna",
+    "kyodonews.net": "kyodo",
+    "straitstimes.com": "straits-times",
 }
 _MULTI_LEVEL_SUFFIXES = {
     "co.uk", "org.uk", "ac.uk", "gov.uk",

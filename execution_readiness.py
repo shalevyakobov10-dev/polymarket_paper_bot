@@ -1,8 +1,9 @@
-"""Fail-closed readiness report for a future live execution path.
+"""Fail-closed operator readiness inventory for future live execution.
 
-This repository deliberately has no live order adapter. Readiness checks are
-informational only and cannot authorize, sign, or submit an order. In
-particular, environment variables cannot switch this module into live mode.
+Narrow gateway adapters exist in this repository, but this module is only a
+read-only status report. It cannot arm, sign, or submit orders. It deliberately
+distinguishes adapter code from a connected, independently reviewed production
+execution service.
 """
 from __future__ import annotations
 
@@ -10,71 +11,221 @@ from typing import Any
 
 
 LIVE_ORDER_SUBMISSION_IMPLEMENTED = True
-
-# Polymarket Terms of Use effective 2026-08-11 state the Site and Features
-# are intended only for users aged 18 or older. This is a documented readiness
-# condition, never a switch that authorizes execution.
 POLYMARKET_MINIMUM_USER_AGE_YEARS = 18
 POLYMARKET_TERMS_EFFECTIVE_DATE = "2026-08-11"
-POLYMARKET_TERMS_URL = "https://polymarket.com/es/tos"
+POLYMARKET_TERMS_URL = "https://polymarket.com/tos"
+POLYMARKET_GEO_BLOCK_URL = "https://polymarket.com/api/geoblock"
 
 
 def execution_readiness_payload() -> dict[str, Any]:
-    """Return an explicit, fail-closed report for the current execution mode."""
+    """Return a sanitized inventory; never grants execution permission."""
     blockers = [
         {
             "code": "live_execution_disabled_by_default",
-            "detail": "A BUY-only FAK adapter using the official polymarket-client SDK exists, but LIVE_TRADING_ENABLED and LIVE_TRADING_ARMED default to false; DRY_RUN defaults to true. A separate operator-controlled release is required.",
+            "detail": (
+                "Bounded event-market BUY/FAK and Perps IOC/FOK limit gateway "
+                "code exists, but neither gateway is enabled by this readiness "
+                "report. Runtime arming, credentials, and source-controlled "
+                "release conditions are not satisfied here."
+            ),
         },
         {
-            "code": "live_release_gates_not_verified",
-            "detail": "The six independent live release gates must all be evidenced by the live risk context for every submission; the repository does not set them to true by default.",
+            "code": "event_source_release_gates_closed",
+            "detail": (
+                "All eight source-controlled event-market live release gates "
+                "remain closed; caller-supplied risk-context flags cannot "
+                "override this independent gateway check."
+            ),
         },
         {
-            "code": "resting_order_execution_not_supported",
-            "detail": "The adapter exposes only immediate FAK orders and deliberately does not support GTC/resting orders, batch submission, or automated cancel workflows. Ambiguous post outcomes remain blocked for reconciliation and are never retried.",
+            "code": "event_live_kill_switch_not_verified",
+            "detail": (
+                "The event BUY gateway now requires a fresh local DISARMED "
+                "kill-switch status at entry and immediately before submission. "
+                "A missing, unreadable, stale, malformed, or symlinked status "
+                "file is treated as engaged; no UI action can disarm it."
+            ),
+        },
+        {
+            "code": "event_order_management_not_integrated",
+            "detail": (
+                "A cancel-only adapter supports fresh open-order reads, "
+                "single-order cancellation, cancel-all, read-back verification, "
+                "and a shared lock with BUY submission. It is disabled by "
+                "default and is not wired to an authenticated operator service."
+            ),
+        },
+        {
+            "code": "event_gateway_not_integrated",
+            "detail": (
+                "The event-market gateway is not connected to the Paper signal "
+                "worker or an operator-facing execution service. It currently "
+                "supports BUY FAK only; SELL, GTC, batch, and automated cancel "
+                "operations are not part of this adapter."
+            ),
+        },
+        {
+            "code": "perps_gateway_not_integrated",
+            "detail": (
+                "The Perps IOC/FOK limit gateway is not connected to the Perps "
+                "strategy worker or an operator-facing execution service. "
+                "It checks the official geoblock before account reads and repeats the check immediately before durable submission intent; this is not proof of production-host eligibility."
+            ),
+        },
+        {
+            "code": "perps_source_release_gates_closed",
+            "detail": (
+                "All eight source-controlled Perps release gates remain "
+                "closed; environment flags and confirmation phrases cannot "
+                "override them."
+            ),
+        },
+        {
+            "code": "shared_paper_admission_not_integrated",
+            "detail": (
+                "The durable admission coordinator can verify exact ledger "
+                "rows, but neither Paper engine calls it yet. Shared daily-loss "
+                "and combined drawdown enforcement are also not implemented."
+            ),
         },
         {
             "code": "account_eligibility_not_verified",
-            "detail": "Polymarket Terms of Use effective 2026-08-11 state that users must be 18 or older. The operator has self-reported age 41, but account-level identity and eligibility still require verification.",
+            "detail": (
+                "Current Polymarket Terms require users to be at least 18. "
+                "Account identity, age, sanctions, and platform eligibility "
+                "must be independently verified by the account holder."
+            ),
         },
         {
-            "code": "jurisdiction_and_legal_review_not_verified",
-            "detail": "Local legal review and account-specific geographic eligibility have not been recorded.",
+            "code": "jurisdiction_and_runtime_geoblock_not_verified",
+            "detail": (
+                "Local legal review has not been recorded. The live event "
+                "gateway checks Polymarket geoblock on its order path, but this "
+                "readiness endpoint does not call it; the Perps gateway now performs a fresh "
+                "independent per-order geoblock check."
+            ),
         },
         {
             "code": "strategy_edge_not_established",
-            "detail": "Research and paper results do not establish a robust, net-of-cost predictive edge.",
+            "detail": (
+                "No robust, sufficiently large, chronological out-of-sample "
+                "edge net of real fees, funding, spread, slippage, and partial "
+                "fills has been established."
+            ),
+        },
+        {
+            "code": "account_credential_isolation_not_verified",
+            "detail": (
+                "The current read-only account observer is application-"
+                "allowlisted, not venue-enforced read-only. Its delegated "
+                "credentials may sign writes, and same-UID isolation in the "
+                "shared app container is not verified."
+            ),
         },
         {
             "code": "production_operations_not_verified",
-            "detail": "A production deployment, monitoring, incident response, and recovery process have not been verified.",
+            "detail": (
+                "No production deployment, isolated account service, external "
+                "alerting, off-host encrypted backup, incident response, or "
+                "independent recovery drill has been verified."
+            ),
         },
     ]
     return {
+        "schema_version": 3,
         "mode": "paper_only",
         "status": "blocked",
+        # True means bounded adapter source code exists, not that it is armed.
         "live_order_submission_implemented": LIVE_ORDER_SUBMISSION_IMPLEMENTED,
-        "platform_eligibility_policy": {
-            "minimum_user_age_years": POLYMARKET_MINIMUM_USER_AGE_YEARS,
-            "terms_effective_date": POLYMARKET_TERMS_EFFECTIVE_DATE,
-            "source_url": POLYMARKET_TERMS_URL,
-            "independent_verification_required": True,
-        },
         "live_execution_enabled": False,
+        "live_order_submission_enabled": False,
         "order_submission_allowed": False,
         "order_signing_enabled": False,
         "kill_switch": "engaged",
+        "gateway_inventory": {
+            "event_contracts": {
+                "adapter_code_present": True,
+                "integrated_into_paper_worker": False,
+                "source_controlled_release_gates_passed": False,
+                "supported_side": "BUY",
+                "supported_order_type": "FAK",
+                "per_order_geoblock_check": True,
+                "local_kill_switch_check": True,
+                "kill_switch_required_twice": True,
+                "supports_sell": False,
+                "supports_resting_orders": False,
+                "supports_batch_orders": False,
+                "supports_automated_cancel": False,
+                "runtime_enabled": False,
+                "order_submission_allowed": False,
+            },
+            "perps": {
+                "adapter_code_present": True,
+                "integrated_into_strategy_worker": False,
+                "supported_order_type": "LIMIT",
+                "supported_time_in_force": ["IOC", "FOK"],
+                "per_order_geoblock_check": True,
+                "source_controlled_release_gates_passed": False,
+                "runtime_enabled": False,
+                "order_submission_allowed": False,
+            },
+        },
+        "event_live_kill_switch": {
+            "status_file_env": "EVENT_LIVE_KILL_SWITCH_PATH",
+            "default_path": "/etc/polymarket/event_live_kill_switch.json",
+            "owner_uid_env": "EVENT_LIVE_KILL_SWITCH_OWNER_UID",
+            "owner_must_differ_from_gateway_uid": True,
+            "required_file_mode": "0444",
+            "operator_owned_parent_required": True,
+            "freshness_seconds": 60,
+            "missing_or_invalid_means_engaged": True,
+            "read_only_gateway_check": True,
+            "checked_on_gateway_entry": True,
+            "checked_immediately_before_submission": True,
+            "operator_ui_disarm_available": False,
+            "order_submission_allowed": False,
+        },
+        "event_order_management": {
+            "adapter_code_present": True,
+            "supports_open_order_reads": True,
+            "supports_cancel_one": True,
+            "supports_cancel_all": True,
+            "readback_verification": True,
+            "shared_submission_cancel_lock": True,
+            "requires_explicit_confirmation": True,
+            "runtime_enabled": False,
+            "integrated_into_operator_service": False,
+            "new_order_submission_allowed": False,
+        },
+        "shared_paper_risk": {
+            "coordinator_code_present": True,
+            "ledger_entry_verification_present": True,
+            "wired_into_event_engine": False,
+            "wired_into_perps_engine": False,
+            "combined_daily_loss_enforced": False,
+            "combined_drawdown_enforced": False,
+            "order_admission_allowed": False,
+        },
+        "platform_eligibility_policy": {
+            "minimum_user_age_years": POLYMARKET_MINIMUM_USER_AGE_YEARS,
+            "terms_effective_date": POLYMARKET_TERMS_EFFECTIVE_DATE,
+            "terms_url": POLYMARKET_TERMS_URL,
+            "geoblock_endpoint": POLYMARKET_GEO_BLOCK_URL,
+            "runtime_geoblock_checked_by_this_endpoint": False,
+            "independent_account_verification_required": True,
+        },
         "blockers": blockers,
         "requirements_before_any_separate_live_launch_review": [
-            "Independently verify the operator is at least 18 years old under the current Polymarket Terms of Use (effective 2026-08-11) and is otherwise eligible; do not rely on self-reported runtime flags.",
-            "Obtain qualified review of applicable local law and confirm current platform geographic eligibility.",
-            "Validate a strategy on sufficiently large, chronological out-of-sample data after realistic fees, spread, slippage, and partial fills.",
-            "Complete independent security review of wallet custody, key isolation, authentication, and secrets handling.",
-            "Define hard position, exposure, daily-loss, drawdown, stale-data, and emergency-stop limits.",
-            "Keep the first live iteration restricted to bounded FAK orders; do not add resting GTC orders until watchdog/cancel/reconciliation semantics are independently validated.",
-            "Verify cloud uptime, persistent state, alerting, backups, and incident recovery.",
-            "Require a separate, explicit release decision after all gates are evidenced.",
+            "Independently verify account-holder age (18+), identity, sanctions status, and account eligibility under current platform terms.",
+            "Obtain qualified local legal review and confirm the current platform geoblock from the actual execution host; never use VPNs or other bypasses.",
+            "Connect each gateway only through a reviewed, isolated execution service with per-order eligibility checks and strict credential boundaries.",
+            "Wire both Paper engines through one shared admission coordinator, atomic reservations, and a startup recovery lock.",
+            "Persist a combined portfolio ledger with immutable starting capital, UTC daily-loss baselines, and a combined high-water mark.",
+            "Complete chronological out-of-sample, walk-forward, stress, fault-injection, fee/funding, and execution-cost validation.",
+            "Complete independent wallet/key custody, application, dependency, infrastructure, and threat-model review.",
+            "Verify position sizing, exposure, leverage, margin, liquidation, stale-data, kill-switch, cancel, and reconciliation controls.",
+            "Verify isolated production deployment, external monitoring and alerts, encrypted off-host backups, restore rehearsal, and incident runbooks.",
+            "Require an independent release review and a separate explicit operator decision; no environment variable alone may satisfy the release gates.",
         ],
         "research_only": True,
         "execution": "none",

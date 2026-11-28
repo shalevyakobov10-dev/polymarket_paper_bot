@@ -1,10 +1,20 @@
 name: Public API smoke check
 on:
   push:
-    branches: [main]
+    branches: [main, research/event-aware-news-signals]
     paths:
       - "app.py"
-      - "paper_trading.py"
+      - "market_data.py"
+      - "live_market_snapshot_provider.py"
+      - "requirements.txt"
+      - ".github/workflows/public-api-smoke.yml"
+  pull_request:
+    branches: [main, research/live-execution-gateway, research/event-aware-news-signals]
+    paths:
+      - "app.py"
+      - "market_data.py"
+      - "live_market_snapshot_provider.py"
+      - "requirements.txt"
       - ".github/workflows/public-api-smoke.yml"
   workflow_dispatch:
   schedule:
@@ -12,31 +22,54 @@ on:
 permissions:
   contents: read
 jobs:
-  gamma-read:
+  public-gamma-clob-read:
     runs-on: ubuntu-latest
-    timeout-minutes: 2
+    timeout-minutes: 5
     steps:
-      - name: Read a small sample from the public Gamma API
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install read-only public market client
+        run: python -m pip install -r requirements.txt
+      - name: Validate public Gamma metadata and live CLOB order books
+        env:
+          PAPER_LIVE_MARKETS_LIMIT: "5"
+          PAPER_GAMMA_PAGE_SIZE: "100"
+          ORDERBOOK_TOKENS_PER_POLL: "10"
+          ORDERBOOK_FETCH_WORKERS: "4"
         run: |
           python - <<'PY'
-          import json
-          from urllib.request import Request, urlopen
+          from datetime import datetime, timezone
 
-          url = "https://gamma-api.polymarket.com/markets?active=true&closed=false&limit=5"
-          request = Request(url, headers={"User-Agent": "PolymarketPaperBot-PublicApiSmoke/1.0"})
-          with urlopen(request, timeout=20) as response:
-              if response.status != 200:
-                  raise SystemExit(f"Gamma API returned HTTP {response.status}")
-              payload = json.loads(response.read().decode("utf-8"))
+          from live_market_snapshot_provider import LiveClobMarketSnapshotProvider
 
-          if not isinstance(payload, list):
-              raise SystemExit("Gamma API returned a non-list payload")
-          if not payload:
-              raise SystemExit("Gamma API returned no active markets in the smoke-check sample")
+          provider = LiveClobMarketSnapshotProvider(
+              max_age_seconds=30.0,
+              market_limit=5,
+              timeout_seconds=15.0,
+          )
+          snapshots = provider.load(now=datetime.now(timezone.utc))
+          if not snapshots:
+              raise SystemExit(
+                  "Public Gamma/CLOB smoke check found no fresh, usable binary market books."
+              )
 
-          first = payload[0]
-          if not isinstance(first, dict) or not (first.get("question") or first.get("id")):
-              raise SystemExit("Gamma API response is missing expected market fields")
-          print(f"OK: public Gamma API returned {len(payload)} markets; sample fields validated.")
-          print("No credentials or account data were used.")
+          for row in snapshots:
+              if not row.get("market_id") or not row.get("yes_token_id") or not row.get("no_token_id"):
+                  raise SystemExit("Live market snapshot is missing market/outcome identifiers.")
+              if row.get("research_only") is not True or row.get("execution") != "none":
+                  raise SystemExit("Public market snapshot escaped its research-only contract.")
+              for side in ("yes", "no"):
+                  book = row.get(f"{side}_book")
+                  if not isinstance(book, dict) or book.get("book_usable") is not True:
+                      raise SystemExit(f"{side.upper()} live CLOB book is not usable.")
+                  if not book.get("bids_top5") or not book.get("asks_top5"):
+                      raise SystemExit(f"{side.upper()} live CLOB book is not two-sided.")
+
+          print(
+              f"OK: live Gamma/CLOB returned {len(snapshots)} fresh binary market snapshot(s); "
+              "both outcomes have usable two-sided books."
+          )
+          print("Read-only public endpoints only; no credentials, wallet, or orders used.")
           PY

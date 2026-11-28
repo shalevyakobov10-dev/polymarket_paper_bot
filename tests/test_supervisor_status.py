@@ -103,6 +103,135 @@ class SupervisorStatusTests(unittest.TestCase):
         self.assertEqual(loaded["monitor_last_exit_code"], 7)
         self.assertEqual(loaded["app_exit_code"], 17)
 
+    def test_event_paper_worker_restart_state_round_trips(self):
+        payload = build_supervisor_status(
+            service_state="running",
+            monitor_enabled=False,
+            monitor_state="disabled",
+            event_paper_worker_enabled=True,
+            event_paper_worker_state="restarting",
+            event_paper_worker_restart_count=2,
+            event_paper_worker_last_exit_code=7,
+            event_paper_worker_next_restart_at="2026-11-07T10:00:05+00:00",
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            target = Path(directory) / "status.json"
+            write_supervisor_status(target, payload)
+            loaded = read_supervisor_status(target)
+        self.assertTrue(loaded["event_paper_worker_enabled"])
+        self.assertEqual(loaded["event_paper_worker_state"], "restarting")
+        self.assertEqual(loaded["event_paper_worker_restart_count"], 2)
+        self.assertEqual(loaded["event_paper_worker_last_exit_code"], 7)
+        self.assertEqual(
+            loaded["event_paper_worker_next_restart_at"],
+            "2026-11-07T10:00:05+00:00",
+        )
+
+    def test_disabled_event_worker_must_use_disabled_status(self):
+        with self.assertRaisesRegex(ValueError, "disabled event paper worker"):
+            build_supervisor_status(
+                service_state="running",
+                monitor_enabled=False,
+                monitor_state="disabled",
+                event_paper_worker_enabled=False,
+                event_paper_worker_state="running",
+            )
+
+    def test_perps_market_worker_status_round_trips_without_secrets(self):
+        payload = build_supervisor_status(
+            service_state="running",
+            monitor_enabled=False,
+            monitor_state="disabled",
+            event_paper_worker_enabled=True,
+            event_paper_worker_state="running",
+            perps_market_worker_enabled=True,
+            perps_market_worker_state="restarting",
+            perps_market_worker_restart_count=3,
+            perps_market_worker_last_exit_code=9,
+            perps_market_worker_next_restart_at="2026-11-22T08:00:05+00:00",
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            target = Path(directory) / "status.json"
+            write_supervisor_status(target, payload)
+            loaded = read_supervisor_status(target)
+        self.assertTrue(loaded["perps_market_worker_enabled"])
+        self.assertEqual(loaded["perps_market_worker_state"], "restarting")
+        self.assertEqual(loaded["perps_market_worker_restart_count"], 3)
+        self.assertEqual(loaded["perps_market_worker_last_exit_code"], 9)
+        self.assertEqual(
+            loaded["perps_market_worker_next_restart_at"],
+            "2026-11-22T08:00:05+00:00",
+        )
+        self.assertEqual(loaded["execution"], "none")
+
+    def test_disabled_perps_worker_must_use_disabled_status(self):
+        with self.assertRaisesRegex(ValueError, "disabled Perps market worker"):
+            build_supervisor_status(
+                service_state="running",
+                monitor_enabled=False,
+                monitor_state="disabled",
+                perps_market_worker_enabled=False,
+                perps_market_worker_state="running",
+            )
+
+    def test_perps_account_supervisor_status_round_trips_without_secrets(self):
+        payload = build_supervisor_status(
+            service_state="running",
+            monitor_enabled=False,
+            monitor_state="disabled",
+            perps_account_supervisor_enabled=True,
+            perps_account_supervisor_state="restarting",
+            perps_account_supervisor_restart_count=2,
+            perps_account_supervisor_last_exit_code=9,
+            perps_account_supervisor_next_restart_at="2026-11-22T08:00:05+00:00",
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            target = Path(directory) / "status.json"
+            payload["POLYMARKET_PRIVATE_KEY"] = "must-not-be-returned"
+            write_supervisor_status(target, payload)
+            loaded = read_supervisor_status(target)
+        self.assertTrue(loaded["perps_account_supervisor_enabled"])
+        self.assertEqual(loaded["perps_account_supervisor_state"], "restarting")
+        self.assertEqual(loaded["perps_account_supervisor_restart_count"], 2)
+        self.assertEqual(loaded["perps_account_supervisor_last_exit_code"], 9)
+        self.assertEqual(
+            loaded["perps_account_supervisor_next_restart_at"],
+            "2026-11-22T08:00:05+00:00",
+        )
+        self.assertNotIn("POLYMARKET_PRIVATE_KEY", loaded)
+        self.assertEqual(loaded["execution"], "none")
+
+    def test_disabled_perps_account_supervisor_requires_disabled_state(self):
+        with self.assertRaisesRegex(ValueError, "disabled Perps account supervisor"):
+            build_supervisor_status(
+                service_state="running",
+                monitor_enabled=False,
+                monitor_state="disabled",
+                perps_account_supervisor_enabled=False,
+                perps_account_supervisor_state="running",
+            )
+
+    def test_enabled_perps_account_supervisor_cannot_be_disabled(self):
+        with self.assertRaisesRegex(ValueError, "enabled Perps account supervisor"):
+            build_supervisor_status(
+                service_state="running",
+                monitor_enabled=False,
+                monitor_state="disabled",
+                perps_account_supervisor_enabled=True,
+                perps_account_supervisor_state="disabled",
+            )
+
+    def test_perps_account_supervisor_restart_timestamp_is_only_valid_while_restarting(self):
+        with self.assertRaisesRegex(ValueError, "only while restarting"):
+            build_supervisor_status(
+                service_state="running",
+                monitor_enabled=False,
+                monitor_state="disabled",
+                perps_account_supervisor_enabled=True,
+                perps_account_supervisor_state="running",
+                perps_account_supervisor_next_restart_at="2026-11-22T08:00:05+00:00",
+            )
+
     def test_status_builder_rejects_invalid_or_inconsistent_state(self):
         common = {
             "service_state": "running",

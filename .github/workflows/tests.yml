@@ -1,9 +1,9 @@
 name: Tests
 on:
   push:
-    branches: [main, research/order-submission-idempotency-state-machine, research/news-driven-paper-engine, research/live-execution-gateway]
+    branches: [main, research/order-submission-idempotency-state-machine, research/news-driven-paper-engine, research/live-execution-gateway, research/event-aware-news-signals]
   pull_request:
-    branches: [main, research/order-submission-idempotency-state-machine, research/news-driven-paper-engine]
+    branches: [main, research/order-submission-idempotency-state-machine, research/news-driven-paper-engine, research/live-execution-gateway]
   workflow_dispatch:
 permissions:
   contents: read
@@ -18,7 +18,7 @@ jobs:
       - name: Install runtime dependencies
         run: python -m pip install -r requirements.txt
       - name: Compile
-        run: python -m py_compile app.py paper_trading.py news_monitor.py market_data.py market_quality.py market_stream.py global_news.py risk_manager.py resilience.py backtest.py forecast_evaluation.py resolution_tracker.py research_features.py independent_model_evaluation.py learning_journal.py model_governance.py publisher_identity.py paper_fees.py execution_readiness.py account_risk_policy.py backup_order_journal.py restore_order_journal.py live_order_preflight.py order_lifecycle.py order_journal.py user_order_stream.py order_staging.py service_supervisor.py supervisor_status.py polymarket_geo.py live_execution_gateway.py news_sentiment.py adaptive_paper_risk.py paper_parameter_tuner.py market_snapshot_provider.py offline_news_paper_bot.py
+        run: python -m py_compile app.py paper_trading.py news_monitor.py market_data.py market_quality.py market_stream.py global_news.py risk_manager.py resilience.py backtest.py forecast_evaluation.py resolution_tracker.py research_features.py independent_model_evaluation.py learning_journal.py model_governance.py publisher_identity.py paper_fees.py execution_readiness.py account_risk_policy.py backup_order_journal.py restore_order_journal.py live_order_preflight.py order_lifecycle.py order_journal.py user_order_stream.py order_staging.py service_supervisor.py supervisor_status.py event_paper_worker.py paper_performance.py backup_paper_data.py polymarket_geo.py live_execution_gateway.py news_sentiment.py adaptive_paper_risk.py paper_parameter_tuner.py market_snapshot_provider.py live_market_snapshot_provider.py news_fusion.py market_history_store.py historical_replay.py resolved_event_evaluation.py paper_orderbook_execution.py event_outcome.py offline_news_paper_bot.py perps_market_data.py perps_market_history_store.py perps_market_worker.py perps_paper_engine.py perps_paper_config.py perps_historical_replay.py perps_order_journal.py perps_sdk_reconciler.py perps_account_preflight.py perps_auto_cancel_guard.py perps_live_execution_gateway.py control_center.py
       - name: Unit tests
         run: python -m unittest discover -s tests -v
       - name: Build Docker image
@@ -28,8 +28,23 @@ jobs:
           set -euo pipefail
           docker run -d --rm --name polymarket-paper-bot-smoke \
             -e DATA_DIR=/tmp/polymarket-smoke-data \
+            -e ENABLE_EVENT_PAPER_WORKER=false \
+            -e ENABLE_PERPS_MARKET_DATA_WORKER=false \
             -p 18080:8080 polymarket-paper-bot:ci
-          cleanup() { docker stop polymarket-paper-bot-smoke >/dev/null 2>&1 || true; }
+          cleanup() {
+            exit_code=$?
+            trap - EXIT
+            if [ "$exit_code" -ne 0 ]; then
+              echo "::group::Container logs after smoke-test failure"
+              docker logs polymarket-paper-bot-smoke 2>&1 || true
+              echo "::endgroup::"
+              echo "::group::Container exit state"
+              docker inspect polymarket-paper-bot-smoke --format '{{json .State}}' 2>&1 || true
+              echo "::endgroup::"
+            fi
+            docker stop polymarket-paper-bot-smoke >/dev/null 2>&1 || true
+            return "$exit_code"
+          }
           trap cleanup EXIT
           ready=0
           for _ in $(seq 1 20); do
@@ -42,18 +57,42 @@ jobs:
           test "$ready" -eq 1
           health_code=$(curl --silent --show-error --output /tmp/paper-health.json --write-out "%{http_code}" http://127.0.0.1:18080/health)
           test "$health_code" = "200" -o "$health_code" = "503"
-          curl --silent --show-error --fail http://127.0.0.1:18080/status > /tmp/paper-status.json
-          curl --silent --show-error --fail http://127.0.0.1:18080/paper > /tmp/paper-portfolio.json
-          curl --silent --show-error --fail http://127.0.0.1:18080/matches > /tmp/paper-matches.json
-          curl --silent --show-error --fail http://127.0.0.1:18080/market-stream > /tmp/paper-market-stream.json
-          curl --silent --show-error --fail http://127.0.0.1:18080/resolutions > /tmp/paper-resolutions.json
-          curl --silent --show-error --fail http://127.0.0.1:18080/forecast-evaluation > /tmp/paper-forecast-evaluation.json
-          curl --silent --show-error --fail http://127.0.0.1:18080/research-features > /tmp/paper-research-features.json
-          curl --silent --show-error --fail http://127.0.0.1:18080/independent-model-evaluation > /tmp/paper-independent-model-evaluation.json
-          curl --silent --show-error --fail http://127.0.0.1:18080/model-forecasts > /tmp/paper-model-forecasts.json
-          curl --silent --show-error --fail http://127.0.0.1:18080/learning > /tmp/paper-learning.json
-          curl --silent --show-error --fail http://127.0.0.1:18080/execution-readiness > /tmp/paper-execution-readiness.json
-          curl --silent --show-error --fail http://127.0.0.1:18080/service-supervisor > /tmp/paper-service-supervisor.json
+          fetch_json() {
+            local label="$1" path="$2" output="$3"
+            echo "Checking HTTP endpoint: $label"
+            for attempt in $(seq 1 5); do
+              if curl --silent --show-error --fail --max-time 15 "http://127.0.0.1:18080$path" > "$output"; then
+                return 0
+              fi
+              sleep 1
+            done
+            echo "HTTP smoke failed at endpoint: $label" >&2
+            docker inspect polymarket-paper-bot-smoke --format 'Container state: {{json .State}}' >&2 || true
+            docker logs --tail 120 polymarket-paper-bot-smoke >&2 || true
+            return 1
+          }
+          fetch_json status /status /tmp/paper-status.json
+          fetch_json paper /paper /tmp/paper-portfolio.json
+          fetch_json matches /matches /tmp/paper-matches.json
+          fetch_json market-stream /market-stream /tmp/paper-market-stream.json
+          fetch_json resolutions /resolutions /tmp/paper-resolutions.json
+          fetch_json forecast-evaluation /forecast-evaluation /tmp/paper-forecast-evaluation.json
+          fetch_json research-features /research-features /tmp/paper-research-features.json
+          fetch_json independent-model-evaluation /independent-model-evaluation /tmp/paper-independent-model-evaluation.json
+          fetch_json model-forecasts /model-forecasts /tmp/paper-model-forecasts.json
+          fetch_json learning /learning /tmp/paper-learning.json
+          fetch_json execution-readiness /execution-readiness /tmp/paper-execution-readiness.json
+          fetch_json service-supervisor /service-supervisor /tmp/paper-service-supervisor.json
+          fetch_json event-paper /event-paper /tmp/event-paper.json
+          fetch_json perps-market /perps-market /tmp/perps-market.json
+          fetch_json perps-paper /perps-paper /tmp/perps-paper.json
+          curl --silent --show-error --fail --max-time 10 \
+            --dump-header /tmp/control-center-headers.txt \
+            http://127.0.0.1:18080/control-center > /tmp/control-center.html
+          grep -Fq "Polymarket Bot Control Center" /tmp/control-center.html
+          grep -Fq "Live order submission and signing remain disabled" /tmp/control-center.html
+          grep -Fiq "Content-Security-Policy:" /tmp/control-center-headers.txt
+          grep -Fq "frame-ancestors 'none'" /tmp/control-center-headers.txt
           python - <<'PY'
           import json
           from pathlib import Path
@@ -72,6 +111,9 @@ jobs:
           learning = json.loads(Path("/tmp/paper-learning.json").read_text())
           execution_readiness = json.loads(Path("/tmp/paper-execution-readiness.json").read_text())
           supervisor = json.loads(Path("/tmp/paper-service-supervisor.json").read_text())
+          event_paper = json.loads(Path("/tmp/event-paper.json").read_text())
+          perps_market = json.loads(Path("/tmp/perps-market.json").read_text())
+          perps_paper = json.loads(Path("/tmp/perps-paper.json").read_text())
           assert "items" in news and "feeds_configured" in news, "news endpoint schema mismatch"
           assert health.get("mode") == "paper_only", "health endpoint must remain paper-only"
           assert health.get("status") in {"healthy", "degraded", "unhealthy"}, "health endpoint status schema mismatch"
@@ -108,8 +150,27 @@ jobs:
           assert supervisor.get("service_state") in {"starting", "running"}, "supervisor service state must be starting or running"
           assert supervisor.get("monitor_enabled") is False, "account monitor must remain disabled in smoke test"
           assert supervisor.get("monitor_state") == "disabled", "disabled monitor state mismatch"
+          assert supervisor.get("event_paper_worker_enabled") is False, "event paper worker must be disabled in smoke test"
+          assert supervisor.get("event_paper_worker_state") == "disabled", "event paper worker disabled state mismatch"
+          assert supervisor.get("event_paper_worker", {}).get("execution") == "none", "event paper worker status must remain research-only"
           assert supervisor.get("order_submission_allowed") is False, "supervisor status must never enable orders"
           assert supervisor.get("execution") == "none", "supervisor status must remain read-only"
+          assert event_paper.get("worker_state") == "disabled", "CI event paper worker must remain disabled"
+          assert event_paper.get("research_only") is True, "event paper endpoint must be research-only"
+          assert event_paper.get("live_execution_enabled") is False, "event paper endpoint must never enable live execution"
+          assert event_paper.get("execution") == "none", "event paper endpoint must not submit orders"
+          assert perps_market.get("mode") == "POLYMARKET_PERPS_PUBLIC_MARKET_DATA", "Perps endpoint mode mismatch"
+          assert perps_market.get("worker_state") == "disabled", "Perps worker must remain disabled in CI container smoke test"
+          assert perps_market.get("research_only") is True, "Perps public data must remain research-only"
+          assert perps_market.get("live_execution_enabled") is False, "Perps live execution must remain disabled"
+          assert perps_market.get("order_submission_allowed") is False, "Perps orders must remain blocked"
+          assert perps_market.get("execution") == "none", "Perps endpoint must not submit orders"
+          assert perps_paper.get("mode") == "POLYMARKET_PERPS_ISOLATED_MARGIN_PAPER", "Perps paper endpoint mode mismatch"
+          assert perps_paper.get("enabled") is False, "Perps paper engine must remain disabled in CI smoke test"
+          assert perps_paper.get("research_only") is True, "Perps paper portfolio must remain research-only"
+          assert perps_paper.get("live_execution_enabled") is False, "Perps paper must not enable live execution"
+          assert perps_paper.get("order_submission_allowed") is False, "Perps paper must not submit orders"
+          assert perps_paper.get("execution") == "none", "Perps paper endpoint must not execute orders"
           assert "POLYMARKET_PRIVATE_KEY" not in supervisor, "supervisor status must not expose secrets"
           print("Container smoke check passed: research, learning, execution-readiness, and sanitized supervisor status endpoints returned valid JSON.")
           PY

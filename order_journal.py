@@ -827,6 +827,33 @@ class OrderJournal:
                 active.append(state)
         return active
 
+    def list_unresolved_intents(self) -> list[dict[str, Any]]:
+        """List local submissions whose venue outcome still needs reconciliation."""
+        connection = self._connect()
+        try:
+            rows = connection.execute(
+                """
+                SELECT state_json FROM order_intents
+                ORDER BY created_at, client_order_id
+                """
+            ).fetchall()
+        finally:
+            connection.close()
+        unresolved: list[dict[str, Any]] = []
+        for row in rows:
+            try:
+                state = json.loads(row["state_json"])
+            except (TypeError, json.JSONDecodeError) as exc:
+                raise ValueError(
+                    "stored order intent is malformed; refusing unresolved-order listing"
+                ) from exc
+            submission_policy(state)
+            if state["status"] in {
+                "submission_pending", "submission_unknown", "manual_review"
+            }:
+                unresolved.append(state)
+        return unresolved
+
     def get_intent(self, client_order_id: str) -> dict[str, Any] | None:
         connection = self._connect()
         try:

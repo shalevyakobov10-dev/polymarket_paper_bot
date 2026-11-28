@@ -107,6 +107,12 @@ class RequestRejectedError(Exception):
 
 class LiveExecutionGatewayTests(unittest.TestCase):
     def setUp(self):
+        self.release_gate_patch = patch(
+            "live_execution_gateway.evaluate_event_live_release_gate",
+            return_value={"eligible_for_separate_gateway_review": True},
+        )
+        self.release_gate_patch.start()
+        self.addCleanup(self.release_gate_patch.stop)
         self.temp = tempfile.TemporaryDirectory()
         self.db_path = Path(self.temp.name) / "orders.sqlite3"
         self.journal = OrderJournal(self.db_path)
@@ -132,7 +138,8 @@ class LiveExecutionGatewayTests(unittest.TestCase):
         self.gateway_kwargs = {
             "geoblock_checker": lambda: {
                 "verified": True, "blocked": False, "country": "IL",
-                "region": "TA", "ip_redacted": True,
+                "region": "TA", "checked_at_utc": datetime.now(timezone.utc).isoformat(),
+                "ip_redacted": True,
             },
             "book_provider": lambda token: {
                 "token_id": token,
@@ -145,6 +152,12 @@ class LiveExecutionGatewayTests(unittest.TestCase):
                 "crossed_book": False,
             },
             "client_factory": lambda private_key, wallet: self.client,
+            "kill_switch_checker": lambda: {
+                "verified": True,
+                "state": "disarmed",
+                "engaged": False,
+                "updated_at_utc": datetime.now(timezone.utc).isoformat(),
+            },
         }
 
     def tearDown(self):
@@ -187,6 +200,89 @@ class LiveExecutionGatewayTests(unittest.TestCase):
                 signer.key.hex(), different_wallet
             )
 
+    def test_shared_order_operation_lock_blocks_new_buy_submission(self):
+        from event_order_management import EventOrderOperationLock
+
+        lock = EventOrderOperationLock(self.db_path)
+        self.assertTrue(lock.acquire())
+        try:
+            result = self._run_gateway()
+            self.assertEqual(
+                result["reason"],
+                "event_order_operation_lock_busy_or_stale",
+            )
+            self.assertEqual(self.client.created, [])
+            self.assertEqual(self.client.posts, [])
+        finally:
+            lock.release()
+
+    def test_source_controlled_event_release_gate_cannot_be_overridden_by_risk_context(self):
+        with patch(
+            "live_execution_gateway.evaluate_event_live_release_gate",
+            return_value={"eligible_for_separate_gateway_review": False},
+        ):
+            result = self._run_gateway()
+        self.assertEqual(result["reason"], "source_controlled_event_release_gate_closed")
+        self.assertEqual(self.client.created, [])
+        self.assertEqual(self.client.posts, [])
+        self.assertEqual(
+            self.journal.get_intent("paper-intent-001")["status"],
+            "prepared",
+        )
+
+    def test_unverified_or_missing_local_kill_switch_blocks_before_client_creation(self):
+        for report in (
+            {"verified": False, "state": "engaged", "engaged": True},
+            {"verified": True, "state": "engaged", "engaged": True},
+            {"verified": True, "state": "disarmed", "engaged": False},
+        ):
+            with self.subTest(report=report):
+                kwargs = dict(self.gateway_kwargs)
+                kwargs["kill_switch_checker"] = lambda report=report: report
+                result = self._run_gateway(**kwargs)
+                self.assertIn(
+                    result["reason"],
+                    {"live_kill_switch_status_unverified", "live_kill_switch_engaged",
+                     "live_kill_switch_timestamp_invalid"},
+                )
+                self.assertEqual(self.client.created, [])
+                self.assertEqual(self.client.posts, [])
+                self.assertEqual(
+                    self.journal.get_intent("paper-intent-001")["status"], "prepared"
+                )
+
+    def test_stale_local_kill_switch_status_blocks_before_client_creation(self):
+        kwargs = dict(self.gateway_kwargs)
+        kwargs["kill_switch_checker"] = lambda: {
+            "verified": True, "state": "disarmed", "engaged": False,
+            "updated_at_utc": "2020-01-01T00:00:00+00:00",
+        }
+        result = self._run_gateway(**kwargs)
+        self.assertEqual(result["reason"], "live_kill_switch_stale_or_future_dated")
+        self.assertEqual(self.client.created, [])
+        self.assertEqual(self.client.posts, [])
+
+    def test_kill_switch_is_rechecked_after_signing_before_submission_intent(self):
+        calls = []
+        def changing_switch():
+            calls.append(len(calls) + 1)
+            return {
+                "verified": True,
+                "state": "disarmed" if len(calls) == 1 else "engaged",
+                "engaged": len(calls) != 1,
+                "updated_at_utc": datetime.now(timezone.utc).isoformat(),
+            }
+        kwargs = dict(self.gateway_kwargs)
+        kwargs["kill_switch_checker"] = changing_switch
+        result = self._run_gateway(**kwargs)
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(result["reason"], "live_kill_switch_engaged")
+        self.assertEqual(self.client.created.__len__(), 1)
+        self.assertEqual(self.client.posts, [])
+        self.assertEqual(
+            self.journal.get_intent("paper-intent-001")["status"], "prepared"
+        )
+
     def test_default_configuration_does_not_arm_live_orders(self):
         with patch.dict(os.environ, {}, clear=True):
             config = LiveExecutionConfig()
@@ -209,6 +305,38 @@ class LiveExecutionGatewayTests(unittest.TestCase):
         self.assertEqual(result["reason"], "polymarket_geoblock_rejected_or_unverified")
         self.assertEqual(self.client.created, [])
         self.assertEqual(self.client.posts, [])
+
+    def test_stale_geoblock_result_fails_closed_before_sdk_client_creation(self):
+        result = self._run_gateway(
+            geoblock_checker=lambda: {
+                "verified": True, "blocked": False, "country": "IL",
+                "region": "TA", "checked_at_utc": "2020-01-01T00:00:00+00:00",
+            }
+        )
+        self.assertEqual(result["reason"], "polymarket_geoblock_stale_or_future_dated")
+        self.assertEqual(self.client.created, [])
+        self.assertEqual(self.client.posts, [])
+
+    def test_geoblock_is_rechecked_after_signing_before_submission_journal(self):
+        calls = []
+        def changing_location():
+            calls.append(len(calls) + 1)
+            return {
+                "verified": True,
+                "blocked": len(calls) == 2,
+                "country": "IL" if len(calls) == 1 else "XX",
+                "region": "TA",
+                "checked_at_utc": datetime.now(timezone.utc).isoformat(),
+                "ip_redacted": True,
+            }
+        result = self._run_gateway(geoblock_checker=changing_location)
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(result["reason"], "polymarket_geoblock_rejected_or_unverified")
+        self.assertEqual(self.client.posts, [])
+        self.assertEqual(
+            self.journal.get_intent("paper-intent-001")["status"],
+            "prepared",
+        )
 
     def test_geoblock_network_error_fails_closed_before_signing(self):
         def fail():

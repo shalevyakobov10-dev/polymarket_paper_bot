@@ -1,17 +1,18 @@
-"""Small PID-1 supervisor for the paper worker and optional read-only account monitor.
+"""PID-1 supervisor for the HTTP service and isolated research/account workers.
 
-The authenticated monitor is opt-in and never receives credentials in argv.
-When enabled, it inherits secrets only from the runtime environment; its SQLite
-journal is persisted on the configured DATA_DIR volume. A monitor disconnect
-restarts that process with bounded exponential backoff. If the main HTTP worker
-exits, the container exits so the platform can restart the whole service.
+The event-aware paper worker uses public market/news data only and is enabled by
+default. The authenticated account monitor remains separately opt-in and
+read-only. Every child is restarted with bounded backoff; the HTTP worker remains
+the main service process whose failure exits the container.
 """
 from __future__ import annotations
 
+import json
 import logging
 import math
 import os
 import signal
+import stat
 import subprocess
 import sys
 import threading
@@ -37,10 +38,20 @@ class SupervisorConfig:
     monitor_command: tuple[str, ...] | None
     app_env: dict[str, str]
     monitor_env: dict[str, str] | None
+    paper_worker_command: tuple[str, ...] | None
+    paper_worker_env: dict[str, str] | None
+    perps_worker_command: tuple[str, ...] | None
+    perps_worker_env: dict[str, str] | None
     status_path: Path
     poll_interval_seconds: float = 1.0
     monitor_restart_base_seconds: float = 2.0
     monitor_restart_max_seconds: float = 60.0
+    perps_worker_status_path: Path | None = None
+    perps_worker_heartbeat_timeout_seconds: float = 180.0
+    perps_account_supervisor_command: tuple[str, ...] | None = None
+    perps_account_supervisor_env: dict[str, str] | None = None
+    perps_account_supervisor_status_path: Path | None = None
+    perps_account_supervisor_heartbeat_timeout_seconds: float = 180.0
 
 
 def _positive_finite(value: Any, name: str) -> float:
@@ -55,6 +66,102 @@ def _positive_finite(value: Any, name: str) -> float:
     return parsed
 
 
+def _perps_worker_heartbeat_age(
+    status_path: Path,
+    *,
+    worker_started_at: datetime,
+    now: datetime | None = None,
+) -> float:
+    """Return heartbeat age, using process uptime until this instance publishes."""
+    current = now or datetime.now(timezone.utc)
+    if current.tzinfo is None or current.utcoffset() is None:
+        raise ValueError("now must be timezone-aware")
+    if worker_started_at.tzinfo is None or worker_started_at.utcoffset() is None:
+        raise ValueError("worker_started_at must be timezone-aware")
+    started = worker_started_at.astimezone(timezone.utc)
+    current = current.astimezone(timezone.utc)
+    process_age = max(0.0, (current - started).total_seconds())
+    try:
+        raw = json.loads(Path(status_path).read_text(encoding="utf-8"))
+        stamp_text = raw.get("last_heartbeat_at") if isinstance(raw, dict) else None
+        if not isinstance(stamp_text, str) or not stamp_text.strip():
+            return process_age
+        stamp = datetime.fromisoformat(stamp_text.replace("Z", "+00:00"))
+        if stamp.tzinfo is None or stamp.utcoffset() is None:
+            return process_age
+        stamp = stamp.astimezone(timezone.utc)
+    except (OSError, UnicodeError, ValueError, TypeError, json.JSONDecodeError):
+        return process_age
+    # A heartbeat captured before this child started belongs to an earlier
+    # process instance; even a one-second-old file must not extend its lease.
+    if stamp < started:
+        return process_age
+    age = (current - stamp).total_seconds()
+    # A materially future-dated heartbeat is corrupt and must fail closed.
+    if age < -2:
+        # Keep the restart timer anchored to process uptime so a corrupt clock
+        # value cannot trigger an endless immediate-restart loop.
+        return process_age
+    return max(0.0, age)
+
+
+def _perps_account_worker_heartbeat_age(
+    status_path: Path,
+    *,
+    worker_started_at: datetime,
+    now: datetime | None = None,
+) -> float:
+    """Use this process instance's uptime until it publishes a fresh heartbeat."""
+    current = now or datetime.now(timezone.utc)
+    if current.tzinfo is None or current.utcoffset() is None:
+        raise ValueError("now must be timezone-aware")
+    if worker_started_at.tzinfo is None or worker_started_at.utcoffset() is None:
+        raise ValueError("worker_started_at must be timezone-aware")
+    started = worker_started_at.astimezone(timezone.utc)
+    current = current.astimezone(timezone.utc)
+    process_age = max(0.0, (current - started).total_seconds())
+    try:
+        raw = json.loads(Path(status_path).read_text(encoding="utf-8"))
+        stamp_text = raw.get("last_heartbeat_at") if isinstance(raw, dict) else None
+        if not isinstance(stamp_text, str) or not stamp_text.strip():
+            return process_age
+        stamp = datetime.fromisoformat(stamp_text.replace("Z", "+00:00"))
+        if stamp.tzinfo is None or stamp.utcoffset() is None:
+            return process_age
+        stamp = stamp.astimezone(timezone.utc)
+    except (OSError, UnicodeError, ValueError, TypeError, json.JSONDecodeError):
+        return process_age
+    if stamp < started:
+        return process_age
+    age = (current - stamp).total_seconds()
+    if age < -2:
+        return process_age
+    return max(0.0, age)
+
+
+def _required_configured_path(
+    source: Mapping[str, str],
+    name: str,
+    default: str | Path,
+) -> Path:
+    value = source.get(name, str(default))
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError(f"{name} must be a non-empty path")
+    return Path(value).expanduser()
+
+
+def _bounded_integer(value: Any, name: str, *, minimum: int, maximum: int) -> int:
+    if isinstance(value, bool):
+        raise ValueError(f"{name} must be an integer between {minimum} and {maximum}")
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError, OverflowError):
+        raise ValueError(f"{name} must be an integer between {minimum} and {maximum}") from None
+    if str(value).strip() != str(parsed) or not minimum <= parsed <= maximum:
+        raise ValueError(f"{name} must be an integer between {minimum} and {maximum}")
+    return parsed
+
+
 def build_supervisor_config(
     env: Mapping[str, str] | None = None,
     *,
@@ -66,6 +173,10 @@ def build_supervisor_config(
     if enabled_raw not in {"true", "false"}:
         raise ValueError("ENABLE_USER_ORDER_MONITOR must be exactly true or false")
     monitor_enabled = enabled_raw == "true"
+    paper_enabled_raw = str(source.get("ENABLE_EVENT_PAPER_WORKER", "false")).strip().lower()
+    if paper_enabled_raw not in {"true", "false"}:
+        raise ValueError("ENABLE_EVENT_PAPER_WORKER must be exactly true or false")
+    paper_worker_enabled = paper_enabled_raw == "true"
 
     data_dir = Path(source.get("DATA_DIR", "data")).expanduser()
     database_path = Path(
@@ -77,10 +188,22 @@ def build_supervisor_config(
             str(data_dir / "service_supervisor_status.json"),
         )
     ).expanduser()
+    # A secret-file path is itself sensitive deployment metadata. It is
+    # reserved for the dedicated account worker and never inherited by siblings.
+    account_secrets_file = source.get("PERPS_ACCOUNT_SUPERVISOR_SECRETS_FILE")
     monitor_env = dict(source)
     monitor_env["DATA_DIR"] = str(data_dir)
     monitor_env["ORDER_JOURNAL_DB"] = str(database_path)
     monitor_env["SERVICE_SUPERVISOR_STATUS_FILE"] = str(status_path)
+    for secret_name in (
+        "POLYMARKET_API_KEY",
+        "POLYMARKET_API_SECRET",
+        "POLYMARKET_API_PASSPHRASE",
+        "POLYMARKET_SECRET",
+        "PERPS_ACCOUNT_SUPERVISOR_SECRETS_FILE",
+        "PERPS_SESSION_CREDENTIALS_JSON",
+    ):
+        monitor_env.pop(secret_name, None)
 
     # The public HTTP research worker has no need to inherit account secrets.
     app_env = dict(monitor_env)
@@ -90,11 +213,212 @@ def build_supervisor_config(
         "POLYMARKET_API_SECRET",
         "POLYMARKET_API_PASSPHRASE",
         "POLYMARKET_SECRET",
+        "POLYMARKET_DEPOSIT_WALLET",
+        "PERPS_ACCOUNT_SUPERVISOR_SECRETS_FILE",
+        "PERPS_SESSION_CREDENTIALS_JSON",
+        "LIVE_EXPECTED_WALLET",
+        "LIVE_TRADING_CONFIRMATION",
     ):
         app_env.pop(secret_name, None)
+    for environment_name in tuple(app_env):
+        if environment_name.startswith("LIVE_"):
+            app_env.pop(environment_name, None)
+
+    # The research worker receives only the public worker environment, never
+    # account-monitor or future execution credentials.
+    paper_worker_env = dict(app_env)
+    paper_worker_env["DATA_DIR"] = str(data_dir)
+    paper_worker_env.setdefault("PAPER_DATABASE_PATH", str(data_dir / "offline_news_paper.sqlite3"))
+    paper_worker_env.setdefault("MARKET_HISTORY_DATABASE_PATH", str(data_dir / "market_history.sqlite3"))
+    paper_worker_env.setdefault("NEWS_LOG_PATH", str(data_dir / "offline_news_events.jsonl"))
+    paper_worker_env.setdefault("MARKET_SNAPSHOT_FILE", str(data_dir / "market_snapshots.json"))
+    paper_worker_env["DRY_RUN"] = "true"
+    paper_worker_env["LIVE_EXECUTION_ENABLED"] = "false"
+    paper_worker_env["EVENT_PAPER_WORKER_STATUS_FILE"] = str(
+        source.get("EVENT_PAPER_WORKER_STATUS_FILE", str(data_dir / "event_paper_worker_status.json"))
+    )
+
+    perps_enabled_raw = str(source.get("ENABLE_PERPS_MARKET_DATA_WORKER", "false")).strip().lower()
+    if perps_enabled_raw not in {"true", "false"}:
+        raise ValueError("ENABLE_PERPS_MARKET_DATA_WORKER must be exactly true or false")
+    perps_worker_enabled = perps_enabled_raw == "true"
+    perps_paper_raw = str(source.get("ENABLE_PERPS_PAPER_ENGINE", "false")).strip().lower()
+    if perps_paper_raw not in {"true", "false"}:
+        raise ValueError("ENABLE_PERPS_PAPER_ENGINE must be exactly true or false")
+    perps_paper_enabled = perps_paper_raw == "true"
+    if perps_paper_enabled and not perps_worker_enabled:
+        raise ValueError("ENABLE_PERPS_PAPER_ENGINE requires ENABLE_PERPS_MARKET_DATA_WORKER=true")
+    perps_worker_env = dict(app_env)
+    perps_worker_env["DATA_DIR"] = str(data_dir)
+    perps_worker_env["PERPS_MARKET_HISTORY_DB"] = str(
+        source.get("PERPS_MARKET_HISTORY_DB", str(data_dir / "perps_market_history.sqlite3"))
+    )
+    perps_worker_env["PERPS_ORDER_JOURNAL_DB"] = str(
+        source.get("PERPS_ORDER_JOURNAL_DB", str(data_dir / "perps_order_journal.sqlite3"))
+    )
+    perps_worker_status_path = Path(source.get(
+        "PERPS_MARKET_WORKER_STATUS_FILE",
+        str(data_dir / "perps_market_worker_status.json"),
+    )).expanduser()
+    perps_worker_env["PERPS_MARKET_WORKER_STATUS_FILE"] = str(perps_worker_status_path)
+    perps_poll_interval = _bounded_integer(
+        source.get("PERPS_POLL_INTERVAL_SECONDS", "30"),
+        "PERPS_POLL_INTERVAL_SECONDS",
+        minimum=15,
+        maximum=300,
+    )
+    perps_market_limit = _bounded_integer(
+        source.get("PERPS_MARKET_LIMIT", "10"),
+        "PERPS_MARKET_LIMIT",
+        minimum=1,
+        maximum=50,
+    )
+    # Existing open positions are fetched before the ordinary discovery slice.
+    # Reserve the maximum ten priority instruments in addition to market_limit
+    # when calculating the watchdog lease so a healthy poll is not killed early.
+    maximum_prioritized_open_positions = 10
+    minimum_heartbeat_timeout = max(
+        180,
+        perps_poll_interval * 3
+        + (perps_market_limit + maximum_prioritized_open_positions) * 8
+        + 80,
+    )
+    configured_heartbeat_timeout = source.get("PERPS_WORKER_HEARTBEAT_TIMEOUT_SECONDS")
+    perps_heartbeat_timeout = (
+        minimum_heartbeat_timeout
+        if configured_heartbeat_timeout is None
+        else _bounded_integer(
+            configured_heartbeat_timeout,
+            "PERPS_WORKER_HEARTBEAT_TIMEOUT_SECONDS",
+            minimum=minimum_heartbeat_timeout,
+            maximum=7200,
+        )
+    )
+    perps_worker_env["PERPS_POLL_INTERVAL_SECONDS"] = str(perps_poll_interval)
+    perps_worker_env["PERPS_MARKET_LIMIT"] = str(perps_market_limit)
+    perps_worker_env["PERPS_WORKER_HEARTBEAT_TIMEOUT_SECONDS"] = str(perps_heartbeat_timeout)
+    perps_worker_env["ENABLE_PERPS_PAPER_ENGINE"] = "true" if perps_paper_enabled else "false"
+    perps_worker_env["PERPS_PAPER_DB"] = str(
+        source.get("PERPS_PAPER_DB", str(data_dir / "perps_paper.sqlite3"))
+    )
+    perps_worker_env["DRY_RUN"] = "true"
+    perps_worker_env["LIVE_EXECUTION_ENABLED"] = "false"
+    perps_worker_env["ENABLE_USER_ORDER_MONITOR"] = "false"
+
+    account_worker_enabled_raw = str(
+        source.get("ENABLE_PERPS_ACCOUNT_SUPERVISOR", "false")
+    ).strip().lower()
+    if account_worker_enabled_raw not in {"true", "false"}:
+        raise ValueError("ENABLE_PERPS_ACCOUNT_SUPERVISOR must be exactly true or false")
+    account_worker_enabled = account_worker_enabled_raw == "true"
+    account_worker_command: tuple[str, ...] | None = None
+    account_worker_env: dict[str, str] | None = None
+    account_worker_status_path: Path | None = None
+    account_worker_heartbeat_timeout = 180
+
+    if account_worker_enabled:
+        if not perps_worker_enabled:
+            raise ValueError(
+                "ENABLE_PERPS_ACCOUNT_SUPERVISOR requires ENABLE_PERPS_MARKET_DATA_WORKER=true"
+            )
+        if not isinstance(account_secrets_file, str) or not account_secrets_file.strip():
+            raise ValueError(
+                "ENABLE_PERPS_ACCOUNT_SUPERVISOR=true requires "
+                "PERPS_ACCOUNT_SUPERVISOR_SECRETS_FILE from the secret manager"
+            )
+        secrets_path = Path(account_secrets_file).expanduser()
+        try:
+            secrets_stat = secrets_path.lstat()
+        except OSError:
+            raise ValueError("Perps account supervisor secret file is unavailable") from None
+        if secrets_path.is_symlink() or not secrets_path.is_file():
+            raise ValueError("Perps account supervisor secret file must be a regular non-symlink file")
+        if secrets_stat.st_uid != os.getuid():
+            raise ValueError("Perps account supervisor secret file must be owned by the service UID")
+        if secrets_stat.st_size <= 0 or secrets_stat.st_size > 16 * 1024:
+            raise ValueError("Perps account supervisor secret file has invalid size")
+        permissions = stat.S_IMODE(secrets_stat.st_mode)
+        if permissions not in {0o400, 0o600}:
+            raise ValueError("Perps account supervisor secret file permissions are unsafe")
+
+        account_poll = _bounded_integer(
+            source.get("PERPS_ACCOUNT_SUPERVISOR_POLL_SECONDS", "30"),
+            "PERPS_ACCOUNT_SUPERVISOR_POLL_SECONDS",
+            minimum=15,
+            maximum=300,
+        )
+        account_cycle_timeout = _positive_finite(
+            source.get("PERPS_ACCOUNT_SUPERVISOR_CYCLE_TIMEOUT_SECONDS", "60"),
+            "PERPS_ACCOUNT_SUPERVISOR_CYCLE_TIMEOUT_SECONDS",
+        )
+        if account_cycle_timeout > 300:
+            raise ValueError(
+                "PERPS_ACCOUNT_SUPERVISOR_CYCLE_TIMEOUT_SECONDS must not exceed 300"
+            )
+        account_max_failures = _bounded_integer(
+            source.get("PERPS_ACCOUNT_SUPERVISOR_MAX_FAILURES", "10"),
+            "PERPS_ACCOUNT_SUPERVISOR_MAX_FAILURES",
+            minimum=1,
+            maximum=50,
+        )
+        minimum_account_heartbeat = max(120, account_poll * 3 + int(account_cycle_timeout) + 30)
+        configured_account_timeout = source.get(
+            "PERPS_ACCOUNT_SUPERVISOR_HEARTBEAT_TIMEOUT_SECONDS"
+        )
+        account_worker_heartbeat_timeout = (
+            minimum_account_heartbeat
+            if configured_account_timeout is None
+            else _bounded_integer(
+                configured_account_timeout,
+                "PERPS_ACCOUNT_SUPERVISOR_HEARTBEAT_TIMEOUT_SECONDS",
+                minimum=minimum_account_heartbeat,
+                maximum=7200,
+            )
+        )
+        account_worker_status_path = _required_configured_path(
+            source,
+            "PERPS_ACCOUNT_SUPERVISOR_STATUS_FILE",
+            data_dir / "perps_account_supervisor_status.json",
+        )
+        shared_submission_lock = _required_configured_path(
+            source,
+            "PERPS_SUBMISSION_LOCK_PATH",
+            data_dir / "perps_submission.lock",
+        )
+        perps_order_journal = _required_configured_path(
+            source,
+            "PERPS_ORDER_JOURNAL_DB",
+            data_dir / "perps_order_journal.sqlite3",
+        )
+
+        # This is a strict child-environment allowlist. No inherited wallet/API
+        # keys, no LIVE_* values, and no unrelated process configuration.
+        account_worker_env = {
+            "DATA_DIR": str(data_dir),
+            "PERPS_ACCOUNT_SUPERVISOR_SECRETS_FILE": str(secrets_path),
+            "PERPS_ACCOUNT_SUPERVISOR_STATUS_FILE": str(account_worker_status_path),
+            "PERPS_ORDER_JOURNAL_DB": str(perps_order_journal),
+            "PERPS_SUBMISSION_LOCK_PATH": str(shared_submission_lock),
+            "PERPS_ACCOUNT_SUPERVISOR_POLL_SECONDS": str(account_poll),
+            "PERPS_ACCOUNT_SUPERVISOR_CYCLE_TIMEOUT_SECONDS": str(account_cycle_timeout),
+            "PERPS_ACCOUNT_SUPERVISOR_MAX_FAILURES": str(account_max_failures),
+            "DRY_RUN": "true",
+            "LIVE_EXECUTION_ENABLED": "false",
+            "LOG_LEVEL": str(source.get("LOG_LEVEL", "INFO")),
+        }
+        account_worker_command = (
+            python_executable or sys.executable,
+            "perps_account_supervisor_worker.py",
+        )
 
     executable = python_executable or sys.executable
     app_command = (executable, "app.py")
+    paper_worker_command: tuple[str, ...] | None = (
+        (executable, "event_paper_worker.py") if paper_worker_enabled else None
+    )
+    perps_worker_command: tuple[str, ...] | None = (
+        (executable, "perps_market_worker.py") if perps_worker_enabled else None
+    )
     monitor_command: tuple[str, ...] | None = None
 
     if monitor_enabled:
@@ -131,8 +455,18 @@ def build_supervisor_config(
         monitor_command=monitor_command,
         app_env=app_env,
         monitor_env=monitor_env if monitor_enabled else None,
+        paper_worker_command=paper_worker_command,
+        paper_worker_env=paper_worker_env if paper_worker_enabled else None,
+        perps_worker_command=perps_worker_command,
+        perps_worker_env=perps_worker_env if perps_worker_enabled else None,
         status_path=status_path,
         poll_interval_seconds=min(poll_interval, 10.0),
+        perps_worker_status_path=perps_worker_status_path,
+        perps_worker_heartbeat_timeout_seconds=float(perps_heartbeat_timeout),
+        perps_account_supervisor_command=account_worker_command,
+        perps_account_supervisor_env=account_worker_env,
+        perps_account_supervisor_status_path=account_worker_status_path,
+        perps_account_supervisor_heartbeat_timeout_seconds=float(account_worker_heartbeat_timeout),
     )
 
 
@@ -175,17 +509,39 @@ def run_supervisor(
     stop_event: Any | None = None,
     logger: logging.Logger | None = None,
 ) -> int:
-    """Run the HTTP worker and optionally supervise the authenticated read-only monitor."""
+    """Run the HTTP worker and independently supervise optional child workers."""
     log = logger or LOGGER
     stopping = stop_event or threading.Event()
     monitor_enabled = config.monitor_command is not None
     monitor_state = "starting" if monitor_enabled else "disabled"
+    paper_worker_enabled = config.paper_worker_command is not None
+    paper_worker_state = "starting" if paper_worker_enabled else "disabled"
+    perps_worker_enabled = config.perps_worker_command is not None
+    perps_worker_state = "starting" if perps_worker_enabled else "disabled"
+    perps_account_supervisor_enabled = config.perps_account_supervisor_command is not None
+    perps_account_supervisor_state = (
+        "starting" if perps_account_supervisor_enabled else "disabled"
+    )
     service_state = "starting"
     monitor_process = None
+    paper_worker_process = None
+    perps_worker_process = None
+    perps_worker_started_at: datetime | None = None
+    perps_account_supervisor_process = None
+    perps_account_supervisor_started_at: datetime | None = None
     app_process = None
     monitor_failures = 0
+    paper_worker_failures = 0
+    perps_worker_failures = 0
+    perps_account_supervisor_failures = 0
     last_monitor_exit_code: int | None = None
     next_restart_at: str | None = None
+    last_paper_worker_exit_code: int | None = None
+    paper_worker_next_restart_at: str | None = None
+    last_perps_worker_exit_code: int | None = None
+    perps_worker_next_restart_at: str | None = None
+    last_perps_account_supervisor_exit_code: int | None = None
+    perps_account_supervisor_next_restart_at: str | None = None
     app_exit_code: int | None = None
 
     def publish_status() -> None:
@@ -198,6 +554,21 @@ def run_supervisor(
                 last_exit_code=last_monitor_exit_code,
                 app_exit_code=app_exit_code,
                 next_restart_at=next_restart_at,
+                event_paper_worker_enabled=paper_worker_enabled,
+                event_paper_worker_state=paper_worker_state,
+                event_paper_worker_restart_count=paper_worker_failures,
+                event_paper_worker_last_exit_code=last_paper_worker_exit_code,
+                event_paper_worker_next_restart_at=paper_worker_next_restart_at,
+                perps_market_worker_enabled=perps_worker_enabled,
+                perps_market_worker_state=perps_worker_state,
+                perps_market_worker_restart_count=perps_worker_failures,
+                perps_market_worker_last_exit_code=last_perps_worker_exit_code,
+                perps_market_worker_next_restart_at=perps_worker_next_restart_at,
+                perps_account_supervisor_enabled=perps_account_supervisor_enabled,
+                perps_account_supervisor_state=perps_account_supervisor_state,
+                perps_account_supervisor_restart_count=perps_account_supervisor_failures,
+                perps_account_supervisor_last_exit_code=last_perps_account_supervisor_exit_code,
+                perps_account_supervisor_next_restart_at=perps_account_supervisor_next_restart_at,
             )
             write_supervisor_status(config.status_path, payload)
         except (OSError, TypeError, ValueError) as exc:
@@ -230,6 +601,38 @@ def run_supervisor(
             env=dict(config.app_env),
         )
         log.info("started paper HTTP worker")
+        if paper_worker_enabled:
+            paper_worker_process = popen_factory(
+                list(config.paper_worker_command or ()),
+                env=dict(config.paper_worker_env or {}),
+            )
+            paper_worker_state = "running"
+            log.info("started event-aware paper research worker")
+        else:
+            paper_worker_state = "disabled"
+            log.info("event-aware paper research worker is disabled")
+        if perps_worker_enabled:
+            perps_worker_process = popen_factory(
+                list(config.perps_worker_command or ()),
+                env=dict(config.perps_worker_env or {}),
+            )
+            perps_worker_started_at = datetime.now(timezone.utc)
+            perps_worker_state = "running"
+            log.info("started public Perps market-data worker")
+        else:
+            perps_worker_state = "disabled"
+            log.info("public Perps market-data worker is disabled")
+        if perps_account_supervisor_enabled:
+            perps_account_supervisor_process = popen_factory(
+                list(config.perps_account_supervisor_command or ()),
+                env=dict(config.perps_account_supervisor_env or {}),
+            )
+            perps_account_supervisor_started_at = datetime.now(timezone.utc)
+            perps_account_supervisor_state = "running"
+            log.info("started opt-in read-only Perps account supervisor")
+        else:
+            perps_account_supervisor_state = "disabled"
+            log.info("read-only Perps account supervisor is disabled")
         if not monitor_enabled:
             log.info("authenticated account monitor is disabled")
         else:
@@ -248,10 +651,160 @@ def run_supervisor(
                 log.error("paper HTTP worker exited with code %s", app_code)
                 service_state = "app_failed"
                 monitor_state = "stopped" if monitor_enabled else "disabled"
+                paper_worker_state = "stopped" if paper_worker_enabled else "disabled"
+                perps_worker_state = "stopped" if perps_worker_enabled else "disabled"
+                perps_account_supervisor_state = (
+                    "stopped" if perps_account_supervisor_enabled else "disabled"
+                )
                 app_exit_code = int(app_code)
                 next_restart_at = None
+                paper_worker_next_restart_at = None
+                perps_worker_next_restart_at = None
+                perps_account_supervisor_next_restart_at = None
                 publish_status()
                 return int(app_code) if int(app_code) != 0 else 1
+
+            if paper_worker_process is not None:
+                paper_code = paper_worker_process.poll()
+                if paper_code is not None:
+                    paper_worker_failures += 1
+                    last_paper_worker_exit_code = int(paper_code)
+                    delay = monitor_restart_delay(
+                        paper_worker_failures,
+                        base_seconds=config.monitor_restart_base_seconds,
+                        max_seconds=config.monitor_restart_max_seconds,
+                    )
+                    paper_worker_next_restart_at = (
+                        datetime.now(timezone.utc) + timedelta(seconds=delay)
+                    ).isoformat()
+                    paper_worker_state = "restarting"
+                    publish_status()
+                    log.warning(
+                        "event-aware paper worker exited with code %s; restart %s in %.1f seconds",
+                        paper_code,
+                        paper_worker_failures,
+                        delay,
+                    )
+                    if wait_with_heartbeat(delay):
+                        break
+                    paper_worker_process = popen_factory(
+                        list(config.paper_worker_command or ()),
+                        env=dict(config.paper_worker_env or {}),
+                    )
+                    paper_worker_state = "running"
+                    paper_worker_next_restart_at = None
+                    publish_status()
+                    continue
+
+            if perps_worker_process is not None:
+                perps_code = perps_worker_process.poll()
+                if (
+                    perps_code is None
+                    and config.perps_worker_status_path is not None
+                    and perps_worker_started_at is not None
+                ):
+                    heartbeat_age = _perps_worker_heartbeat_age(
+                        config.perps_worker_status_path,
+                        worker_started_at=perps_worker_started_at,
+                    )
+                    if heartbeat_age >= config.perps_worker_heartbeat_timeout_seconds:
+                        log.error(
+                            "Perps market-data worker heartbeat stale for %.1f seconds "
+                            "(limit %.1f); terminating and restarting",
+                            heartbeat_age,
+                            config.perps_worker_heartbeat_timeout_seconds,
+                        )
+                        _stop_child(perps_worker_process)
+                        perps_code = perps_worker_process.poll()
+                        if perps_code is None:
+                            perps_code = -signal.SIGKILL
+                if perps_code is not None:
+                    perps_worker_failures += 1
+                    last_perps_worker_exit_code = int(perps_code)
+                    delay = monitor_restart_delay(
+                        perps_worker_failures,
+                        base_seconds=config.monitor_restart_base_seconds,
+                        max_seconds=config.monitor_restart_max_seconds,
+                    )
+                    perps_worker_next_restart_at = (
+                        datetime.now(timezone.utc) + timedelta(seconds=delay)
+                    ).isoformat()
+                    perps_worker_state = "restarting"
+                    publish_status()
+                    log.warning(
+                        "Perps market-data worker exited with code %s; restart %s in %.1f seconds",
+                        perps_code,
+                        perps_worker_failures,
+                        delay,
+                    )
+                    if wait_with_heartbeat(delay):
+                        break
+                    perps_worker_process = popen_factory(
+                        list(config.perps_worker_command or ()),
+                        env=dict(config.perps_worker_env or {}),
+                    )
+                    perps_worker_started_at = datetime.now(timezone.utc)
+                    perps_worker_state = "running"
+                    perps_worker_next_restart_at = None
+                    publish_status()
+                    continue
+
+            if perps_account_supervisor_process is not None:
+                account_code = perps_account_supervisor_process.poll()
+                if (
+                    account_code is None
+                    and config.perps_account_supervisor_status_path is not None
+                    and perps_account_supervisor_started_at is not None
+                ):
+                    heartbeat_age = _perps_account_worker_heartbeat_age(
+                        config.perps_account_supervisor_status_path,
+                        worker_started_at=perps_account_supervisor_started_at,
+                    )
+                    if (
+                        heartbeat_age
+                        >= config.perps_account_supervisor_heartbeat_timeout_seconds
+                    ):
+                        log.error(
+                            "Perps account supervisor heartbeat stale for %.1f seconds "
+                            "(limit %.1f); terminating and restarting",
+                            heartbeat_age,
+                            config.perps_account_supervisor_heartbeat_timeout_seconds,
+                        )
+                        _stop_child(perps_account_supervisor_process)
+                        account_code = perps_account_supervisor_process.poll()
+                        if account_code is None:
+                            account_code = -signal.SIGKILL
+                if account_code is not None:
+                    perps_account_supervisor_failures += 1
+                    last_perps_account_supervisor_exit_code = int(account_code)
+                    delay = monitor_restart_delay(
+                        perps_account_supervisor_failures,
+                        base_seconds=config.monitor_restart_base_seconds,
+                        max_seconds=config.monitor_restart_max_seconds,
+                    )
+                    perps_account_supervisor_next_restart_at = (
+                        datetime.now(timezone.utc) + timedelta(seconds=delay)
+                    ).isoformat()
+                    perps_account_supervisor_state = "restarting"
+                    publish_status()
+                    log.warning(
+                        "read-only Perps account supervisor exited with code %s; "
+                        "restart %s in %.1f seconds",
+                        account_code,
+                        perps_account_supervisor_failures,
+                        delay,
+                    )
+                    if wait_with_heartbeat(delay):
+                        break
+                    perps_account_supervisor_process = popen_factory(
+                        list(config.perps_account_supervisor_command or ()),
+                        env=dict(config.perps_account_supervisor_env or {}),
+                    )
+                    perps_account_supervisor_started_at = datetime.now(timezone.utc)
+                    perps_account_supervisor_state = "running"
+                    perps_account_supervisor_next_restart_at = None
+                    publish_status()
+                    continue
 
             if monitor_process is not None:
                 monitor_code = monitor_process.poll()
@@ -293,20 +846,44 @@ def run_supervisor(
     except Exception:
         service_state = "startup_failed"
         monitor_state = "stopped" if monitor_enabled else "disabled"
+        paper_worker_state = "stopped" if paper_worker_enabled else "disabled"
+        perps_worker_state = "stopped" if perps_worker_enabled else "disabled"
+        perps_account_supervisor_state = (
+            "stopped" if perps_account_supervisor_enabled else "disabled"
+        )
         next_restart_at = None
+        paper_worker_next_restart_at = None
+        perps_worker_next_restart_at = None
+        perps_account_supervisor_next_restart_at = None
         publish_status()
         raise
     finally:
         _stop_child(monitor_process)
+        _stop_child(paper_worker_process)
+        _stop_child(perps_worker_process)
+        _stop_child(perps_account_supervisor_process)
         _stop_child(app_process)
         if service_state != "app_failed" and service_state != "startup_failed":
             service_state = "stopped"
             monitor_state = "stopped" if monitor_enabled else "disabled"
+            paper_worker_state = "stopped" if paper_worker_enabled else "disabled"
+            perps_worker_state = "stopped" if perps_worker_enabled else "disabled"
+            perps_account_supervisor_state = (
+                "stopped" if perps_account_supervisor_enabled else "disabled"
+            )
             next_restart_at = None
+            paper_worker_next_restart_at = None
+            perps_worker_next_restart_at = None
+            perps_account_supervisor_next_restart_at = None
             publish_status()
 
 
 def main() -> int:
+    try:
+        from dotenv import load_dotenv
+        load_dotenv()
+    except ImportError:
+        pass
     logging.basicConfig(
         level=os.environ.get("LOG_LEVEL", "INFO").upper(),
         format="%(asctime)s %(levelname)s %(name)s %(message)s",

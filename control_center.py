@@ -44,7 +44,8 @@ footer{margin-top:24px;color:var(--muted);font-size:12px}
 <article class="card" id="card-perps-account-supervisor"><h2>Perps account supervision</h2><div class="empty">Loading status…</div></article>
 <article class="card" id="card-perps-paper"><h2>Perps Paper engine</h2><div class="empty">Loading status…</div></article>
 <article class="card" id="card-event-paper"><h2>Event Paper engine</h2><div class="empty">Loading status…</div></article>
-<article class="card" id="card-release"><h2>Live release gates</h2><div class="empty">Loading status…</div></article>
+<article class="card" id="card-execution-readiness"><h2>Live execution readiness</h2><div class="empty">Loading status…</div></article>
+<article class="card" id="card-release"><h2>Perps live release gates</h2><div class="empty">Loading status…</div></article>
 <article class="card" id="card-supervisor"><h2>Service supervisor</h2><div class="empty">Loading status…</div></article>
 </section>
 <div class="updated" id="updated">Waiting for first refresh.</div>
@@ -59,14 +60,15 @@ const sources=[
  {id:"perps-account-supervisor",url:"/perps-account-supervisor",title:"Perps account supervision"},
  {id:"perps-paper",url:"/perps-paper",title:"Perps Paper engine"},
  {id:"event-paper",url:"/event-paper",title:"Event Paper engine"},
- {id:"release",url:"/perps-live-gate",title:"Live release gates"},
+ {id:"execution-readiness",url:"/execution-readiness",title:"Live execution readiness"},
+ {id:"release",url:"/perps-live-gate",title:"Perps live release gates"},
  {id:"supervisor",url:"/service-supervisor",title:"Service supervisor"}
 ];
 const byId=id=>document.getElementById("card-"+id);
 function text(value){if(value===null||value===undefined||value==="")return "—";if(typeof value==="boolean")return value?"Yes":"No";if(Array.isArray(value))return value.length?value.join(", "):"None";if(typeof value==="object")return JSON.stringify(value);return String(value);}
 function row(label,value){const dt=document.createElement("dt"),dd=document.createElement("dd");dt.textContent=label;dd.textContent=text(value);return [dt,dd];}
 function addRows(container,items){const dl=document.createElement("dl");dl.className="rows";for(const item of items){const pair=row(item[0],item[1]);dl.append(pair[0],pair[1]);}container.append(dl);}
-function statusClass(value){const s=String(value||"unknown").toLowerCase();if(["healthy","running","open","success"].includes(s))return "healthy";if(["degraded","starting","restarting","unknown","disabled","stale"].includes(s))return "degraded";if(["unhealthy","halted","error","stopped","failed"].includes(s))return "unhealthy";return "degraded";}
+function statusClass(value){const s=String(value||"unknown").toLowerCase();if(["healthy","running","open","success"].includes(s))return "healthy";if(["degraded","starting","restarting","unknown","disabled","stale","blocked"].includes(s))return "degraded";if(["unhealthy","halted","error","stopped","failed"].includes(s))return "unhealthy";return "degraded";}
 function addStatus(container,value){const node=document.createElement("div");node.className="status "+statusClass(value);const dot=document.createElement("span");dot.className="dot";const label=document.createElement("span");label.textContent=text(value||"unknown");node.append(dot,label);container.append(node);}
 function metricEntries(id,d){
  if(id==="system"){
@@ -178,6 +180,31 @@ function metricEntries(id,d){
   ["Consecutive worker failures",d.consecutive_failures],
   ["Last error",d.last_error_type]
  ]};
+ if(id==="execution-readiness"){
+  const event=d.gateway_inventory&&d.gateway_inventory.event_contracts||{};
+  const perps=d.gateway_inventory&&d.gateway_inventory.perps||{};
+  const risk=d.shared_paper_risk||{};
+  const policy=d.platform_eligibility_policy||{};
+  const rows=[
+   ["Overall readiness",d.status],
+   ["Execution mode",d.mode],
+   ["Event gateway present / integrated",String(!!event.adapter_code_present)+" / "+String(!!event.integrated_into_paper_worker)],
+   ["Event order scope",String(event.supported_side||"—")+" "+String(event.supported_order_type||"—")],
+   ["Event geoblock checked per order",event.per_order_geoblock_check],
+   ["Perps gateway present / integrated",String(!!perps.adapter_code_present)+" / "+String(!!perps.integrated_into_strategy_worker)],
+   ["Perps order scope",String(perps.supported_order_type||"—")+" "+String((perps.supported_time_in_force||[]).join("/"))],
+   ["Perps geoblock checked per order",perps.per_order_geoblock_check],
+   ["Shared admission wired to both engines",String(!!risk.wired_into_event_engine)+" / "+String(!!risk.wired_into_perps_engine)],
+   ["Combined daily loss enforced",risk.combined_daily_loss_enforced],
+   ["Combined drawdown enforced",risk.combined_drawdown_enforced],
+   ["Runtime geoblock checked by this endpoint",policy.runtime_geoblock_checked_by_this_endpoint],
+   ["Minimum platform age",policy.minimum_user_age_years],
+   ["Live execution enabled",d.live_execution_enabled],
+   ["Order submission allowed",d.order_submission_allowed]
+  ];
+  const blockers=(d.blockers||[]).map(item=>[item.code,item.detail]);
+  return {status:d.status||"blocked",rows,extra:blockers};
+ }
  if(id==="release"){
   const gates=d.release_gates||{};return {status:d.all_release_gates_passed?"healthy":"blocked",rows:[["All source gates passed",d.all_release_gates_passed],["Runtime flags passed",d.runtime_flags_passed],["Eligible for separate review",d.eligible_for_separate_gateway_review],["Order submission allowed",d.order_submission_allowed]],extra:Object.entries(gates).map(([name,value])=>[name,value&&value.passed===true])};
  }

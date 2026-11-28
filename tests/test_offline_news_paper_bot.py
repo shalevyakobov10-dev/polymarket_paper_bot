@@ -815,6 +815,26 @@ class OfflineNewsPaperBotTests(unittest.TestCase):
                 finally:
                     bot.close()
 
+    def test_trades_table_has_unique_admission_id_column_for_recovery(self):
+        with tempfile.TemporaryDirectory() as folder:
+            with self._make_config(folder):
+                bot = OfflineNewsPaperBot(
+                    PaperConfig(),
+                    news_collector=FakeNewsCollector(),
+                    snapshot_provider=StaticProvider({}),
+                )
+                try:
+                    columns = {
+                        row[1] for row in bot.db.execute("PRAGMA table_info(trades)")
+                    }
+                    self.assertIn("admission_id", columns)
+                    indexes = {
+                        row[1] for row in bot.db.execute("PRAGMA index_list(trades)")
+                    }
+                    self.assertIn("idx_trades_admission_id", indexes)
+                finally:
+                    bot.close()
+
     def test_one_offline_cycle_stays_simulated_only(self):
         now = datetime(2026, 11, 6, 12, 0, tzinfo=timezone.utc)
         row = {

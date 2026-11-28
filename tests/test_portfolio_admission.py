@@ -60,12 +60,52 @@ class PortfolioAdmissionTests(unittest.TestCase):
         self.reserve("poly-replayed", exposure="40")
         self.coordinator.mark_committed("poly-replayed", now=self.now)
         self.coordinator.reconcile(
-            "poly-replayed", ledger_entry_id="trade-verified", now=self.now,
+            "poly-replayed", ledger_entry_id="trade-verified", verified_present_from_ledger=True, now=self.now,
         )
         replay = self.reserve("poly-replayed", exposure="40")
         self.assertFalse(replay.approved)
         self.assertEqual(replay.status, "RECONCILED")
         self.assertEqual(replay.reason, "idempotent_existing_reservation_no_new_entry")
+
+    def test_reconcile_requires_explicit_verified_ledger_presence(self):
+        self.reserve("poly-unverified")
+        self.coordinator.mark_committed("poly-unverified", now=self.now)
+        with self.assertRaisesRegex(
+            PortfolioAdmissionError, "verified_ledger_presence"
+        ):
+            self.coordinator.reconcile(
+                "poly-unverified",
+                ledger_entry_id="trade-not-yet-verified",
+                verified_present_from_ledger=False,
+                now=self.now,
+            )
+        unresolved = self.coordinator.list_unresolved()
+        self.assertEqual(len(unresolved), 1)
+        self.assertEqual(unresolved[0]["status"], "AWAITING_RECONCILIATION")
+
+    def test_list_unresolved_is_read_only_and_excludes_terminal_reservations(self):
+        self.reserve("pending")
+        self.reserve("awaiting")
+        self.coordinator.mark_committed("awaiting", now=self.now)
+        self.reserve("reconciled")
+        self.coordinator.mark_committed("reconciled", now=self.now)
+        self.coordinator.reconcile(
+            "reconciled",
+            ledger_entry_id="trade-verified",
+            verified_present_from_ledger=True,
+            now=self.now,
+        )
+        self.assertEqual(
+            [row["admission_id"] for row in self.coordinator.list_unresolved()],
+            ["awaiting", "pending"],
+        )
+        self.assertEqual(self.coordinator.list_unresolved(limit=1)[0]["admission_id"], "awaiting")
+
+    def test_list_unresolved_rejects_invalid_limit(self):
+        for limit in (0, -1, True, 1001, 1.5):
+            with self.subTest(limit=limit):
+                with self.assertRaisesRegex(PortfolioAdmissionError, "limit_invalid"):
+                    self.coordinator.list_unresolved(limit=limit)
 
     def test_idempotency_key_cannot_change_payload(self):
         self.reserve("poly-1")
@@ -88,8 +128,7 @@ class PortfolioAdmissionTests(unittest.TestCase):
     def test_reconciled_reservation_is_counted_for_older_snapshot(self):
         self.reserve("poly-1", exposure="60")
         self.coordinator.mark_committed("poly-1", now=self.now)
-        self.coordinator.reconcile("poly-1", ledger_entry_id="trade-77",
-                                   now=self.now + timedelta(seconds=1))
+        self.coordinator.reconcile("poly-1", ledger_entry_id="trade-77", verified_present_from_ledger=True, now=self.now + timedelta(seconds=1))
         old_snapshot = self.reserve("perps-old", venue="PERPS", exposure="41",
                                     snapshot_at=self.now, now=self.now + timedelta(seconds=2))
         self.assertFalse(old_snapshot.approved)
@@ -98,7 +137,7 @@ class PortfolioAdmissionTests(unittest.TestCase):
         self.reserve("poly-1", exposure="60")
         self.coordinator.mark_committed("poly-1", now=self.now)
         reconciled_at = self.now + timedelta(seconds=1)
-        self.coordinator.reconcile("poly-1", ledger_entry_id="trade-77", now=reconciled_at)
+        self.coordinator.reconcile("poly-1", ledger_entry_id="trade-77", verified_present_from_ledger=True, now=reconciled_at)
         newer_snapshot = self.reserve("perps-new", venue="PERPS", exposure="41",
                                        snapshot="60", snapshot_at=reconciled_at,
                                        now=reconciled_at + timedelta(seconds=1))
@@ -141,10 +180,10 @@ class PortfolioAdmissionTests(unittest.TestCase):
     def test_reconcile_is_idempotent_but_entry_identity_is_immutable(self):
         self.reserve("poly-1")
         self.coordinator.mark_committed("poly-1", now=self.now)
-        self.coordinator.reconcile("poly-1", ledger_entry_id="trade-77", now=self.now)
-        self.coordinator.reconcile("poly-1", ledger_entry_id="trade-77", now=self.now)
+        self.coordinator.reconcile("poly-1", ledger_entry_id="trade-77", verified_present_from_ledger=True, now=self.now)
+        self.coordinator.reconcile("poly-1", ledger_entry_id="trade-77", verified_present_from_ledger=True, now=self.now)
         with self.assertRaisesRegex(PortfolioAdmissionError, "entry_conflict"):
-            self.coordinator.reconcile("poly-1", ledger_entry_id="trade-78", now=self.now)
+            self.coordinator.reconcile("poly-1", ledger_entry_id="trade-78", verified_present_from_ledger=True, now=self.now)
 
     def test_stale_and_future_snapshots_fail_closed(self):
         with self.assertRaisesRegex(PortfolioAdmissionError, "stale_or_future"):

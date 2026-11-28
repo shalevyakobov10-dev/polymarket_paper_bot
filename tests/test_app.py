@@ -503,6 +503,98 @@ class ParserTests(unittest.TestCase):
                 server.server_close()
                 thread.join(timeout=2)
 
+    def test_unified_paper_risk_endpoint_reports_read_only_snapshot_and_never_authorizes_entries(self):
+        from types import SimpleNamespace
+
+        server = app.ThreadingHTTPServer(("127.0.0.1", 0), app.Handler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        snapshot = {
+            "captured_at_utc": "2026-11-28T16:00:00+00:00",
+            "utc_day": "2026-11-28",
+            "polymarket_equity": "100",
+            "perps_equity": "1000",
+            "combined_equity": "1100",
+            "combined_starting_capital": None,
+            "polymarket_peak_equity": "105",
+            "perps_peak_equity": "1010",
+            "combined_peak_equity": None,
+            "combined_drawdown_pct": None,
+            "polymarket_daily_pnl": "1",
+            "perps_daily_pnl": "-2",
+            "combined_daily_pnl": "-1",
+            "polymarket_realized_today": "2",
+            "perps_realized_today": "0",
+            "polymarket_unrealized_pnl": "-1",
+            "perps_unrealized_pnl": "-2",
+            "polymarket_open_exposure": "20",
+            "perps_open_notional": "30",
+            "perps_margin_used": "15",
+            "combined_open_exposure": "50",
+            "combined_open_positions": 2,
+            "freshest_mark_age_seconds": "1",
+            "stalest_mark_age_seconds": "2",
+            "cross_venue_mark_skew_seconds": "1",
+            "perps_halted": False,
+            "marks_fresh": True,
+            "snapshot_complete": True,
+            "execution": "none",
+        }
+        try:
+            thread.start()
+            with patch.object(
+                app, "build_unified_paper_risk_snapshot",
+                return_value=SimpleNamespace(as_dict=lambda: dict(snapshot)),
+            ):
+                with http_urlopen(
+                    f"http://127.0.0.1:{server.server_port}/unified-paper-risk",
+                    timeout=3,
+                ) as response:
+                    payload = json.loads(response.read().decode("utf-8"))
+            self.assertEqual(payload["status"], "healthy")
+            self.assertTrue(payload["available"])
+            self.assertEqual(payload["combined_equity"], "1100")
+            self.assertIsNone(payload["combined_drawdown_pct"])
+            self.assertFalse(payload["shared_admission_gate_connected"])
+            self.assertFalse(payload["order_admission_allowed"])
+            self.assertFalse(payload["live_execution_enabled"])
+            self.assertEqual(payload["execution"], "none")
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=2)
+
+    def test_unified_paper_risk_endpoint_fails_closed_when_source_ledgers_unavailable(self):
+        server = app.ThreadingHTTPServer(("127.0.0.1", 0), app.Handler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        try:
+            thread.start()
+            with patch.object(
+                app, "build_unified_paper_risk_snapshot",
+                side_effect=RuntimeError("private path must not be exposed"),
+            ):
+                try:
+                    http_urlopen(
+                        f"http://127.0.0.1:{server.server_port}/unified-paper-risk",
+                        timeout=3,
+                    )
+                except Exception as exc:
+                    from urllib.error import HTTPError
+                    self.assertIsInstance(exc, HTTPError)
+                    self.assertEqual(exc.code, 503)
+                    payload = json.loads(exc.read().decode("utf-8"))
+                else:
+                    self.fail("unavailable combined snapshot must return HTTP 503")
+            self.assertFalse(payload["available"])
+            self.assertFalse(payload["snapshot_complete"])
+            self.assertFalse(payload["shared_admission_gate_connected"])
+            self.assertFalse(payload["order_admission_allowed"])
+            self.assertNotIn("private path", repr(payload))
+            self.assertEqual(payload["reason_code"], "RuntimeError")
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=2)
+
     def test_event_paper_endpoint_reports_disabled_state_without_enabling_execution(self):
         server = app.ThreadingHTTPServer(("127.0.0.1", 0), app.Handler)
         thread = threading.Thread(target=server.serve_forever, daemon=True)

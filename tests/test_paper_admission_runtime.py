@@ -177,6 +177,13 @@ class PaperAdmissionRuntimeTests(unittest.TestCase):
             max_total_positions=8,
             now=self.now,
         )
+        perps_connection = sqlite3.connect(self.perps)
+        perps_connection.execute(
+            "CREATE TABLE perps_paper_positions (position_id INTEGER PRIMARY KEY, quantity TEXT NOT NULL, entry_price TEXT NOT NULL, status TEXT NOT NULL, admission_id TEXT UNIQUE)"
+        )
+        perps_connection.commit()
+        perps_connection.close()
+
         connection = sqlite3.connect(self.poly)
         connection.execute(
             "CREATE TABLE trades (trade_id INTEGER PRIMARY KEY, notional TEXT, status TEXT, admission_id TEXT UNIQUE)"

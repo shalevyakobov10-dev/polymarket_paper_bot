@@ -466,8 +466,12 @@ class ParserTests(unittest.TestCase):
     def test_execution_readiness_reports_live_kill_switch_status_read_only(self):
         server = app.ThreadingHTTPServer(("127.0.0.1", 0), app.Handler)
         thread = threading.Thread(target=server.serve_forever, daemon=True)
-        with tempfile.TemporaryDirectory() as directory, patch.dict(os.environ, {
+        with tempfile.TemporaryDirectory() as directory, patch(
+            "live_kill_switch.os.geteuid",
+            return_value=os.stat(directory).st_uid + 10000,
+        ), patch.dict(os.environ, {
             "EVENT_LIVE_KILL_SWITCH_PATH": str(Path(directory) / "event-live-kill-switch.json"),
+            "EVENT_LIVE_KILL_SWITCH_OWNER_UID": str(os.stat(directory).st_uid),
             "DATA_DIR": directory,
         }):
             switch_path = Path(os.environ["EVENT_LIVE_KILL_SWITCH_PATH"])
@@ -486,6 +490,7 @@ class ParserTests(unittest.TestCase):
                     "updated_at_utc": datetime.now(timezone.utc).isoformat(),
                     "reason_code": "operator_review",
                 }), encoding="utf-8")
+                switch_path.chmod(0o444)
                 with http_urlopen(address, timeout=3) as response:
                     disarmed = json.loads(response.read().decode("utf-8"))
                 self.assertTrue(disarmed["event_live_kill_switch"]["verified"])

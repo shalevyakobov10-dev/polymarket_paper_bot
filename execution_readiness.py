@@ -30,6 +30,14 @@ def execution_readiness_payload() -> dict[str, Any]:
             ),
         },
         {
+            "code": "event_source_release_gates_closed",
+            "detail": (
+                "All eight source-controlled event-market live release gates "
+                "remain closed; caller-supplied risk-context flags cannot "
+                "override this independent gateway check."
+            ),
+        },
+        {
             "code": "event_gateway_not_integrated",
             "detail": (
                 "The event-market gateway is not connected to the Paper signal "
@@ -120,6 +128,7 @@ def execution_readiness_payload() -> dict[str, Any]:
             "event_contracts": {
                 "adapter_code_present": True,
                 "integrated_into_paper_worker": False,
+                "source_controlled_release_gates_passed": False,
                 "supported_side": "BUY",
                 "supported_order_type": "FAK",
                 "per_order_geoblock_check": True,

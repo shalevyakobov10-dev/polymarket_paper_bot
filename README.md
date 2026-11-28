@@ -48,6 +48,7 @@ The service listens on port 8080 by default. Routes:
 - `/learning`: realized forecast feedback, rolling error metrics, and a restart-safe research champion/challenger governance ledger
 - `/execution-readiness`: read-only, fail-closed diagnostics for prerequisites to any future live-launch review; never enables or submits orders
 - `/unified-paper-risk`: read-only combined snapshot of the Event Paper and isolated-margin Perps Paper ledgers; returns unavailable when either ledger, its UTC-day baseline, or fresh/cross-venue marks cannot be verified. Combined starting capital and combined peak/drawdown remain explicitly unavailable until a shared high-water-mark ledger exists. This endpoint never authorizes an entry; the shared admission coordinator is not yet wired into either engine.
+- `/event-order-status`: sanitized read-only status from the local Event order journal, separating locally active orders from ambiguous/manual-review intents. It does not query Polymarket, so it never claims venue state is verified; a missing or malformed journal returns unavailable, not an empty book. No submit or cancel controls are exposed.
 - `/event-paper`: sanitized status and paper portfolio metrics for the separately supervised event-aware paper engine; always research-only and non-executable
 - `/perps-market`: sanitized status for the separate public Perps market-data worker
 - `/perps-paper`: sanitized isolated-margin Perps paper-account state, open positions, risk halt, and fee-gated entry readiness; never submits orders
